@@ -30,7 +30,9 @@ for pin in pins:
 try:
     while True:
         for step in step_seq:
+            print(step)
             for pin in range(4):
+                print(pin)
                 GPIO.output(pins[pin], step[pin])
             time.sleep(0.01)  # speed adjustment
 
