@@ -3,32 +3,41 @@
 import RPi.GPIO as GPIO
 import time
 
-# Define GPIO pins connected to IN1-IN4
 IN1 = 17
 IN2 = 18
 IN3 = 27
 IN4 = 22
 
-# Setup
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(IN1, GPIO.OUT)
-GPIO.setup(IN2, GPIO.OUT)
-GPIO.setup(IN3, GPIO.OUT)
-GPIO.setup(IN4, GPIO.OUT)
+# Coil energizing sequence
+step_seq = [
+    [1,0,0,1],
+    [1,0,0,0],
+    [1,1,0,0],
+    [0,1,0,0],
+    [0,1,1,0],
+    [0,0,1,0],
+    [0,0,1,1],
+    [0,0,0,1]
+]
 
-# Simple test pattern
-def servo_test():
-    pins = [IN1, IN2, IN3, IN4]
-    for pin in pins:
-        GPIO.output(pin, GPIO.HIGH)
-        time.sleep(0.5)
-        GPIO.output(pin, GPIO.LOW)
+GPIO.setmode(GPIO.BCM)
+pins = [IN1, IN2, IN3, IN4]
+
+for pin in pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, 0)
 
 try:
     while True:
-        servo_test()
+        for step in step_seq:
+            for pin in range(4):
+                GPIO.output(pins[pin], step[pin])
+            time.sleep(0.01)  # speed adjustment
 
 except KeyboardInterrupt:
+    print("Exiting...")
+    GPIO.cleanup()
+
     print("Stopped by user")
 
 finally:
