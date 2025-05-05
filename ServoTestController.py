@@ -31,7 +31,7 @@ DEGREES_PER_STEP = 360.0 / STEPS_PER_REV
 # Position tracking
 current_angle = 0
 
-def move_to_angle(target_angle, delay=0.001):
+def cdmove_to_angle(target_angle, delay=0.001):
     global current_angle
     step_diff = int((target_angle - current_angle) / DEGREES_PER_STEP)
     
