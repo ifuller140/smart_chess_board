@@ -1,50 +1,88 @@
+"""
+This Raspberry Pi code was developed by newbiely.com
+This Raspberry Pi code is made available for public use without any restriction
+For comprehensive instructions and wiring diagrams, please visit:
+https://newbiely.com/tutorials/raspberry-pi/raspberry-pi-28byj-48-stepper-motor-uln2003-driver
+"""
+
+
 import RPi.GPIO as GPIO
 import time
+
+# Define GPIO pins for ULN2003 driver
+IN1 = 23
+IN2 = 24
+IN3 = 25
+IN4 = 8
+
+# Set GPIO mode and configure pins
 GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
-coil_A_1_pin = 17 # IN1
-coil_A_2_pin = 18 # IN2
-coil_B_1_pin = 21 # IN3
-coil_B_2_pin = 22 # IN4
+GPIO.setup(IN1, GPIO.OUT)
+GPIO.setup(IN2, GPIO.OUT)
+GPIO.setup(IN3, GPIO.OUT)
+GPIO.setup(IN4, GPIO.OUT)
 
-# adjust if different
-StepCount=8
-Seq = [[1,0,0,1],
-       [1,0,0,0],
-       [1,1,0,0],
-       [0,1,0,0],
-       [0,1,1,0],
-       [0,0,1,0],
-       [0,0,1,1],
-       [0,0,0,1]]
+# Define constants
+DEG_PER_STEP = 1.8
+STEPS_PER_REVOLUTION = int(360 / DEG_PER_STEP)
 
-GPIO.setup(coil_A_1_pin, GPIO.OUT)
-GPIO.setup(coil_A_2_pin, GPIO.OUT)
-GPIO.setup(coil_B_1_pin, GPIO.OUT)
-GPIO.setup(coil_B_2_pin, GPIO.OUT)
+# Define sequence for 28BYJ-48 stepper motor
+seq = [
+    [1, 0, 0, 1],
+    [1, 0, 0, 0],
+    [1, 1, 0, 0],
+    [0, 1, 0, 0],
+    [0, 1, 1, 0],
+    [0, 0, 1, 0],
+    [0, 0, 1, 1],
+    [0, 0, 0, 1]
+]
 
-def setStep(w1, w2, w3, w4):
-    GPIO.output(coil_A_1_pin, w1)
-    GPIO.output(coil_A_2_pin, w2)
-    GPIO.output(coil_B_1_pin, w3)
-    GPIO.output(coil_B_2_pin, w4)
+# Function to rotate the stepper motor one step
+def step(delay, step_sequence):
+    for i in range(4):
+        GPIO.output(IN1, step_sequence[i][0])
+        GPIO.output(IN2, step_sequence[i][1])
+        GPIO.output(IN3, step_sequence[i][2])
+        GPIO.output(IN4, step_sequence[i][3])
+        time.sleep(delay)
 
-def forward(delay, steps):
-    for i in range(steps):
-        for j in range(StepCount):
-            setStep(Seq[j][0], Seq[j][1], Seq[j][2], Seq[j][3])
-            time.sleep(delay)
+# Function to move the stepper motor one step forward
+def step_forward(delay, steps):
+    for _ in range(steps):
+        step(delay, seq[0])
+        step(delay, seq[1])
+        step(delay, seq[2])
+        step(delay, seq[3])
 
-def backwards(delay, steps):
-    for i in range(steps):
-        for j in reversed(range(StepCount)):
-            setStep(Seq[j][0], Seq[j][1], Seq[j][2], Seq[j][3])
-            time.sleep(delay)
+# Function to move the stepper motor one step backward
+def step_backward(delay, steps):
+    for _ in range(steps):
+        step(delay, seq[3])
+        step(delay, seq[2])
+        step(delay, seq[1])
+        step(delay, seq[0])
 
-if __name__ == '__main__':
+try:
+    # Set the delay between steps
+    delay = 0.005
+
     while True:
-        delay = input("Time Delay (ms)?")
-        steps = input("How many steps forward? ")
-        forward(int(delay) / 1000.0, int(steps))
-        steps = input("How many steps backwards? ")
-        backwards(int(delay) / 1000.0, int(steps))
+        # Rotate one revolution forward (clockwise)
+        step_forward(delay, STEPS_PER_REVOLUTION)
+
+        # Pause for 2 seconds
+        time.sleep(2)
+
+        # Rotate one revolution backward (anticlockwise)
+        step_backward(delay, STEPS_PER_REVOLUTION)
+
+        # Pause for 2 seconds
+        time.sleep(2)
+
+except KeyboardInterrupt:
+    print("\nExiting the script.")
+
+finally:
+    # Clean up GPIO settings
+    GPIO.cleanup()
