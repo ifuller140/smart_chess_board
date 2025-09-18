@@ -171,3 +171,13 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# SolidWorks
+~$*.*
+*.bak
+*.swar
+*.swb
+*.swx
+*.slddrw.swar
+*.sldprt.swar
+*.sldasm.swar
