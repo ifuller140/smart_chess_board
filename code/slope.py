@@ -2,10 +2,10 @@ import RPi.GPIO as GPIO
 import time
 
 # Define GPIO pins connected to ULN2003 IN1-IN4
-IN1 = 24
-IN2 = 23
-IN3 = 22
-IN4 = 27
+IN1 = 2
+IN2 = 3
+IN3 = 4
+IN4 = 14
 
 # Setup GPIO mode
 GPIO.setmode(GPIO.BCM)
