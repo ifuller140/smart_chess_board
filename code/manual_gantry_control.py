@@ -69,25 +69,49 @@ def move_y(steps, delay=0.002):
     """Move Y-axis: motors opposite directions."""
     direction = 1 if steps > 0 else -1
     move_both(direction, -direction, abs(steps), delay)
+    
+def move_diaagonal(x_steps, y_steps, delay=0.002):
+    """Move diagonally by combining X and Y movements."""
+    x_direction = 1 if x_steps > 0 else -1
+    y_direction = 1 if y_steps > 0 else -1
+    steps = max(abs(x_steps), abs(y_steps))
+    
+    for _ in range(steps):
+        step_motor(motorA_pins, x_direction, delay)
+        step_motor(motorB_pins, y_direction, delay)
 
 # ==========================
 # MAIN LOOP: KEYBOARD CONTROL
 # ==========================
 try:
     step_size = 20     # Number of steps per key press
-    delay = 0.0015     # Step timing (lower = faster)
+    delay = 0.002     # Step timing (lower = faster)
 
     print("Manual Gantry Control Active!")
     print("Use arrow keys to move. Press 'q' to quit.\n")
 
     while True:
         if keyboard.is_pressed('up'):
-            print("Moving UP (Y+)")
-            move_y(step_size, delay)
+            if keyboard.is_pressed('left'):
+                print("Moving UP-LEFT (Y+X-)")
+                move_diaagonal(-step_size, step_size, delay)
+            elif keyboard.is_pressed('right'):
+                print("Moving UP-RIGHT (Y+X+)")
+                move_diaagonal(step_size, step_size, delay)
+            else:
+                print("Moving UP (Y+)")
+                move_y(step_size, delay)
 
         elif keyboard.is_pressed('down'):
-            print("Moving DOWN (Y-)")
-            move_y(-step_size, delay)
+            if keyboard.is_pressed('left'):
+                print("Moving DOWN-LEFT (Y-X-)")
+                move_diaagonal(-step_size, -step_size, delay)
+            elif keyboard.is_pressed('right'):
+                print("Moving DOWN-RIGHT (Y-X+)")
+                move_diaagonal(step_size, -step_size, delay)
+            else:
+                print("Moving DOWN (Y-)")
+                move_y(-step_size, delay)
 
         elif keyboard.is_pressed('left'):
             print("Moving LEFT (X-)")
