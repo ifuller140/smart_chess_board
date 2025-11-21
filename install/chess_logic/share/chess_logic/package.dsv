@@ -1,0 +1,12 @@
+source;share/chess_logic/hook/path.ps1
+source;share/chess_logic/hook/path.dsv
+source;share/chess_logic/hook/path.sh
+source;share/chess_logic/hook/pythonpath.ps1
+source;share/chess_logic/hook/pythonpath.dsv
+source;share/chess_logic/hook/pythonpath.sh
+source;share/chess_logic/hook/pythonscriptspath.ps1
+source;share/chess_logic/hook/pythonscriptspath.dsv
+source;share/chess_logic/hook/pythonscriptspath.sh
+source;share/chess_logic/hook/ament_prefix_path.ps1
+source;share/chess_logic/hook/ament_prefix_path.dsv
+source;share/chess_logic/hook/ament_prefix_path.sh

@@ -1,0 +1,5 @@
+string fen               # Current board state
+---
+string best_move_uci     # e.g., "e2e4"
+float32 think_time
+bool success
