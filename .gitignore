@@ -181,3 +181,6 @@ cython_debug/
 *.slddrw.swar
 *.sldprt.swar
 *.sldasm.swar
+
+# Mac Folder
+*.DS_Store
