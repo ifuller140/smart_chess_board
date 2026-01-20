@@ -11,7 +11,8 @@
 | Raspberry Pi 4B (4GB) | 1 | $55 | Various | RPI4-MODBP-4GB | ✅ |
 | 28BYJ-48 Stepper Motor | 2 | $5 ea | Amazon/AliExpress | 28BYJ-48 | ⬜ |
 | ULN2003 Driver Board | 2 | $2 ea | Amazon/AliExpress | ULN2003A | ⬜ |
-| SG90 Micro Servo | 1 | $3 | Amazon/AliExpress | SG90 | ⬜ |
+| SG90 Micro Servo (Z-axis) | 1 | $3 | Amazon/AliExpress | SG90 | ⬜ |
+| SG90 Micro Servo (Clock) | 1 | $3 | Amazon/AliExpress | SG90 | ⬜ |
 | Electromagnet 5V | 1 | $8 | Amazon | P20/15 | ⬜ |
 | RPi Camera Module v2 | 1 | $25 | Various | RPI-CAM-V2 | ⬜ |
 | Micro Limit Switch | 3 | $1 ea | Amazon | KW12-3 | ⬜ |
@@ -157,6 +158,56 @@ Step  IN1  IN2  IN3  IN4
 
 ---
 
+## Clock Servo (SG90)
+
+> **NEW**: Second servo mounted under the chess clock to "hit" the clock button after computer's move.
+
+### Purpose
+After the computer completes its move, the clock servo actuates to press the clock button, switching the timer to the human player.
+
+### Mounting Position
+```
+┌─────────────────────────────────────┐
+│          CHESS CLOCK                │
+│   ┌─────────────┬─────────────┐     │
+│   │   WHITE     │   BLACK     │     │
+│   │   05:00     │   05:00     │     │
+│   └──────┬──────┴──────┬──────┘     │
+│          │             │            │
+│      ┌───┴───┐     ┌───┴───┐        │
+│      │ BUTTON│     │ BUTTON│        │
+│      └───┬───┘     └───┬───┘        │
+│          │             │            │
+│      ┌───┴─────────────┴───┐        │
+│      │   CLOCK SERVO       │← Hits button
+│      │   (SG90)            │        │
+│      └─────────────────────┘        │
+└─────────────────────────────────────┘
+```
+
+### Specifications
+| Parameter | Value |
+|-----------|-------|
+| Model | SG90 (same as Z-axis) |
+| Operating Voltage | 4.8V - 6V |
+| Control Signal | PWM (50Hz) |
+| Rest Position | Servo horn away from button |
+| Hit Position | Servo horn presses button |
+
+<!-- USER_ATTENTION: Define which button (white/black) the servo hits and calibrate PWM values -->
+
+### Configuration
+```yaml
+clock_servo_node:
+  ros__parameters:
+    clock_servo_pin: 16          # BCM pin (hardware PWM or software PWM)
+    rest_pwm: 2.5                # Duty cycle for rest position
+    hit_pwm: 7.5                 # Duty cycle for button press
+    hit_duration: 0.3            # How long to hold hit position (seconds)
+```
+
+---
+
 ## Electromagnet
 
 ### Specifications (Typical P20/15 5V)
@@ -197,12 +248,35 @@ Step  IN1  IN2  IN3  IN4
 - Minimum 720p resolution recommended
 - Check `/dev/video0` for device
 
-### Mounting
-<!-- USER_ATTENTION: Define exact camera mounting position and height -->
+### Mounting Position
 
-- Mount directly above board center
-- Height: ~300-400mm above board (adjust for FOV coverage)
-- Orientation: Aligned with board edges (a-file left, 8-rank top)
+**Actual Camera Setup**:
+| Parameter | Value |
+|-----------|-------|
+| Horizontal offset | 2 inches (~50mm) behind board |
+| Height above board | 7 inches (~178mm) |
+| Tilt angle | 45 degrees down toward board |
+| Field of view | Covers all 64 squares |
+
+```
+Side View:
+                                    ┌─────┐
+                                    │ CAM │
+                                    └──┬──┘
+                                       │╲  45°
+                                       │ ╲
+          7 inches                     │  ╲
+                                       │   ╲
+                                       │    ╲ (view direction)
+    ─────────────────────────────┬─────┴─────────────────────
+                                 │
+          BOARD                  │ 2 inches (behind)
+    ══════════════════════════════════════════════════════
+```
+
+> [!IMPORTANT]
+> Camera is NOT directly above the board. Perspective correction is required.
+> See [docs/features/vision-calibration.md](../features/vision-calibration.md) for calibration procedure.
 
 ---
 

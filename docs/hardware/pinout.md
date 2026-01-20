@@ -21,8 +21,10 @@
 | IN2 | 24 | 18 | <!-- USER: color --> | Phase B |
 | IN3 | 25 | 22 | <!-- USER: color --> | Phase C |
 | IN4 | 5 | 29 | <!-- USER: color --> | Phase D |
-| **Servo** | | | | |
+| **Z-Axis Servo (Gantry)** | | | | |
 | PWM Signal | 12 | 32 | Orange | Hardware PWM |
+| **Clock Servo (NEW)** | | | | |
+| PWM Signal | 16 | 36 | <!-- USER: color --> | Hits clock button |
 | **Limit Switches** | | | | |
 | X-MIN | 6 | 31 | <!-- USER: color --> | Pull-up enabled |
 | Y-MIN | 13 | 33 | <!-- USER: color --> | Pull-up enabled |
@@ -53,9 +55,9 @@
                     GND  (25) (26) GPIO7
                   GPIO0  (27) (28) GPIO1
    Stepper B IN4   GPIO5 (29) (30) GND
-       X-MIN       GPIO6 (31) (32) GPIO12  Servo PWM
+       X-MIN       GPIO6 (31) (32) GPIO12  Z-Axis Servo
        Y-MIN      GPIO13 (33) (34) GND
-    Clock Hit     GPIO19 (35) (36) GPIO16
+    Clock Hit     GPIO19 (35) (36) GPIO16  Clock Servo ← NEW
                  GPIO26  (37) (38) GPIO20
                     GND  (39) (40) GPIO21
 ```
@@ -109,7 +111,20 @@ servo_node:
 <!-- USER_ATTENTION: Calibrate engage_pwm and release_pwm for your Z-axis mechanism -->
 
 > [!NOTE]
-> GPIO 12, 13, 18, 19 support hardware PWM. Using GPIO 12 for best servo control.
+> GPIO 12, 13, 18, 19 support hardware PWM. Using GPIO 12 for Z-axis servo.
+> GPIO 16 used for clock servo (software PWM).
+
+### Clock Servo (NEW)
+```yaml
+clock_servo_node:
+  ros__parameters:
+    clock_servo_pin: 16         # Hits clock button after computer move
+    rest_pwm: 2.5               # Servo at rest (away from button)
+    hit_pwm: 7.5                # Servo pressing button
+    hit_duration: 0.3           # Seconds to hold button
+```
+
+<!-- USER_ATTENTION: Calibrate rest_pwm and hit_pwm for your clock button position -->
 
 ### Limit Switches
 ```yaml
@@ -190,8 +205,9 @@ Before assigning new pins, verify no conflicts:
 |---------|-------------------|
 | 5 | Stepper B IN4 |
 | 6 | X-MIN Limit Switch |
-| 12 | Servo PWM |
+| 12 | Z-Axis Servo (gantry) |
 | 13 | Y-MIN Limit Switch |
+| 16 | Clock Servo (NEW) |
 | 17 | Stepper A IN1 |
 | 18 | Stepper A IN2 |
 | 19 | Clock Hit Switch |
@@ -201,7 +217,7 @@ Before assigning new pins, verify no conflicts:
 | 25 | Stepper B IN3 |
 | 27 | Stepper A IN3 |
 
-**Available pins**: 4, 7, 8, 9, 10, 11, 14, 15, 16, 20, 21, 26
+**Available pins**: 4, 7, 8, 9, 10, 11, 14, 15, 20, 21, 26
 
 ---
 

@@ -44,10 +44,11 @@ smart_chess_board/
 |-----------|-------|---------|--------|
 | Controller | Raspberry Pi 4B (4GB) | Main compute | ✅ Working |
 | Stepper Motors | 28BYJ-48 + ULN2003 (×2) | CoreXY gantry X/Y | ⚠️ Testing |
-| Servo | SG90 | Z-axis / Magnet lift | ⚠️ Testing |
+| Z-Axis Servo | SG90 | Magnet lift | ⚠️ Testing |
+| Clock Servo | SG90 | Hits clock button | ⚠️ Testing |
 | Electromagnet | 5V DC | Piece pickup | ⚠️ Testing |
 | Camera | RPi Camera Module v2 | Board detection | ⚠️ Testing |
-| Limit Switches | Micro switches (×3) | Homing + clock | ⚠️ Testing |
+| Limit Switches | Micro switches (×3) | Homing + clock hit | ⚠️ Testing |
 
 <!-- USER_ATTENTION: Update status markers as components are verified -->
 
@@ -76,7 +77,7 @@ smart_chess_board/
 2. **BCM Pin Numbering**: All GPIO uses BCM numbering, NOT physical pin numbers
 3. **GPIO Cleanup**: Always call `GPIO.cleanup()` on node shutdown
 4. **Step Timing**: Stepper minimum delay is 0.001s between steps
-5. **Camera Position**: Camera is mounted directly above center of board
+5. **Camera Position**: Camera is 2" behind board, 7" above, 45° angle (requires perspective correction)
 
 ## Agent Task Guidelines
 
@@ -106,10 +107,37 @@ smart_chess_board/
 - [ ] Camera-based board detection
 - [ ] Piece identification (by color/size)
 - [ ] Full game loop (detect move → respond)
-- [ ] Chess clock integration
+- [ ] Chess clock integration (servo hits clock after computer move)
 - [ ] Voice feedback system
 - [ ] Web interface for game monitoring
 - [ ] PGN game export
+
+## Hardware Testing Suite
+
+Run hardware tests to validate components:
+
+```bash
+# On Raspberry Pi
+cd ~/smart_chess_ws/src/smart_chess_board
+
+# List available tests
+python3 -m chess_hw_interface.testing.test_runner --list
+
+# Run all tests
+python3 -m chess_hw_interface.testing.test_runner --all
+
+# Run specific test category
+python3 -m chess_hw_interface.testing.test_runner --test gantry
+python3 -m chess_hw_interface.testing.test_runner --test servo
+python3 -m chess_hw_interface.testing.test_runner --test camera
+python3 -m chess_hw_interface.testing.test_runner --test magnet
+python3 -m chess_hw_interface.testing.test_runner --test clock
+
+# Mock mode (no real GPIO, for development)
+python3 -m chess_hw_interface.testing.test_runner --mock --all
+```
+
+Tests use the clock display for feedback and clock button for user confirmation.
 
 ## Known Issues
 
@@ -129,6 +157,8 @@ smart_chess_board/
 | [software/architecture.md](docs/software/architecture.md) | System design | Understanding data flow |
 | [software/nodes.md](docs/software/nodes.md) | Node reference | Modifying/adding nodes |
 | [features/corexy-gantry.md](docs/features/corexy-gantry.md) | Motion system | Motion control work |
+| [features/moving-logic.md](docs/features/moving-logic.md) | Piece movement planning | Collision avoidance |
+| [features/vision-calibration.md](docs/features/vision-calibration.md) | Camera calibration | Vision work |
 
 ## Workflow Files
 

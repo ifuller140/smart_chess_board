@@ -10,10 +10,12 @@ This section contains detailed technical documentation for each major feature of
 
 | Document | Feature | Status |
 |----------|---------|--------|
-| [corexy-gantry.md](corexy-gantry.md) | CoreXY motion system | In Development |
-| [piece-detection.md](piece-detection.md) | Computer vision pipeline | Planned |
-| [game-logic.md](game-logic.md) | Chess engine integration | Planned |
-| [magnet-system.md](magnet-system.md) | Electromagnet piece pickup | Planned |
+| [corexy-gantry.md](corexy-gantry.md) | CoreXY motion system | 🔄 In Development |
+| [moving-logic.md](moving-logic.md) | Collision-aware piece movement | 🔄 In Development |
+| [vision-calibration.md](vision-calibration.md) | Camera calibration & perspective | 📋 Planned |
+| [piece-detection.md](piece-detection.md) | Computer vision pipeline | 📋 Planned |
+| [game-logic.md](game-logic.md) | Chess engine integration | 📋 Planned |
+| [magnet-system.md](magnet-system.md) | Electromagnet piece pickup | 📋 Planned |
 
 ## Feature Status Legend
 
@@ -24,6 +26,22 @@ This section contains detailed technical documentation for each major feature of
 | 📋 Planned | Designed but not yet implemented |
 | ⚠️ Blocked | Waiting on dependencies |
 
+## Hardware Testing Suite
+
+Before implementing features, validate hardware with the testing suite:
+
+```bash
+# Run all hardware tests
+python3 -m chess_hw_interface.testing.test_runner --all
+
+# Run specific category
+python3 -m chess_hw_interface.testing.test_runner --test gantry
+```
+
+**Available test categories:** gantry, servo, camera, magnet, clock
+
+See [AGENTS.md](../../AGENTS.md#hardware-testing-suite) for full CLI reference.
+
 ## Feature Roadmap
 
 <!-- USER_ATTENTION: Update this roadmap with your priorities -->
@@ -31,16 +49,17 @@ This section contains detailed technical documentation for each major feature of
 ### Phase 1: Hardware Validation
 - [ ] Motor control (stepper calibration)
 - [ ] Servo + magnet testing
-- [ ] Limit switch homing
-- [ ] Camera image capture
+- [ ] Limit switch homing (Prusa-style)
+- [ ] Camera image capture + calibration
 
 ### Phase 2: Core Motion
 - [ ] CoreXY kinematics
 - [ ] Homing sequence
 - [ ] Basic move commands
+- [ ] Collision-aware path planning
 
 ### Phase 3: Perception
-- [ ] Board detection
+- [ ] Board detection with perspective correction
 - [ ] Piece identification
 - [ ] FEN generation
 
@@ -48,12 +67,14 @@ This section contains detailed technical documentation for each major feature of
 - [ ] State machine
 - [ ] Move detection
 - [ ] Engine integration
+- [ ] Clock servo (hit button after computer move)
 
 ### Phase 5: Polish
-- [ ] Chess clock
+- [ ] Chess clock display
 - [ ] Error recovery
 - [ ] User interface
 
 ---
 
 *See individual feature docs for implementation details.*
+
