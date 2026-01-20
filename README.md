@@ -1,59 +1,101 @@
-# Smart Chess Board - ROS 2 System
+# Smart Chess Board
 
-This repository contains the ROS 2 software stack for the Smart Chess Board project.
+An automated chess board that plays physical chess against a human opponent using computer vision, a CoreXY gantry system with electromagnet, and the Stockfish chess engine.
+
+> **🤖 AI Agents**: Start with [`AGENTS.md`](AGENTS.md) for project context and guidelines.
+
+## Features
+
+- 🎯 **Automated piece movement** via CoreXY gantry with electromagnet
+- 📷 **Computer vision** for board state detection
+- 🧠 **Stockfish integration** for move calculation
+- ⏱️ **Chess clock** support (planned)
+- 🔄 **ROS 2 architecture** for modular, reliable operation
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [AGENTS.md](AGENTS.md) | **Start here** - Agent entry point |
+| [docs/CONTEXT.md](docs/CONTEXT.md) | Full project context |
+| [docs/hardware/](docs/hardware/) | Hardware specifications & wiring |
+| [docs/software/](docs/software/) | Software architecture |
+| [docs/features/](docs/features/) | Feature deep-dives |
 
 ## Hardware Requirements
-*   Raspberry Pi 4B (or newer)
-*   2x Stepper Motors (28BYJ-48 + ULN2003)
-*   1x Servo Motor (SG90 or similar)
-*   3x Limit Switches
-*   Raspberry Pi Camera Module (or USB Webcam)
-*   CoreXY Gantry Frame
 
-## Software Dependencies
-*   Ubuntu 22.04 (Jammy)
-*   ROS 2 Humble (or Iron)
-*   Python 3 packages: `rpi.gpio`, `opencv-python`, `python-chess`
+| Component | Model | Quantity |
+|-----------|-------|----------|
+| Controller | Raspberry Pi 4B (4GB+) | 1 |
+| Stepper Motors | 28BYJ-48 + ULN2003 | 2 |
+| Servo Motor | SG90 | 1 |
+| Electromagnet | 5V DC (~2.5kg hold) | 1 |
+| Camera | RPi Camera Module v2 or USB | 1 |
+| Limit Switches | Micro switch | 3 |
 
-### Installation on Raspberry Pi
+See [docs/hardware/components.md](docs/hardware/components.md) for full specifications.
 
-1.  **Install ROS 2 Humble**: Follow official instructions.
-2.  **Install System Dependencies**:
-    ```bash
-    sudo apt update
-    sudo apt install python3-pip python3-opencv
-    pip3 install python-chess RPi.GPIO
-    ```
-3.  **Clone & Build**:
-    ```bash
-    mkdir -p ~/smart_chess_ws/src
-    cd ~/smart_chess_ws/src
-    # Clone this repo here
-    cd ~/smart_chess_ws
-    colcon build
-    source install/setup.bash
-    ```
+## Quick Start
+
+### 1. Install Dependencies
+
+```bash
+# ROS 2 Humble (see docs.ros.org for full instructions)
+sudo apt install ros-humble-ros-base
+
+# Python packages
+pip3 install RPi.GPIO python-chess opencv-python
+```
+
+### 2. Build & Run
+
+```bash
+mkdir -p ~/smart_chess_ws/src
+cd ~/smart_chess_ws/src
+git clone <this-repo> smart_chess_board
+cd ~/smart_chess_ws
+colcon build
+source install/setup.bash
+ros2 launch src/smart_chess_board/src/launch/full_system_launch.py
+```
+
+### 3. Test Hardware
+
+Use the `/hardware-test` workflow to validate components before full operation.
+
+## Project Structure
+
+```
+smart_chess_board/
+├── AGENTS.md              # AI agent entry point
+├── docs/                  # All documentation
+├── src/                   # ROS 2 packages
+│   ├── chess_hw_interface/
+│   ├── chess_perception/
+│   ├── chess_logic/
+│   └── gantry_control/
+├── code/                  # Standalone test scripts
+├── cad/                   # CAD files
+└── .agent/workflows/      # Agent task workflows
+```
 
 ## Configuration
-Edit `src/chess_hw_interface/config/pins.yaml` to match your exact wiring.
 
-## Running the System
+Edit GPIO pins in `src/chess_hw_interface/config/pins.yaml` to match your wiring.
 
-1.  **Start Everything**:
-    ```bash
-    ros2 launch src/launch/full_system_launch.py
-    ```
+See [docs/hardware/pinout.md](docs/hardware/pinout.md) for pin assignments.
 
-2.  **Homing**:
-    The system will auto-home if configured, or run manually:
-    ```bash
-    ros2 run gantry_control homing_node
-    ```
+## Contributing
 
-3.  **Start Game**:
-    Press the clock button to trigger the first move detection.
+1. Read [AGENTS.md](AGENTS.md) for project context
+2. Follow the `/code-review` workflow checklist
+3. Update documentation for any changes
+4. Test on hardware before submitting
 
-## Troubleshooting
-*   **Camera**: Check connection with `libcamera-hello`. If using USB, check `/dev/video0`.
-*   **Motors**: Verify 5V power supply is separate from Pi logic power.
-*   **Permissions**: Ensure user is in `dialout` and `gpio` groups.
+## License
+
+MIT License - see [LICENSE](LICENSE)
+
+---
+
+*Built with ROS 2 Humble on Raspberry Pi*
