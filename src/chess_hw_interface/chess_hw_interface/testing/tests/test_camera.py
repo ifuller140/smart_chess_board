@@ -154,14 +154,6 @@ class CameraTest(HardwareTest):
         calibration_dir = os.path.join(self.OUTPUT_DIR, "calibration")
         os.makedirs(calibration_dir, exist_ok=True)
         
-        # In mock mode, just simulate success
-        if self.gpio is None or self.gpio.mock:
-            print("  [MOCK] Simulating 5 calibration captures...")
-            for i in range(5):
-                print(f"    Captured calibration_{i+1}.jpg")
-                time.sleep(0.2)
-            return True
-        
         images_captured = 0
         target_images = 5
         
@@ -198,8 +190,7 @@ class CameraTest(HardwareTest):
             import cv2
             import numpy as np
         except ImportError:
-            print("  [MOCK] OpenCV not available, skipping board detection")
-            return True
+            raise ImportError("OpenCV (cv2) is required for board detection")
         
         # Capture fresh image
         test_image = os.path.join(self.OUTPUT_DIR, "detection_test.jpg")

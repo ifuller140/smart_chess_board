@@ -75,7 +75,7 @@ class GantryKinematicsNode(Node):
         cmd.y = float(steps_b)
         self.stepper_pub.publish(cmd)
         
-        # 5. Simulate Wait for Completion (Open Loop)
+        # 5. Wait for Completion (Open Loop)
         # Calculate expected time based on speed
         distance = math.sqrt(dx_mm**2 + dy_mm**2)
         speed = goal.speed_mm_s if goal.speed_mm_s > 0 else self.max_speed

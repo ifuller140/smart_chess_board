@@ -37,80 +37,63 @@ class GPIOInterface:
     """
     GPIO interface for hardware tests.
     
-    Wraps RPi.GPIO for consistent access.
+    Wraps RPi.GPIO for consistent access. Requires real hardware.
     """
     
-    def __init__(self, mock: bool = False):
+    # Pin assignments (BCM numbering)
+    PIN_X_LIMIT = 6       # X-MIN limit switch
+    PIN_Y_LIMIT = 13      # Y-MIN limit switch
+    PIN_CLOCK_BUTTON = 19 # Clock button
+    
+    def __init__(self):
         """
-        Initialize GPIO interface.
+        Initialize GPIO interface and setup common input pins.
         
-        Args:
-            mock: If True, don't use real GPIO (for testing on non-Pi)
+        Raises:
+            ImportError: If RPi.GPIO is not available
         """
-        self.mock = mock
-        self._pin_states = {}
+        import RPi.GPIO as GPIO
+        self.GPIO = GPIO
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
         
-        if not mock:
-            try:
-                import RPi.GPIO as GPIO
-                self.GPIO = GPIO
-                GPIO.setmode(GPIO.BCM)
-                GPIO.setwarnings(False)
-            except ImportError:
-                print("[WARNING] RPi.GPIO not available, using mock mode")
-                self.mock = True
-                self.GPIO = None
-        else:
-            self.GPIO = None
+        # Setup common input pins with pull-ups (limit switches and clock button are active LOW)
+        GPIO.setup(self.PIN_X_LIMIT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(self.PIN_Y_LIMIT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(self.PIN_CLOCK_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     
     def setup_output(self, pin: int):
         """Configure pin as output."""
-        if self.mock:
-            self._pin_states[pin] = False
-        else:
-            self.GPIO.setup(pin, self.GPIO.OUT)
+        self.GPIO.setup(pin, self.GPIO.OUT)
     
     def setup_input(self, pin: int, pull_up: bool = True):
         """Configure pin as input with optional pull-up."""
-        if self.mock:
-            self._pin_states[pin] = True if pull_up else False
-        else:
-            pud = self.GPIO.PUD_UP if pull_up else self.GPIO.PUD_DOWN
-            self.GPIO.setup(pin, self.GPIO.IN, pull_up_down=pud)
+        pud = self.GPIO.PUD_UP if pull_up else self.GPIO.PUD_DOWN
+        self.GPIO.setup(pin, self.GPIO.IN, pull_up_down=pud)
     
     def write(self, pin: int, value: bool):
         """Write to output pin."""
-        if self.mock:
-            self._pin_states[pin] = value
-        else:
-            self.GPIO.output(pin, self.GPIO.HIGH if value else self.GPIO.LOW)
+        self.GPIO.output(pin, self.GPIO.HIGH if value else self.GPIO.LOW)
     
     def read(self, pin: int) -> bool:
         """Read from input pin."""
-        if self.mock:
-            return self._pin_states.get(pin, False)
-        else:
-            return self.GPIO.input(pin) == self.GPIO.HIGH
+        return self.GPIO.input(pin) == self.GPIO.HIGH
     
     def read_x_limit(self) -> bool:
         """Read X-MIN limit switch (active LOW)."""
-        # BCM pin 6 - returns True when pressed (inverted because pull-up)
-        return not self.read(6) if not self.mock else False
+        return not self.read(self.PIN_X_LIMIT)
     
     def read_y_limit(self) -> bool:
         """Read Y-MIN limit switch (active LOW)."""
-        # BCM pin 13
-        return not self.read(13) if not self.mock else False
+        return not self.read(self.PIN_Y_LIMIT)
     
     def read_clock_button(self) -> bool:
         """Read clock hit button (active LOW)."""
-        # BCM pin 19
-        return not self.read(19) if not self.mock else False
+        return not self.read(self.PIN_CLOCK_BUTTON)
     
     def cleanup(self):
         """Cleanup GPIO on exit."""
-        if not self.mock and self.GPIO:
-            self.GPIO.cleanup()
+        self.GPIO.cleanup()
 
 
 def run_test(
@@ -125,7 +108,7 @@ def run_test(
     Args:
         test_name: Name of test to run (from registry)
         gpio: GPIO interface (creates one if not provided)
-        display: Display interface (creates mock if not provided)
+        display: Display interface (creates one if not provided)
         verbose: Print detailed output
         
     Returns:
@@ -211,7 +194,6 @@ Examples:
   %(prog)s --all               Run all tests
   %(prog)s --test gantry       Run gantry test only
   %(prog)s --test servo camera Run specific tests
-  %(prog)s --mock              Run in mock mode (no hardware)
         """
     )
     
@@ -235,12 +217,6 @@ Examples:
     )
     
     parser.add_argument(
-        "--mock", "-m",
-        action="store_true",
-        help="Run in mock mode (no real hardware)"
-    )
-    
-    parser.add_argument(
         "--quiet", "-q",
         action="store_true",
         help="Minimal output"
@@ -248,9 +224,9 @@ Examples:
     
     parser.add_argument(
         "--display",
-        choices=["mock", "seven_segment", "i2c"],
-        default="mock",
-        help="Display type to use (default: mock)"
+        choices=["seven_segment", "i2c"],
+        default="seven_segment",
+        help="Display type to use (default: seven_segment)"
     )
     
     args = parser.parse_args()
@@ -266,7 +242,7 @@ Examples:
         return 1
     
     # Create interfaces
-    gpio = GPIOInterface(mock=args.mock)
+    gpio = GPIOInterface()
     display = create_display(args.display)
     verbose = not args.quiet
     

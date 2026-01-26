@@ -33,8 +33,8 @@ class MagnetTest(HardwareTest):
     
     def setup(self) -> bool:
         """Setup magnet control pin."""
-        if self.gpio is None or self.gpio.mock:
-            return True
+        if self.gpio is None:
+            raise RuntimeError("GPIO interface required - hardware must be connected")
         
         try:
             self.gpio.setup_output(self.MAGNET_PIN)
@@ -123,9 +123,8 @@ class MagnetTest(HardwareTest):
     
     def _set_magnet(self, state: bool):
         """Set magnet state."""
-        if self.gpio is None or self.gpio.mock:
-            print(f"  [MOCK] Magnet {'ON' if state else 'OFF'}")
-            return
+        if self.gpio is None:
+            raise RuntimeError("GPIO interface required - hardware must be connected")
         
         self.gpio.write(self.MAGNET_PIN, state)
     

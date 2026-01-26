@@ -6,12 +6,7 @@ from geometry_msgs.msg import Point
 import time
 import sys
 
-# Try to import RPi.GPIO, fallback to Mock if not available
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-except ImportError:
-    GPIO_AVAILABLE = False
+import RPi.GPIO as GPIO
 
 class StepperDriverNode(Node):
     def __init__(self):
@@ -29,15 +24,12 @@ class StepperDriverNode(Node):
         self.step_delay = self.get_parameter('step_delay_default').value
 
         # GPIO Setup
-        if GPIO_AVAILABLE:
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setwarnings(False)
-            for pin in self.motorA_pins + self.motorB_pins:
-                GPIO.setup(pin, GPIO.OUT)
-                GPIO.output(pin, 0)
-            self.get_logger().info(f"GPIO Initialized. Motor A: {self.motorA_pins}, Motor B: {self.motorB_pins}")
-        else:
-            self.get_logger().warn("RPi.GPIO not found. Running in MOCK mode.")
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        for pin in self.motorA_pins + self.motorB_pins:
+            GPIO.setup(pin, GPIO.OUT)
+            GPIO.output(pin, 0)
+        self.get_logger().info(f"GPIO Initialized. Motor A: {self.motorA_pins}, Motor B: {self.motorB_pins}")
 
         # Define Sequences
         if self.seq_mode == 'half':
@@ -77,9 +69,8 @@ class StepperDriverNode(Node):
             self.stop_motors()
 
     def stop_motors(self):
-        if GPIO_AVAILABLE:
-            for pin in self.motorA_pins + self.motorB_pins:
-                GPIO.output(pin, 0)
+        for pin in self.motorA_pins + self.motorB_pins:
+            GPIO.output(pin, 0)
 
     def command_callback(self, msg):
         if self.emergency_stop:
@@ -131,14 +122,12 @@ class StepperDriverNode(Node):
         # self.stop_motors() 
 
     def set_pins(self, pins, values):
-        if GPIO_AVAILABLE:
-            for pin, val in zip(pins, values):
-                GPIO.output(pin, val)
+        for pin, val in zip(pins, values):
+            GPIO.output(pin, val)
 
     def destroy_node(self):
         self.stop_motors()
-        if GPIO_AVAILABLE:
-            GPIO.cleanup()
+        GPIO.cleanup()
         super().destroy_node()
 
 def main(args=None):

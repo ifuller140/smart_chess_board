@@ -49,8 +49,8 @@ class ServoTest(HardwareTest):
     
     def setup(self) -> bool:
         """Setup PWM for servos."""
-        if self.gpio is None or self.gpio.mock:
-            return True  # Mock mode
+        if self.gpio is None:
+            raise RuntimeError("GPIO interface required - hardware must be connected")
         
         try:
             import RPi.GPIO as GPIO
@@ -131,9 +131,7 @@ class ServoTest(HardwareTest):
     def _set_servo(self, pwm, duty_cycle: float):
         """Set servo position via PWM duty cycle."""
         if pwm is None:
-            print(f"  [MOCK] Set servo to {duty_cycle}% duty cycle")
-            time.sleep(0.5)
-            return
+            raise RuntimeError("PWM not initialized - hardware must be connected")
         
         pwm.ChangeDutyCycle(duty_cycle)
         time.sleep(0.5)  # Wait for servo to reach position

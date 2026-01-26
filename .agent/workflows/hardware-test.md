@@ -4,25 +4,67 @@ description: How to test individual hardware components
 
 # Hardware Testing Workflow
 
-Step-by-step guide for validating hardware components before ROS 2 integration.
+Step-by-step guide for validating hardware components on Raspberry Pi.
+
+> **IMPORTANT**: All hardware tests require a Raspberry Pi with GPIO and physical hardware connected. Tests will NOT work on development machines.
 
 ## Prerequisites
 
+- [ ] Raspberry Pi running **Raspberry Pi OS** or **Ubuntu**
 - [ ] SSH access to Raspberry Pi
 - [ ] All components wired according to `docs/hardware/wiring.md`
 - [ ] Python 3 installed with `RPi.GPIO`
+- [ ] User added to `gpio` group
 
-## 1. Test GPIO Access
+### Quick Setup Check
 
 ```bash
-# Check GPIO permissions
+# On Raspberry Pi:
+
+# 1. Check GPIO permissions
 groups  # Should include 'gpio'
 
-# Test GPIO library
+# 2. Add yourself to gpio group if not present
+sudo usermod -a -G gpio $USER
+# Then logout and login again
+
+# 3. Test GPIO library
 python3 -c "import RPi.GPIO; print('GPIO OK')"
 ```
 
-## 2. Test Stepper Motors
+---
+
+## Automated Test Suite (Recommended)
+
+Run the integrated hardware test suite:
+
+```bash
+cd ~/smart_chess_ws/src/smart_chess_board
+
+# List available tests
+python3 -m chess_hw_interface.testing.test_runner --list
+
+# Run all tests
+python3 -m chess_hw_interface.testing.test_runner --all
+
+# Run specific test
+python3 -m chess_hw_interface.testing.test_runner --test gantry
+python3 -m chess_hw_interface.testing.test_runner --test servo
+python3 -m chess_hw_interface.testing.test_runner --test camera
+python3 -m chess_hw_interface.testing.test_runner --test magnet
+python3 -m chess_hw_interface.testing.test_runner --test clock
+```
+
+The test runner will:
+- Automatically initialize GPIO pins
+- Display test status on the 7-segment display (if connected)
+- Wait for clock button input between test steps
+
+---
+
+## Manual Component Tests
+
+### 1. Test Stepper Motors
 
 ```bash
 cd ~/smart_chess_ws/src/smart_chess_board/code
@@ -33,9 +75,7 @@ python3 square.py
 
 Expected: Motor A rotates ~90 degrees and returns.
 
-<!-- USER_ATTENTION: Update script parameters if using different pins -->
-
-## 3. Test Servo Motor
+### 2. Test Servo Motor
 
 ```bash
 cd ~/smart_chess_ws/src/smart_chess_board/code
@@ -46,10 +86,9 @@ python3 ServoTestController.py
 
 Expected: Servo moves from 0° to 180° and back.
 
-## 4. Test Limit Switches
+### 3. Test Limit Switches
 
 ```bash
-# Quick test - monitor GPIO state
 python3 -c "
 import RPi.GPIO as GPIO
 GPIO.setmode(GPIO.BCM)
@@ -65,7 +104,7 @@ GPIO.cleanup()
 
 Press each switch and re-run to verify detection.
 
-## 5. Test Camera
+### 4. Test Camera
 
 ```bash
 # For CSI camera
@@ -80,10 +119,10 @@ scp pi@raspberrypi:~/test.jpg .
 
 Expected: Clear image of the chess board area.
 
-## 6. Test Electromagnet
+### 5. Test Electromagnet
 
 ```bash
-# WARNING: Ensure magnet is not near sensitive electronics
+# WARNING: Keep magnet away from sensitive electronics
 python3 -c "
 import RPi.GPIO as GPIO
 import time
@@ -101,14 +140,21 @@ GPIO.cleanup()
 
 Expected: Magnet engages (should attract steel).
 
+---
+
 ## Troubleshooting
 
-| Issue | Check |
-|-------|-------|
-| "Permission denied" | Run `sudo usermod -a -G gpio $USER`, re-login |
+| Issue | Solution |
+|-------|----------|
+| `ModuleNotFoundError: RPi.GPIO` | Run `pip3 install RPi.GPIO` |
+| `RuntimeError: Not running on a RPi!` | You must run on actual Raspberry Pi hardware |
+| `RuntimeError: No access to /dev/mem` | Run `sudo usermod -a -G gpio $USER` then re-login |
+| `RuntimeError: You must setup() the GPIO channel first` | Pin not initialized - update test code |
 | No motor movement | Verify 5V power supply connected |
 | Camera not found | Check `vcgencmd get_camera` or `lsusb` |
-| Servo jitters | Add 470µF capacitor to power |
+| Servo jitters | Add 470µF capacitor to power rail |
+
+---
 
 ## Next Steps
 

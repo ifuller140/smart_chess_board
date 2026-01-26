@@ -53,7 +53,7 @@ class GantryTest(HardwareTest):
     def setup(self) -> bool:
         """Setup motor pins as outputs."""
         if self.gpio is None:
-            return True  # Mock mode
+            raise RuntimeError("GPIO interface required - hardware must be connected")
         
         try:
             for pin in self.MOTOR_A_PINS + self.MOTOR_B_PINS:
@@ -175,11 +175,6 @@ class GantryTest(HardwareTest):
         if delay is None:
             delay = self.STEP_DELAY
         
-        if self.gpio is None:
-            # Mock mode - just wait
-            time.sleep(abs(steps) * delay / 10)  # Faster in mock
-            return
-        
         direction = 1 if steps > 0 else -1
         step_count = abs(steps)
         
@@ -247,12 +242,6 @@ class GantryTest(HardwareTest):
             True if homing successful
         """
         print(f"  Homing {axis_name} axis...")
-        
-        if self.gpio is None:
-            # Mock mode
-            print(f"    [MOCK] {axis_name}-axis homed")
-            time.sleep(0.5)
-            return True
         
         # Phase 1: Fast approach
         print(f"    Phase 1: Fast approach to {axis_name}-MIN...")

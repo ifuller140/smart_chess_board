@@ -5,12 +5,7 @@ from std_srvs.srv import SetBool, Trigger
 from std_msgs.msg import String, Bool
 import time
 
-# Try to import RPi.GPIO, fallback to Mock if not available
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-except ImportError:
-    GPIO_AVAILABLE = False
+import RPi.GPIO as GPIO
 
 class ServoNode(Node):
     def __init__(self):
@@ -31,15 +26,12 @@ class ServoNode(Node):
         self.current_state = "unknown"
 
         # GPIO Setup
-        if GPIO_AVAILABLE:
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setwarnings(False)
-            GPIO.setup(self.servo_pin, GPIO.OUT)
-            self.pwm = GPIO.PWM(self.servo_pin, 50) # 50Hz standard for servos
-            self.pwm.start(0)
-            self.get_logger().info(f"Servo Initialized on Pin {self.servo_pin}")
-        else:
-            self.get_logger().warn("RPi.GPIO not found. Running in MOCK mode.")
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        GPIO.setup(self.servo_pin, GPIO.OUT)
+        self.pwm = GPIO.PWM(self.servo_pin, 50) # 50Hz standard for servos
+        self.pwm.start(0)
+        self.get_logger().info(f"Servo Initialized on Pin {self.servo_pin}")
 
         # Services
         self.engage_srv = self.create_service(Trigger, '/servo/engage', self.engage_callback)
@@ -68,13 +60,9 @@ class ServoNode(Node):
         if self.emergency_stop:
             return False
             
-        if GPIO_AVAILABLE and self.pwm:
-            self.pwm.ChangeDutyCycle(duty_cycle)
-            time.sleep(self.move_time)
-            self.pwm.ChangeDutyCycle(0) # Stop sending pulses to prevent jitter
-        else:
-            self.get_logger().info(f"MOCK SERVO: Moving to duty {duty_cycle}")
-            time.sleep(self.move_time)
+        self.pwm.ChangeDutyCycle(duty_cycle)
+        time.sleep(self.move_time)
+        self.pwm.ChangeDutyCycle(0) # Stop sending pulses to prevent jitter
             
         return True
 
@@ -111,8 +99,7 @@ class ServoNode(Node):
     def destroy_node(self):
         if self.pwm:
             self.pwm.stop()
-        if GPIO_AVAILABLE:
-            GPIO.cleanup()
+        GPIO.cleanup()
         super().destroy_node()
 
 def main(args=None):

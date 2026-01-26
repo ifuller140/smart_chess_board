@@ -8,9 +8,12 @@ Steps for deploying the Smart Chess Board software to a Raspberry Pi.
 
 ## Prerequisites
 
-- [ ] Raspberry Pi 4B with Ubuntu 22.04 installed
+> **IMPORTANT**: This project requires real Raspberry Pi hardware with GPIO. The code will NOT run on development machines without RPi.GPIO.
+
+- [ ] Raspberry Pi 4B with Ubuntu 22.04 or Raspberry Pi OS
 - [ ] Network connectivity (SSH access)
 - [ ] ROS 2 Humble installed on Pi
+- [ ] All physical hardware components connected (steppers, servos, limit switches, camera)
 
 ## 1. Install ROS 2 Humble
 

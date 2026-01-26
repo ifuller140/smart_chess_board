@@ -4,12 +4,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, String
 import time
 
-# Try to import RPi.GPIO, fallback to Mock if not available
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-except ImportError:
-    GPIO_AVAILABLE = False
+import RPi.GPIO as GPIO
 
 class LimitSwitchNode(Node):
     def __init__(self):
@@ -27,20 +22,17 @@ class LimitSwitchNode(Node):
         self.debounce = self.get_parameter('debounce_ms').value / 1000.0
         
         # GPIO Setup
-        if GPIO_AVAILABLE:
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(self.pin_x, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.setup(self.pin_y, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.setup(self.pin_clock, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            
-            # Add interrupts
-            GPIO.add_event_detect(self.pin_x, GPIO.FALLING, callback=self.switch_callback, bouncetime=int(self.debounce*1000))
-            GPIO.add_event_detect(self.pin_y, GPIO.FALLING, callback=self.switch_callback, bouncetime=int(self.debounce*1000))
-            GPIO.add_event_detect(self.pin_clock, GPIO.FALLING, callback=self.switch_callback, bouncetime=int(self.debounce*1000))
-            
-            self.get_logger().info(f"Limit Switches Initialized: X={self.pin_x}, Y={self.pin_y}, Clock={self.pin_clock}")
-        else:
-            self.get_logger().warn("RPi.GPIO not found. Running in MOCK mode.")
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(self.pin_x, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(self.pin_y, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(self.pin_clock, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        
+        # Add interrupts
+        GPIO.add_event_detect(self.pin_x, GPIO.FALLING, callback=self.switch_callback, bouncetime=int(self.debounce*1000))
+        GPIO.add_event_detect(self.pin_y, GPIO.FALLING, callback=self.switch_callback, bouncetime=int(self.debounce*1000))
+        GPIO.add_event_detect(self.pin_clock, GPIO.FALLING, callback=self.switch_callback, bouncetime=int(self.debounce*1000))
+        
+        self.get_logger().info(f"Limit Switches Initialized: X={self.pin_x}, Y={self.pin_y}, Clock={self.pin_clock}")
 
         # Publishers
         self.x_pub = self.create_publisher(Bool, '/limit_switch/x_min', 10)
@@ -64,8 +56,7 @@ class LimitSwitchNode(Node):
             self.clock_pub.publish(Bool(data=True))
 
     def destroy_node(self):
-        if GPIO_AVAILABLE:
-            GPIO.cleanup()
+        GPIO.cleanup()
         super().destroy_node()
 
 def main(args=None):

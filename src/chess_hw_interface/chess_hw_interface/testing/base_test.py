@@ -135,12 +135,12 @@ class HardwareTest(ABC):
             
         Returns:
             True if button pressed within timeout, False otherwise
+            
+        Raises:
+            RuntimeError: If GPIO interface is not available
         """
         if self.gpio is None:
-            # Mock mode - simulate button press after short delay
-            print("[MOCK] Simulating clock button press...")
-            time.sleep(0.5)
-            return True
+            raise RuntimeError("GPIO interface required - hardware must be connected")
         
         start_time = time.time()
         while time.time() - start_time < timeout:
@@ -165,12 +165,12 @@ class HardwareTest(ABC):
             
         Returns:
             True if switch triggered within timeout, False otherwise
+            
+        Raises:
+            RuntimeError: If GPIO interface is not available
         """
         if self.gpio is None:
-            # Mock mode
-            print(f"[MOCK] Simulating {switch.upper()}-MIN limit switch press...")
-            time.sleep(0.5)
-            return True
+            raise RuntimeError("GPIO interface required - hardware must be connected")
         
         start_time = time.time()
         while time.time() - start_time < timeout:

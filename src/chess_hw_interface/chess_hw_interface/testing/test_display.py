@@ -30,32 +30,6 @@ class DisplayInterface(ABC):
         pass
 
 
-class MockDisplay(DisplayInterface):
-    """Mock display for testing without hardware."""
-    
-    def __init__(self):
-        self._current_text = ""
-        self._brightness = 100
-    
-    def show_text(self, text: str):
-        """Print text to console as mock display."""
-        self._current_text = text[:8]
-        # Format like a 7-segment display
-        display = f"┌{'─'*10}┐"
-        content = f"│ {self._current_text:^8} │"
-        bottom = f"└{'─'*10}┘"
-        print(f"\n{display}\n{content}\n{bottom}")
-    
-    def clear(self):
-        """Clear mock display."""
-        self._current_text = ""
-        print("\n┌──────────┐\n│          │\n└──────────┘")
-    
-    def set_brightness(self, level: int):
-        """Set mock brightness."""
-        self._brightness = max(0, min(100, level))
-
-
 class SevenSegmentDisplay(DisplayInterface):
     """
     7-segment display interface using GPIO.
@@ -178,20 +152,21 @@ class I2CDisplay(DisplayInterface):
         pass
 
 
-def create_display(display_type: str = "mock", **kwargs) -> DisplayInterface:
+def create_display(display_type: str = "seven_segment", **kwargs) -> DisplayInterface:
     """
     Factory function to create appropriate display interface.
     
     Args:
-        display_type: "mock", "seven_segment", or "i2c"
+        display_type: "seven_segment" or "i2c"
         **kwargs: Additional arguments for specific display types
         
     Returns:
         DisplayInterface instance
+        
+    Raises:
+        ValueError: If display_type is not recognized
     """
-    if display_type == "mock":
-        return MockDisplay()
-    elif display_type == "seven_segment":
+    if display_type == "seven_segment":
         return SevenSegmentDisplay(
             gpio_interface=kwargs.get("gpio"),
             segment_pins=kwargs.get("segment_pins", []),
@@ -200,4 +175,4 @@ def create_display(display_type: str = "mock", **kwargs) -> DisplayInterface:
     elif display_type == "i2c":
         return I2CDisplay(i2c_address=kwargs.get("i2c_address", 0x70))
     else:
-        raise ValueError(f"Unknown display type: {display_type}")
+        raise ValueError(f"Unknown display type: {display_type}. Use 'seven_segment' or 'i2c'.")
