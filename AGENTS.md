@@ -160,6 +160,39 @@ Tests use the clock display for feedback and clock button for user confirmation.
 | [features/moving-logic.md](docs/features/moving-logic.md) | Piece movement planning | Collision avoidance |
 | [features/vision-calibration.md](docs/features/vision-calibration.md) | Camera calibration | Vision work |
 
+## 🤖 Specialized Agent Roles
+
+To work simultaneously in harmony, assign agents to these specific scopes:
+
+### 1. Hardware Agent
+**Scope**: `src/chess_hw_interface`, `src/gantry_control`
+**Responsibilities**:
+- Implement low-level GPIO drivers
+- Tune kinematics and motion planning
+- Verify hardware safety limits
+
+### 2. Logic Agent
+**Scope**: `src/chess_logic`
+**Responsibilities**:
+- Implement Chess Engine integration (Stockfish)
+- Manage Game State Machine (IDLE -> MOVING -> etc)
+- Handle game rules and turn validation
+
+### 3. Perception Agent
+**Scope**: `src/chess_perception`
+**Responsibilities**:
+- Computer Vision pipeline (OpenCV)
+- Board state detection (FEN generation)
+- Camera calibration and perspective transforms
+
+### 4. System Architect
+**Scope**: `setup.py`, `package.xml`, `launch/`, `docs/`
+**Responsibilities**:
+- Maintain build system and dependencies
+- Define standard Interfaces (`.msg`, `.srv`)
+- Orchestrate high-level system launch
+
+
 ## Workflow Files
 
 These workflows in `.agent/workflows/` provide step-by-step instructions:

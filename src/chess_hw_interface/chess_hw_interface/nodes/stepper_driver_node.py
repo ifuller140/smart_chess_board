@@ -18,8 +18,8 @@ class StepperDriverNode(Node):
         super().__init__('stepper_driver_node')
         
         # Parameters
-        self.declare_parameter('motorA_pins', [17, 18, 27, 22])
-        self.declare_parameter('motorB_pins', [23, 24, 25, 5])
+        self.declare_parameter('motorA_pins', [14, 4, 3, 2])
+        self.declare_parameter('motorB_pins', [24, 23, 22, 27])
         self.declare_parameter('step_sequence', 'half')
         self.declare_parameter('step_delay_default', 0.001)
         

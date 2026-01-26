@@ -2,7 +2,7 @@
 
 An automated chess board that plays physical chess against a human opponent using computer vision, a CoreXY gantry system with electromagnet, and the Stockfish chess engine.
 
-> **🤖 AI Agents**: Start with [`AGENTS.md`](AGENTS.md) for project context and guidelines.
+> **🤖 Agents**: Start with [`AGENTS.md`](AGENTS.md) for project context and guidelines.
 
 ## Features
 
@@ -16,7 +16,7 @@ An automated chess board that plays physical chess against a human opponent usin
 
 | Document | Description |
 |----------|-------------|
-| [AGENTS.md](AGENTS.md) | **Start here** - Agent entry point |
+| [AGENTS.md](AGENTS.md) | Agent entry point |
 | [docs/CONTEXT.md](docs/CONTEXT.md) | Full project context |
 | [docs/hardware/](docs/hardware/) | Hardware specifications & wiring |
 | [docs/software/](docs/software/) | Software architecture |
@@ -67,7 +67,6 @@ Use the `/hardware-test` workflow to validate components before full operation.
 
 ```
 smart_chess_board/
-├── AGENTS.md              # AI agent entry point
 ├── docs/                  # All documentation
 ├── src/                   # ROS 2 packages
 │   ├── chess_hw_interface/

@@ -6,10 +6,10 @@ import time
 # GPIO PIN DEFINITIONS
 # ==========================
 # Motor A
-IN1_A = 2
-IN2_A = 3
-IN3_A = 4
-IN4_A = 14
+IN1_A = 14
+IN2_A = 4
+IN3_A = 3
+IN4_A = 2
 
 # Motor B
 IN1_B = 24

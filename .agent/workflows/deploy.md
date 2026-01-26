@@ -49,7 +49,7 @@ pip3 install \
 ```bash
 mkdir -p ~/smart_chess_ws/src
 cd ~/smart_chess_ws/src
-git clone https://github.com/YOUR_USERNAME/smart_chess_board.git
+git clone https://github.com/ifuller140/smart_chess_board.git
 # Or use scp/rsync to copy files
 ```
 

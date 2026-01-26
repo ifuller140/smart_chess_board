@@ -11,55 +11,56 @@
 
 | Function | BCM Pin | Physical Pin | Wire Color | Notes |
 |----------|---------|--------------|------------|-------|
-| **Stepper A (Motor A)** | | | | |
-| IN1 | 17 | 11 | <!-- USER: color --> | Phase A |
-| IN2 | 18 | 12 | <!-- USER: color --> | Phase B |
-| IN3 | 27 | 13 | <!-- USER: color --> | Phase C |
-| IN4 | 22 | 15 | <!-- USER: color --> | Phase D |
+| **Stepper A (Motor A)** |         |            |       |
+|    IN1   |    14   | 8 | <!-- USER: color --> | Phase A |
+| IN2 |  4 | 7 | <!-- USER: color --> | Phase B |
+| IN3 | 3 | 5 | <!-- USER: color --> | Phase C |
+| IN4 | 2 | 3 | <!-- USER: color --> | Phase D |
 | **Stepper B (Motor B)** | | | | |
-| IN1 | 23 | 16 | <!-- USER: color --> | Phase A |
-| IN2 | 24 | 18 | <!-- USER: color --> | Phase B |
-| IN3 | 25 | 22 | <!-- USER: color --> | Phase C |
-| IN4 | 5 | 29 | <!-- USER: color --> | Phase D |
+| IN1 | 24 | 18 | <!-- USER: color --> | Phase A |
+| IN2 | 23 | 16 | <!-- USER: color --> | Phase B |
+| IN3 | 22 | 15 | <!-- USER: color --> | Phase C |
+| IN4 | 27 | 13 | <!-- USER: color --> | Phase D |
 | **Z-Axis Servo (Gantry)** | | | | |
 | PWM Signal | 12 | 32 | Orange | Hardware PWM |
 | **Clock Servo (NEW)** | | | | |
 | PWM Signal | 16 | 36 | <!-- USER: color --> | Hits clock button |
+| Limit Switch | 15 | 10 | <!-- USER: color --> | Clock Limit |
 | **Limit Switches** | | | | |
-| X-MIN | 6 | 31 | <!-- USER: color --> | Pull-up enabled |
-| Y-MIN | 13 | 33 | <!-- USER: color --> | Pull-up enabled |
-| Clock Hit | 19 | 35 | <!-- USER: color --> | Pull-up enabled |
-| **Electromagnet** | | | | |
-| Control | <!-- USER: assign --> | | <!-- USER: color --> | Via transistor |
+| X-MIN | 10 | 19 | <!-- USER: color --> | Pull-up needed |
+| Y-MIN | 9 | 21 | <!-- USER: color --> | Pull-up needed |
+| Clock Hit | 15 | 10 | <!-- USER: color --> | Pull-up needed |
 | **Clock Display** | | | | |
-| Display 1 | <!-- USER: assign --> | | | 7-segment |
-| Display 2 | <!-- USER: assign --> | | | 7-segment |
+| Clock 1 CLK | 25 | 22 | | |
+| Clock 1 DIO | 8 | 24 | | |
+| Clock 2 CLK | 7 | 26 | | |
+| Clock 2 DIO | 1 | 28 | | |
 
 ---
 
 ## Raspberry Pi 40-Pin Header Diagram
 
 ```
-                    3V3  (1)  (2)  5V
-                  GPIO2  (3)  (4)  5V
-                  GPIO3  (5)  (6)  GND
-                  GPIO4  (7)  (8)  GPIO14 (UART TX)
-                    GND  (9)  (10) GPIO15 (UART RX)
-   Stepper A IN1  GPIO17 (11) (12) GPIO18  Stepper A IN2
-   Stepper A IN3  GPIO27 (13) (14) GND
-   Stepper A IN4  GPIO22 (15) (16) GPIO23  Stepper B IN1
-                    3V3  (17) (18) GPIO24  Stepper B IN2
-                 GPIO10  (19) (20) GND
-                  GPIO9  (21) (22) GPIO25  Stepper B IN3
-                 GPIO11  (23) (24) GPIO8
-                    GND  (25) (26) GPIO7
-                  GPIO0  (27) (28) GPIO1
-   Stepper B IN4   GPIO5 (29) (30) GND
-       X-MIN       GPIO6 (31) (32) GPIO12  Z-Axis Servo
-       Y-MIN      GPIO13 (33) (34) GND
-    Clock Hit     GPIO19 (35) (36) GPIO16  Clock Servo ← NEW
-                 GPIO26  (37) (38) GPIO20
-                    GND  (39) (40) GPIO21
+                     3V3  (1)  (2)  5V
+Stepper A IN4      GPIO2  (3)  (4)  5V      To 5V power hub
+Stepper A IN3      GPIO3  (5)  (6)  GND     GND for 12V power hub
+Stepper A IN2      GPIO4  (7)  (8)  GPIO14  Stepper A IN1
+GND for 5V hub       GND  (9)  (10) GPIO15  Clock limit switch
+                   GPIO17 (11) (12) GPIO18  Clock Servo PWM signal
+Stepper B IN4      GPIO27 (13) (14) GND
+Stepper B IN3      GPIO22 (15) (16) GPIO23  Stepper B IN2
+                     3V3  (17) (18) GPIO24  Stepper B IN1
+X limit switch    GPIO10  (19) (20) GND
+Y limit switch     GPIO9  (21) (22) GPIO25 Clock 1 CLK
+                  GPIO11  (23) (24) GPIO8 Clock 1 DIO
+                     GND  (25) (26) GPIO7 Clock 2 CLK
+                   GPIO0  (27) (28) GPIO1 Clock 2 DIO
+                    GPIO5 (29) (30) GND
+                    GPIO6 (31) (32) GPIO12  Z-Axis Servo
+                   GPIO13 (33) (34) GND
+                   GPIO19 (35) (36) GPIO16  Clock Servo ← NEW
+                  GPIO26  (37) (38) GPIO20
+                     GND  (39) (40) GPIO21
 ```
 
 <!-- USER_ATTENTION: Update the diagram above to reflect your actual assignments -->
@@ -71,32 +72,34 @@
 ### Stepper Motor A (X+Y combined in CoreXY)
 ```yaml
 stepper_driver:
+stepper_driver:
   ros__parameters:
-    motorA_pins: [17, 18, 27, 22]  # [IN1, IN2, IN3, IN4]
+    motorA_pins: [14, 4, 3, 2]  # [IN1, IN2, IN3, IN4]
 ```
 
 | Pin | BCM | Direction | Notes |
 |-----|-----|-----------|-------|
-| IN1 | 17 | OUTPUT | Blue wire on motor |
-| IN2 | 18 | OUTPUT | Pink wire on motor |
-| IN3 | 27 | OUTPUT | Yellow wire on motor |
-| IN4 | 22 | OUTPUT | Orange wire on motor |
+| IN1 | 14 | OUTPUT | |
+| IN2 | 4 | OUTPUT | |
+| IN3 | 3 | OUTPUT | |
+| IN4 | 2 | OUTPUT | |
 
 <!-- USER_ATTENTION: Verify motor wire colors match your specific 28BYJ-48 -->
 
 ### Stepper Motor B (X-Y combined in CoreXY)
 ```yaml
 stepper_driver:
+stepper_driver:
   ros__parameters:
-    motorB_pins: [23, 24, 25, 5]  # [IN1, IN2, IN3, IN4]
+    motorB_pins: [24, 23, 22, 27]  # [IN1, IN2, IN3, IN4]
 ```
 
 | Pin | BCM | Direction | Notes |
 |-----|-----|-----------|-------|
-| IN1 | 23 | OUTPUT | Blue wire on motor |
-| IN2 | 24 | OUTPUT | Pink wire on motor |
-| IN3 | 25 | OUTPUT | Yellow wire on motor |
-| IN4 | 5 | OUTPUT | Orange wire on motor |
+| IN1 | 24 | OUTPUT | |
+| IN2 | 23 | OUTPUT | |
+| IN3 | 22 | OUTPUT | |
+| IN4 | 27 | OUTPUT | |
 
 ### Servo Motor
 ```yaml
@@ -129,26 +132,27 @@ clock_servo_node:
 ### Limit Switches
 ```yaml
 limit_switch_node:
+limit_switch_node:
   ros__parameters:
     limit_switch_pins:
-      x_min: 6
-      y_min: 13
-      clock_hit: 19
+      x_min: 10
+      y_min: 9
+      clock_hit: 15
     debounce_ms: 20
 ```
 
 | Switch | BCM | Pull | Active State |
 |--------|-----|------|--------------|
-| X-MIN | 6 | PULL_UP | LOW when pressed |
-| Y-MIN | 13 | PULL_UP | LOW when pressed |
-| Clock | 19 | PULL_UP | LOW when pressed |
+| X-MIN | 10 | PULL_UP | LOW when pressed |
+| Y-MIN | 9 | PULL_UP | LOW when pressed |
+| Clock | 15 | PULL_UP | LOW when pressed |
 
 ### Clock Display (7-Segment)
 ```yaml
 clock_display:
   ros__parameters:
-    display1_pins: [0, 0, 0, 0]  # PLACEHOLDER - segment pins
-    display2_pins: [0, 0, 0, 0]  # PLACEHOLDER - segment pins
+    display1_pins: [25, 8]   # CLK, DIO
+    display2_pins: [7, 1]    # CLK, DIO
 ```
 
 <!-- USER_ATTENTION: Define 7-segment display wiring if using this feature -->

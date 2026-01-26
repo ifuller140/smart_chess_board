@@ -16,9 +16,9 @@ class LimitSwitchNode(Node):
         super().__init__('limit_switch_node')
         
         # Parameters
-        self.declare_parameter('limit_switch_pins.x_min', 6)
-        self.declare_parameter('limit_switch_pins.y_min', 13)
-        self.declare_parameter('limit_switch_pins.clock_hit', 19)
+        self.declare_parameter('limit_switch_pins.x_min', 10)
+        self.declare_parameter('limit_switch_pins.y_min', 9)
+        self.declare_parameter('limit_switch_pins.clock_hit', 15)
         self.declare_parameter('debounce_ms', 20)
         
         self.pin_x = self.get_parameter('limit_switch_pins.x_min').value
