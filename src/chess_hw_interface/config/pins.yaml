@@ -25,9 +25,9 @@ clock_servo_node:
 limit_switch_node:
   ros__parameters:
     limit_switch_pins:
-      x_min: 10
-      y_min: 9
-      clock_hit: 15
+      x_min: 10      # GPIO10 - Physical Pin 19 (per pinout.md diagram)
+      y_min: 9       # GPIO9 - Physical Pin 21 (per pinout.md diagram)
+      clock_hit: 15  # GPIO15 - Physical Pin 10 (per pinout.md diagram)
     debounce_ms: 20
 
 clock_display:

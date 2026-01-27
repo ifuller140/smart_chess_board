@@ -207,21 +207,25 @@ Before assigning new pins, verify no conflicts:
 
 | BCM Pin | Currently Used By |
 |---------|-------------------|
-| 5 | Stepper B IN4 |
-| 6 | X-MIN Limit Switch |
+| 1  | Clock 2 DIO |
+| 2  | Stepper A IN4 |
+| 3  | Stepper A IN3 |
+| 4  | Stepper A IN2 |
+| 7  | Clock 2 CLK |
+| 8  | Clock 1 DIO |
+| 9  | Y-MIN Limit Switch |
+| 10 | X-MIN Limit Switch |
 | 12 | Z-Axis Servo (gantry) |
-| 13 | Y-MIN Limit Switch |
-| 16 | Clock Servo (NEW) |
-| 17 | Stepper A IN1 |
-| 18 | Stepper A IN2 |
-| 19 | Clock Hit Switch |
-| 22 | Stepper A IN4 |
-| 23 | Stepper B IN1 |
-| 24 | Stepper B IN2 |
-| 25 | Stepper B IN3 |
-| 27 | Stepper A IN3 |
+| 14 | Stepper A IN1 |
+| 15 | Clock Button |
+| 16 | Clock Servo |
+| 22 | Stepper B IN3 |
+| 23 | Stepper B IN2 |
+| 24 | Stepper B IN1 |
+| 25 | Clock 1 CLK |
+| 27 | Stepper B IN4 |
 
-**Available pins**: 4, 7, 8, 9, 10, 11, 14, 15, 20, 21, 26
+**Available pins**: 5, 6, 11, 13, 17, 18, 19, 20, 21, 26
 
 ---
 

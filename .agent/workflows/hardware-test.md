@@ -88,16 +88,21 @@ Expected: Servo moves from 0° to 180° and back.
 
 ### 3. Test Limit Switches
 
+Per pinout.md ground truth diagram:
+- X-MIN = GPIO10 (Physical Pin 19)
+- Y-MIN = GPIO9 (Physical Pin 21)
+- Clock = GPIO15 (Physical Pin 10)
+
 ```bash
 python3 -c "
 import RPi.GPIO as GPIO
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(6, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-GPIO.setup(13, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-GPIO.setup(19, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-print('X-MIN (6):', 'PRESSED' if GPIO.input(6)==0 else 'OPEN')
-print('Y-MIN (13):', 'PRESSED' if GPIO.input(13)==0 else 'OPEN')
-print('CLOCK (19):', 'PRESSED' if GPIO.input(19)==0 else 'OPEN')
+GPIO.setup(10, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # X-MIN
+GPIO.setup(9, GPIO.IN, pull_up_down=GPIO.PUD_UP)   # Y-MIN
+GPIO.setup(15, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # Clock
+print('X-MIN (GPIO10):', 'PRESSED' if GPIO.input(10)==0 else 'OPEN')
+print('Y-MIN (GPIO9):', 'PRESSED' if GPIO.input(9)==0 else 'OPEN')
+print('CLOCK (GPIO15):', 'PRESSED' if GPIO.input(15)==0 else 'OPEN')
 GPIO.cleanup()
 "
 ```

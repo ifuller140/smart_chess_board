@@ -40,10 +40,10 @@ class GPIOInterface:
     Wraps RPi.GPIO for consistent access. Requires real hardware.
     """
     
-    # Pin assignments (BCM numbering)
-    PIN_X_LIMIT = 6       # X-MIN limit switch
-    PIN_Y_LIMIT = 13      # Y-MIN limit switch
-    PIN_CLOCK_BUTTON = 19 # Clock button
+    # Pin assignments (BCM) - MUST match pinout.md ground truth diagram
+    PIN_X_LIMIT = 10      # GPIO10 - Physical Pin 19
+    PIN_Y_LIMIT = 9       # GPIO9 - Physical Pin 21
+    PIN_CLOCK_BUTTON = 15 # GPIO15 - Physical Pin 10
     
     def __init__(self):
         """
