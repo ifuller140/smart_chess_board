@@ -7,11 +7,19 @@ Tests:
 2. Image capture
 3. Calibration image capture
 4. Board corner detection
+
+Supports both CSI cameras (via libcamera) and USB cameras (via OpenCV).
 """
 
 import time
-from typing import List
+from typing import List, Optional
 import os
+
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+except ImportError:
+    OPENCV_AVAILABLE = False
 
 from ..base_test import HardwareTest, TestStep
 
@@ -40,6 +48,34 @@ class CameraTest(HardwareTest):
         except Exception as e:
             print(f"[ERROR] Failed to create output dir: {e}")
             return False
+    
+    def _capture_image_opencv(self, output_path: str) -> bool:
+        """
+        Capture image using OpenCV (for USB cameras).
+        
+        Args:
+            output_path: Path to save the captured image
+            
+        Returns:
+            True if capture successful
+        """
+        if not OPENCV_AVAILABLE:
+            return False
+        
+        # Try common video device indices
+        for device_idx in [0, 1, 2]:
+            cap = cv2.VideoCapture(device_idx)
+            if cap.isOpened():
+                # Allow camera to warm up
+                time.sleep(0.5)
+                ret, frame = cap.read()
+                cap.release()
+                
+                if ret and frame is not None:
+                    cv2.imwrite(output_path, frame)
+                    return os.path.exists(output_path)
+        
+        return False
     
     def get_steps(self) -> List[TestStep]:
         """Define test steps."""
@@ -125,14 +161,17 @@ class CameraTest(HardwareTest):
         output_path = os.path.join(self.OUTPUT_DIR, "test_capture.jpg")
         
         try:
-            # Try libcamera first (for Pi camera)
+            # Try libcamera first (for Pi CSI camera)
             result = os.system(f"libcamera-still -o {output_path} -t 1000 > /dev/null 2>&1")
             
-            if result != 0:
-                # Try fswebcam for USB camera
-                result = os.system(f"fswebcam -r 640x480 {output_path} > /dev/null 2>&1")
+            if result != 0 or not os.path.exists(output_path):
+                # Fallback to OpenCV for USB cameras
+                print("    libcamera failed, trying OpenCV...")
+                if not self._capture_image_opencv(output_path):
+                    print("  [ERROR] All capture methods failed")
+                    return False
             
-            if result == 0 and os.path.exists(output_path):
+            if os.path.exists(output_path):
                 print(f"  Image saved to: {output_path}")
                 return True
             else:
@@ -165,8 +204,15 @@ class CameraTest(HardwareTest):
             if self.wait_for_clock_button(timeout=30.0):
                 output_path = os.path.join(calibration_dir, f"calibration_{images_captured + 1}.jpg")
                 
+                # Try libcamera first, fallback to OpenCV
                 result = os.system(f"libcamera-still -o {output_path} -t 500 > /dev/null 2>&1")
-                if result == 0:
+                capture_ok = (result == 0 and os.path.exists(output_path))
+                
+                if not capture_ok:
+                    # Fallback to OpenCV for USB cameras
+                    capture_ok = self._capture_image_opencv(output_path)
+                
+                if capture_ok:
                     images_captured += 1
                     print(f"  Captured: {output_path}")
                 else:
@@ -194,7 +240,13 @@ class CameraTest(HardwareTest):
         
         # Capture fresh image
         test_image = os.path.join(self.OUTPUT_DIR, "detection_test.jpg")
-        os.system(f"libcamera-still -o {test_image} -t 500 > /dev/null 2>&1")
+        
+        # Try libcamera first, fallback to OpenCV
+        result = os.system(f"libcamera-still -o {test_image} -t 500 > /dev/null 2>&1")
+        if result != 0 or not os.path.exists(test_image):
+            if not self._capture_image_opencv(test_image):
+                print("  [ERROR] Failed to capture image for detection")
+                return False
         
         if not os.path.exists(test_image):
             print("  [ERROR] Failed to capture image for detection")
