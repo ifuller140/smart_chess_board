@@ -21,9 +21,9 @@ class GantryTest(HardwareTest):
     Comprehensive gantry test including limit switches, motors, and homing.
     """
     
-    # Motor pins (BCM)
-    MOTOR_A_PINS = [17, 18, 27, 22]  # IN1, IN2, IN3, IN4
-    MOTOR_B_PINS = [23, 24, 25, 5]   # IN1, IN2, IN3, IN4
+    # Motor pins (BCM) - per pinout.md ground truth
+    MOTOR_A_PINS = [14, 4, 3, 2]    # IN1, IN2, IN3, IN4
+    MOTOR_B_PINS = [24, 23, 22, 27]  # IN1, IN2, IN3, IN4
     
     # Step sequence (half-step)
     STEP_SEQUENCE = [

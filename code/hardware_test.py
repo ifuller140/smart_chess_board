@@ -169,6 +169,54 @@ def test_limits():
         pass
     print("\nLimit switch test complete.")
 
+def test_limits_interactive():
+    """Interactive limit switch verification with clock confirmation."""
+    print("\n" + "="*50)
+    print("INTERACTIVE LIMIT SWITCH VERIFICATION")
+    print("="*50)
+    print("\nThis test verifies each limit switch works correctly.")
+    print("Use the CLOCK button to confirm each step.")
+    
+    # Test X limit
+    print("\n[1/3] Testing X-MIN limit switch...")
+    print("      Please PRESS the X limit switch.")
+    while GPIO.input(LIMIT_X_PIN) == 1:  # Wait for press (active LOW)
+        time.sleep(0.05)
+    print("      ✓ X-MIN detected!")
+    print("      Now RELEASE the switch.")
+    while GPIO.input(LIMIT_X_PIN) == 0:  # Wait for release
+        time.sleep(0.05)
+    print("      ✓ X-MIN released!")
+    print("      Press CLOCK to confirm X limit works.")
+    while GPIO.input(LIMIT_CLOCK_1_PIN) == 1:
+        time.sleep(0.05)
+    time.sleep(0.2)  # Debounce
+    print("      ✓ X limit confirmed!")
+    
+    # Test Y limit
+    print("\n[2/3] Testing Y-MIN limit switch...")
+    print("      Please PRESS the Y limit switch.")
+    while GPIO.input(LIMIT_Y_PIN) == 1:
+        time.sleep(0.05)
+    print("      ✓ Y-MIN detected!")
+    print("      Now RELEASE the switch.")
+    while GPIO.input(LIMIT_Y_PIN) == 0:
+        time.sleep(0.05)
+    print("      ✓ Y-MIN released!")
+    print("      Press CLOCK to confirm Y limit works.")
+    while GPIO.input(LIMIT_CLOCK_1_PIN) == 1:
+        time.sleep(0.05)
+    time.sleep(0.2)
+    print("      ✓ Y limit confirmed!")
+    
+    # Test Clock limit
+    print("\n[3/3] Testing CLOCK limit switch...")
+    print("      Clock switch already verified through confirmations!")
+    
+    print("\n" + "="*50)
+    print("✓ ALL LIMIT SWITCHES VERIFIED SUCCESSFULLY!")
+    print("="*50)
+
 def test_clocks():
     print("\n--- Clock Display Test ---")
     print("Initializing displays...")
@@ -191,9 +239,10 @@ def main():
             print("\n=== Smart Chess Board Hardware Test ===")
             print("1. Test Stepper Motors")
             print("2. Test Servos (Clock & Magnet)")
-            print("3. Test Limit Switches")
-            print("4. Test Clock Displays")
-            print("5. Run All Tests")
+            print("3. Test Limit Switches (Monitor Mode)")
+            print("4. Test Limit Switches (Interactive Verification)")
+            print("5. Test Clock Displays")
+            print("6. Run All Tests")
             print("q. Quit")
             
             choice = input("\nSelect an option: ").strip().lower()
@@ -205,11 +254,13 @@ def main():
             elif choice == '3':
                 test_limits()
             elif choice == '4':
-                test_clocks()
+                test_limits_interactive()
             elif choice == '5':
+                test_clocks()
+            elif choice == '6':
+                test_limits_interactive()
                 test_steppers()
                 test_servos()
-                test_limits()
                 test_clocks()
             elif choice == 'q':
                 break
