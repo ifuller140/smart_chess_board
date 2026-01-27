@@ -17,6 +17,7 @@ import RPi.GPIO as GPIO
 import time
 import json
 import os
+import curses
 from datetime import datetime
 
 # ==========================
@@ -570,6 +571,138 @@ def show_status():
     print(f"Steps/inch: X={gantry.calibration['steps_per_inch_x']:.0f}, Y={gantry.calibration['steps_per_inch_y']:.0f}")
 
 # ==========================
+# MANUAL KEYBOARD CONTROL
+# ==========================
+def manual_keyboard_control():
+    """
+    Real-time keyboard control of gantry.
+    
+    Controls:
+        Arrow keys: Move in X/Y directions
+        Diagonal: Press two adjacent arrows simultaneously
+        +/-: Increase/decrease speed
+        q: Quit
+    
+    Opposing keys cancel out (left+right = no X movement)
+    """
+    print("\n" + "="*50)
+    print("MANUAL KEYBOARD CONTROL")
+    print("="*50)
+    print("Use arrow keys to move. Press 'q' to exit.")
+    print("+/- to adjust speed. Diagonal movement supported.")
+    print("\nStarting in 2 seconds...")
+    time.sleep(2)
+    
+    # Run curses application
+    try:
+        curses.wrapper(_keyboard_control_loop)
+    except Exception as e:
+        print(f"Error: {e}")
+    
+    print(f"\nFinal position: ({gantry.pos_x}, {gantry.pos_y})")
+    save_state()
+
+def _keyboard_control_loop(stdscr):
+    """
+    Curses-based keyboard control loop.
+    """
+    # Setup curses
+    curses.curs_set(0)  # Hide cursor
+    stdscr.nodelay(True)  # Non-blocking input
+    stdscr.timeout(10)  # 10ms timeout for getch()
+    
+    # Movement parameters
+    steps_per_tick = 50  # Steps per movement tick
+    min_steps = 10
+    max_steps = 200
+    delay = FAST_DELAY
+    
+    # State tracking
+    keys_pressed = set()
+    running = True
+    
+    # Key mappings
+    KEY_UP = curses.KEY_UP
+    KEY_DOWN = curses.KEY_DOWN
+    KEY_LEFT = curses.KEY_LEFT
+    KEY_RIGHT = curses.KEY_RIGHT
+    
+    while running:
+        # Clear and display status
+        stdscr.clear()
+        stdscr.addstr(0, 0, "=== MANUAL GANTRY CONTROL ===")
+        stdscr.addstr(2, 0, f"Position: X={gantry.pos_x:6d}  Y={gantry.pos_y:6d} steps")
+        
+        if gantry.calibration['steps_per_inch_x'] > 0:
+            x_in = gantry.pos_x / gantry.calibration['steps_per_inch_x']
+            y_in = gantry.pos_y / gantry.calibration['steps_per_inch_y']
+            stdscr.addstr(3, 0, f"Position: X={x_in:6.2f}\"  Y={y_in:6.2f}\"")
+        
+        stdscr.addstr(5, 0, f"Speed: {steps_per_tick} steps/tick")
+        stdscr.addstr(6, 0, f"Limits: X={read_x_limit()}  Y={read_y_limit()}")
+        stdscr.addstr(8, 0, "Controls:")
+        stdscr.addstr(9, 2, "↑↓←→ : Move gantry")
+        stdscr.addstr(10, 2, "+/-   : Adjust speed")
+        stdscr.addstr(11, 2, "q     : Quit")
+        stdscr.addstr(13, 0, "Hold multiple arrows for diagonal movement")
+        stdscr.refresh()
+        
+        # Read all available keys
+        keys_pressed.clear()
+        while True:
+            key = stdscr.getch()
+            if key == -1:
+                break
+            keys_pressed.add(key)
+        
+        # Check for quit
+        if ord('q') in keys_pressed or ord('Q') in keys_pressed:
+            running = False
+            continue
+        
+        # Adjust speed
+        if ord('+') in keys_pressed or ord('=') in keys_pressed:
+            steps_per_tick = min(max_steps, steps_per_tick + 10)
+        if ord('-') in keys_pressed or ord('_') in keys_pressed:
+            steps_per_tick = max(min_steps, steps_per_tick - 10)
+        
+        # Calculate net direction (opposing keys cancel)
+        dx = 0
+        dy = 0
+        
+        if KEY_RIGHT in keys_pressed:
+            dx += 1
+        if KEY_LEFT in keys_pressed:
+            dx -= 1
+        if KEY_UP in keys_pressed:
+            dy += 1
+        if KEY_DOWN in keys_pressed:
+            dy -= 1
+        
+        # Move if there's a net direction
+        if dx != 0 or dy != 0:
+            # Scale movement
+            move_x_steps = dx * steps_per_tick
+            move_y_steps = dy * steps_per_tick
+            
+            # Check limits before moving
+            if dx < 0 and read_x_limit():
+                move_x_steps = 0  # Don't move into X limit
+            if dy < 0 and read_y_limit():
+                move_y_steps = 0  # Don't move into Y limit
+            
+            # Convert to motor steps for CoreXY
+            steps_a = move_x_steps + move_y_steps
+            steps_b = move_x_steps - move_y_steps
+            
+            # Execute movement (single step batch for responsiveness)
+            step_both_motors(steps_a, steps_b, delay)
+            
+            # Update position
+            gantry.pos_x += move_x_steps
+            gantry.pos_y += move_y_steps
+
+# ==========================
 # MAIN MENU
 # ==========================
 def main():
@@ -587,6 +720,7 @@ def main():
             print("4. Verify Calibration (Edge Trace)")
             print("5. Move to Square")
             print("6. Show Status")
+            print("7. Manual Keyboard Control")
             print("q. Quit")
             
             choice = input("\nSelect option: ").strip().lower()
@@ -596,16 +730,17 @@ def main():
             elif choice == '2':
                 home_all()
             elif choice == '3':
-                if test_limit_switches():
-                    if home_all():
-                        if interactive_calibrate():
-                            save_state()
+                if home_all():
+                    if interactive_calibrate():
+                        save_state()
             elif choice == '4':
                 verify_calibration()
             elif choice == '5':
                 manual_move()
             elif choice == '6':
                 show_status()
+            elif choice == '7':
+                manual_keyboard_control()
             elif choice == 'q':
                 break
     
