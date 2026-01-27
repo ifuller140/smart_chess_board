@@ -31,6 +31,8 @@ limit_switch_node:
     debounce_ms: 20
 
 clock_display:
+  # TM1637 4-Digit 7-Segment Displays (bit-banging protocol, NOT I2C)
+  # Per pinout.md ground truth diagram
   ros__parameters:
-    display1_pins: [25, 8]  # CLK, DIO
-    display2_pins: [7, 1]   # CLK, DIO
+    display1_pins: [25, 8]  # [CLK, DIO] - GPIO25 (Physical 22), GPIO8 (Physical 24)
+    display2_pins: [7, 1]   # [CLK, DIO] - GPIO7 (Physical 26), GPIO1 (Physical 28)

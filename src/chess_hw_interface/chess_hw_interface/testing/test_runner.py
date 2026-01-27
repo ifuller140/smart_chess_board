@@ -224,9 +224,9 @@ Examples:
     
     parser.add_argument(
         "--display",
-        choices=["seven_segment", "i2c"],
-        default="seven_segment",
-        help="Display type to use (default: seven_segment)"
+        choices=["tm1637", "dual_tm1637"],
+        default="dual_tm1637",
+        help="Display type: tm1637 (single) or dual_tm1637 (both clocks, default)"
     )
     
     args = parser.parse_args()
