@@ -87,9 +87,10 @@ def setup():
         GPIO.output(pin, 0)
     
     # Limit switch inputs
-    GPIO.setup(LIMIT_X_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(LIMIT_Y_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(LIMIT_CLOCK_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    # Active HIGH: 1=Pressed (VCC), 0=Released (GND)
+    GPIO.setup(LIMIT_X_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+    GPIO.setup(LIMIT_Y_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+    GPIO.setup(LIMIT_CLOCK_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
     
     # Magnet servo
     GPIO.setup(SERVO_MAGNET_PIN, GPIO.OUT)
@@ -107,13 +108,13 @@ def cleanup():
 # LIMIT SWITCH READING
 # ==========================
 def read_x_limit():
-    return GPIO.input(LIMIT_X_PIN) == 0  # Active LOW
+    return GPIO.input(LIMIT_X_PIN) == 1  # Active HIGH
 
 def read_y_limit():
-    return GPIO.input(LIMIT_Y_PIN) == 0
+    return GPIO.input(LIMIT_Y_PIN) == 1
 
 def read_clock():
-    return GPIO.input(LIMIT_CLOCK_PIN) == 0
+    return GPIO.input(LIMIT_CLOCK_PIN) == 1
 
 def wait_for_clock(message="Press clock to continue..."):
     """Wait for clock button press."""

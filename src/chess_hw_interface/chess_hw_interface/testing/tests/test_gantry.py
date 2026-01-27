@@ -59,10 +59,11 @@ class GantryTest(HardwareTest):
             for pin in self.MOTOR_A_PINS + self.MOTOR_B_PINS:
                 self.gpio.setup_output(pin)
             
-            # Setup limit switch inputs - per pinout.md ground truth diagram
-            self.gpio.setup_input(10, pull_up=True)  # X-MIN: GPIO10, Physical Pin 19
-            self.gpio.setup_input(9, pull_up=True)   # Y-MIN: GPIO9, Physical Pin 21
-            self.gpio.setup_input(15, pull_up=True)  # Clock: GPIO15, Physical Pin 10
+            # Setup limit switch inputs - per pinout.md ground truth
+            # Active HIGH: 1=Pressed, 0=Released. Use pull_down=True
+            self.gpio.setup_input(10, pull_down=True)  # X-MIN: GPIO10, Physical Pin 19
+            self.gpio.setup_input(9, pull_down=True)   # Y-MIN: GPIO9, Physical Pin 21
+            self.gpio.setup_input(15, pull_down=True)  # Clock: GPIO15, Physical Pin 10
             
             return True
         except Exception as e:

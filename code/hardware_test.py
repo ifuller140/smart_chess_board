@@ -100,7 +100,8 @@ def setup():
     
     # Limit Switches
     for pin in [LIMIT_X_PIN, LIMIT_Y_PIN, LIMIT_CLOCK_1_PIN]:
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        # Active HIGH: 1=Pressed (VCC), 0=Released (GND)
+        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
 # ==========================
 # TEST FUNCTIONS
@@ -162,7 +163,7 @@ def test_limits():
             x = GPIO.input(LIMIT_X_PIN)
             y = GPIO.input(LIMIT_Y_PIN)
             c1 = GPIO.input(LIMIT_CLOCK_1_PIN)
-            # 0 usually means pressed (PULL_UP)
+            # 1 means pressed (Active HIGH)
             print(f"\r{x} | {y} | {c1}      ", end="")
             time.sleep(0.1)
     except KeyboardInterrupt:
@@ -180,15 +181,15 @@ def test_limits_interactive():
     # Test X limit
     print("\n[1/3] Testing X-MIN limit switch...")
     print("      Please PRESS the X limit switch.")
-    while GPIO.input(LIMIT_X_PIN) == 1:  # Wait for press (active LOW)
+    while GPIO.input(LIMIT_X_PIN) == 0:  # Wait for press (active HIGH logic: 0->1)
         time.sleep(0.05)
     print("      ✓ X-MIN detected!")
     print("      Now RELEASE the switch.")
-    while GPIO.input(LIMIT_X_PIN) == 0:  # Wait for release
+    while GPIO.input(LIMIT_X_PIN) == 1:  # Wait for release (1->0)
         time.sleep(0.05)
     print("      ✓ X-MIN released!")
     print("      Press CLOCK to confirm X limit works.")
-    while GPIO.input(LIMIT_CLOCK_1_PIN) == 1:
+    while GPIO.input(LIMIT_CLOCK_1_PIN) == 0:
         time.sleep(0.05)
     time.sleep(0.2)  # Debounce
     print("      ✓ X limit confirmed!")
@@ -196,15 +197,15 @@ def test_limits_interactive():
     # Test Y limit
     print("\n[2/3] Testing Y-MIN limit switch...")
     print("      Please PRESS the Y limit switch.")
-    while GPIO.input(LIMIT_Y_PIN) == 1:
+    while GPIO.input(LIMIT_Y_PIN) == 0:
         time.sleep(0.05)
     print("      ✓ Y-MIN detected!")
     print("      Now RELEASE the switch.")
-    while GPIO.input(LIMIT_Y_PIN) == 0:
+    while GPIO.input(LIMIT_Y_PIN) == 1:
         time.sleep(0.05)
     print("      ✓ Y-MIN released!")
     print("      Press CLOCK to confirm Y limit works.")
-    while GPIO.input(LIMIT_CLOCK_1_PIN) == 1:
+    while GPIO.input(LIMIT_CLOCK_1_PIN) == 0:
         time.sleep(0.05)
     time.sleep(0.2)
     print("      ✓ Y limit confirmed!")
