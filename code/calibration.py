@@ -210,17 +210,17 @@ def step_both_motors(steps_a: int, steps_b: int, delay: float = NORMAL_DELAY):
 def move_x(steps: int, delay: float = NORMAL_DELAY):
     """
     Move in pure X direction.
-    CoreXY: X = (A + B) / 2, so for X movement, A and B move SAME direction.
+    CoreXY: X = (A - B) / 2, so for X movement, A and B move OPPOSITE directions.
     """
-    step_both_motors(steps, steps, delay)
+    step_both_motors(steps, -steps, delay)
     gantry.pos_x += steps
 
 def move_y(steps: int, delay: float = NORMAL_DELAY):
     """
     Move in pure Y direction.
-    CoreXY: Y = (A - B) / 2, so for Y movement, A and B move OPPOSITE directions.
+    CoreXY: Y = (A + B) / 2, so for Y movement, A and B move SAME direction.
     """
-    step_both_motors(steps, -steps, delay)
+    step_both_motors(steps, steps, delay)
     gantry.pos_y += steps
 
 def move_to(target_x: int, target_y: int, delay: float = NORMAL_DELAY):
@@ -229,8 +229,11 @@ def move_to(target_x: int, target_y: int, delay: float = NORMAL_DELAY):
     dy = target_y - gantry.pos_y
     
     # Convert to motor steps
-    steps_a = dx + dy
-    steps_b = dx - dy
+    # Convert to motor steps (Corrected CoreXY)
+    # A = Y + X
+    # B = Y - X
+    steps_a = dy + dx
+    steps_b = dy - dx
     
     step_both_motors(steps_a, steps_b, delay)
     gantry.pos_x = target_x
