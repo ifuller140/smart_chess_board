@@ -4,12 +4,13 @@ Smart Chess Board Gantry Calibration System
 
 This script provides:
 1. Pre-flight limit switch verification
-2. Prusa-style homing to (0,0)
+2. Prusa-style homing to (0,0) with safety offset
 3. Interactive piece-based calibration
-4. Persistent calibration storage
+4. Persistent calibration and odometry storage
 
 Board: 12" x 12" total, 8x8 grid = 1.5" per square
 Origin: Back-right corner (X-MIN, Y-MIN limit switches)
+Coordinate System: +X = left, +Y = forward
 """
 
 import RPi.GPIO as GPIO
@@ -33,24 +34,20 @@ LIMIT_CLOCK_PIN = 15
 SERVO_MAGNET_PIN = 12
 
 # ==========================
-# STEPPER SEQUENCE (Half-step)
+# STEPPER SEQUENCE (Half-step for 28BYJ-48)
 # ==========================
 STEP_SEQUENCE = [
     [1, 0, 0, 0], [1, 1, 0, 0], [0, 1, 0, 0], [0, 1, 1, 0],
     [0, 0, 1, 0], [0, 0, 1, 1], [0, 0, 0, 1], [1, 0, 0, 1]
 ]
+SEQ_LEN = len(STEP_SEQUENCE)
 
 # ==========================
 # TIMING CONSTANTS
 # ==========================
-FAST_DELAY = 0.001    # Fast homing
-NORMAL_DELAY = 0.002  # Normal movement
-SLOW_DELAY = 0.005    # Precision approach
-
-# ==========================
-# CALIBRATION FILE
-# ==========================
-CALIBRATION_FILE = os.path.expanduser("~/.chess_calibration.json")
+FAST_DELAY = 0.0008   # Fast homing
+NORMAL_DELAY = 0.001  # Normal movement
+SLOW_DELAY = 0.003    # Precision approach
 
 # ==========================
 # BOARD CONSTANTS
@@ -60,18 +57,62 @@ GRID_SIZE = 8
 SQUARE_SIZE_INCHES = BOARD_SIZE_INCHES / GRID_SIZE  # 1.5"
 
 # ==========================
-# GLOBAL STATE
+# CALIBRATION & STATE FILE
 # ==========================
-current_pos = {'x': 0, 'y': 0}  # In steps
-calibration = {
-    'steps_per_inch_x': 256.0,  # Default estimate
-    'steps_per_inch_y': 256.0,
-    'origin_offset_x': 0,
-    'origin_offset_y': 0,
-    'square_size_inches': SQUARE_SIZE_INCHES,
-    'last_calibrated': None
-}
+CALIBRATION_FILE = os.path.expanduser("~/.chess_calibration.json")
+
+# ==========================
+# GLOBAL STATE (Odometry)
+# ==========================
+class GantryState:
+    """Maintains gantry position and calibration."""
+    def __init__(self):
+        self.pos_x = 0  # Current X position in steps
+        self.pos_y = 0  # Current Y position in steps
+        self.idx_a = 0  # Motor A step index
+        self.idx_b = 0  # Motor B step index
+        self.calibration = {
+            'steps_per_inch_x': 2048.0,  # User confirmed value
+            'steps_per_inch_y': 2048.0,
+            'origin_offset_x': 0,
+            'origin_offset_y': 0,
+            'square_size_inches': SQUARE_SIZE_INCHES,
+            'last_calibrated': None
+        }
+        self.homed = False
+
+gantry = GantryState()
 magnet_pwm = None
+
+# ==========================
+# CHESS SQUARE MAPPING
+# ==========================
+def square_to_steps(file_char: str, rank: int) -> tuple:
+    """
+    Convert chess notation to step coordinates.
+    
+    Args:
+        file_char: 'a' through 'h'
+        rank: 1 through 8
+    
+    Returns:
+        (x_steps, y_steps) tuple for center of square
+    """
+    file_idx = ord(file_char.lower()) - ord('a')  # 0-7
+    rank_idx = rank - 1  # 0-7
+    
+    x = (file_idx + 0.5) * SQUARE_SIZE_INCHES * gantry.calibration['steps_per_inch_x']
+    y = (rank_idx + 0.5) * SQUARE_SIZE_INCHES * gantry.calibration['steps_per_inch_y']
+    
+    return (int(x), int(y))
+
+def get_all_squares() -> dict:
+    """Return coordinate map for all 64 squares."""
+    squares = {}
+    for f in 'abcdefgh':
+        for r in range(1, 9):
+            squares[f"{f}{r}"] = square_to_steps(f, r)
+    return squares
 
 # ==========================
 # GPIO SETUP
@@ -86,8 +127,7 @@ def setup():
         GPIO.setup(pin, GPIO.OUT)
         GPIO.output(pin, 0)
     
-    # Limit switch inputs
-    # Active HIGH: 1=Pressed (VCC), 0=Released (GND)
+    # Limit switch inputs (Active HIGH: 1=Pressed)
     GPIO.setup(LIMIT_X_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
     GPIO.setup(LIMIT_Y_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
     GPIO.setup(LIMIT_CLOCK_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
@@ -108,7 +148,7 @@ def cleanup():
 # LIMIT SWITCH READING
 # ==========================
 def read_x_limit():
-    return GPIO.input(LIMIT_X_PIN) == 1  # Active HIGH
+    return GPIO.input(LIMIT_X_PIN) == 1
 
 def read_y_limit():
     return GPIO.input(LIMIT_Y_PIN) == 1
@@ -117,94 +157,105 @@ def read_clock():
     return GPIO.input(LIMIT_CLOCK_PIN) == 1
 
 def wait_for_clock(message="Press clock to continue..."):
-    """Wait for clock button press."""
     print(f"\n>>> {message}")
     while not read_clock():
         time.sleep(0.05)
-    time.sleep(0.2)  # Debounce
+    time.sleep(0.2)
 
 # ==========================
-# MOTOR CONTROL
+# COREXY MOTOR CONTROL
 # ==========================
-def step_motor(pins, steps, delay=NORMAL_DELAY):
-    """Move a single motor."""
-    direction = 1 if steps > 0 else -1
-    for _ in range(abs(steps)):
-        for seq in (STEP_SEQUENCE if direction > 0 else reversed(STEP_SEQUENCE)):
-            for i, pin in enumerate(pins):
-                GPIO.output(pin, seq[i])
-            time.sleep(delay)
-
-def move_corexy(dx, dy, delay=NORMAL_DELAY):
-    """Move in CoreXY coordinates."""
-    global current_pos
+def step_both_motors(steps_a: int, steps_b: int, delay: float = NORMAL_DELAY):
+    """
+    Step both motors simultaneously with interpolation.
     
-    # CoreXY kinematics:
-    # Motor A = X + Y
-    # Motor B = X - Y
+    CoreXY Kinematics:
+    - Pure X movement: Both motors same direction (A+, B+) or (A-, B-)
+    - Pure Y movement: Motors opposite directions (A+, B-) or (A-, B+)
+    """
+    if steps_a == 0 and steps_b == 0:
+        return
+    
+    dir_a = 1 if steps_a >= 0 else -1
+    dir_b = 1 if steps_b >= 0 else -1
+    abs_a = abs(steps_a)
+    abs_b = abs(steps_b)
+    max_steps = max(abs_a, abs_b)
+    
+    err_a = 0
+    err_b = 0
+    
+    for _ in range(max_steps):
+        # Motor A
+        err_a += abs_a
+        if err_a >= max_steps:
+            err_a -= max_steps
+            gantry.idx_a = (gantry.idx_a + dir_a) % SEQ_LEN
+            seq = STEP_SEQUENCE[gantry.idx_a]
+            for i, pin in enumerate(MOTOR_A_PINS):
+                GPIO.output(pin, seq[i])
+        
+        # Motor B
+        err_b += abs_b
+        if err_b >= max_steps:
+            err_b -= max_steps
+            gantry.idx_b = (gantry.idx_b + dir_b) % SEQ_LEN
+            seq = STEP_SEQUENCE[gantry.idx_b]
+            for i, pin in enumerate(MOTOR_B_PINS):
+                GPIO.output(pin, seq[i])
+        
+        time.sleep(delay)
+
+def move_x(steps: int, delay: float = NORMAL_DELAY):
+    """
+    Move in pure X direction.
+    CoreXY: X = (A + B) / 2, so for X movement, A and B move SAME direction.
+    """
+    step_both_motors(steps, steps, delay)
+    gantry.pos_x += steps
+
+def move_y(steps: int, delay: float = NORMAL_DELAY):
+    """
+    Move in pure Y direction.
+    CoreXY: Y = (A - B) / 2, so for Y movement, A and B move OPPOSITE directions.
+    """
+    step_both_motors(steps, -steps, delay)
+    gantry.pos_y += steps
+
+def move_to(target_x: int, target_y: int, delay: float = NORMAL_DELAY):
+    """Move to absolute position."""
+    dx = target_x - gantry.pos_x
+    dy = target_y - gantry.pos_y
+    
+    # Convert to motor steps
     steps_a = dx + dy
     steps_b = dx - dy
     
-    max_steps = max(abs(steps_a), abs(steps_b))
-    if max_steps == 0:
-        return
-    
-    dir_a = 1 if steps_a > 0 else -1
-    dir_b = 1 if steps_b > 0 else -1
-    
-    # Bresenham-style interpolation
-    err_a = 0
-    err_b = 0
-    idx_a = 0
-    idx_b = 0
-    
-    for _ in range(max_steps):
-        err_a += abs(steps_a)
-        if err_a >= max_steps:
-            err_a -= max_steps
-            seq_a = STEP_SEQUENCE[idx_a % len(STEP_SEQUENCE)]
-            for i, pin in enumerate(MOTOR_A_PINS):
-                GPIO.output(pin, seq_a[i])
-            idx_a += dir_a
-        
-        err_b += abs(steps_b)
-        if err_b >= max_steps:
-            err_b -= max_steps
-            seq_b = STEP_SEQUENCE[idx_b % len(STEP_SEQUENCE)]
-            for i, pin in enumerate(MOTOR_B_PINS):
-                GPIO.output(pin, seq_b[i])
-            idx_b += dir_b
-        
-        time.sleep(delay)
-    
-    current_pos['x'] += dx
-    current_pos['y'] += dy
+    step_both_motors(steps_a, steps_b, delay)
+    gantry.pos_x = target_x
+    gantry.pos_y = target_y
 
-def move_to_square(file_idx, rank_idx):
-    """Move to a chess square (0-7 for file a-h, 0-7 for rank 1-8)."""
-    target_x = int((file_idx + 0.5) * SQUARE_SIZE_INCHES * calibration['steps_per_inch_x'])
-    target_y = int((rank_idx + 0.5) * SQUARE_SIZE_INCHES * calibration['steps_per_inch_y'])
-    
-    dx = target_x - current_pos['x']
-    dy = target_y - current_pos['y']
-    
-    move_corexy(dx, dy)
+def move_to_square(file_char: str, rank: int, delay: float = NORMAL_DELAY):
+    """Move to center of a chess square."""
+    target_x, target_y = square_to_steps(file_char, rank)
+    print(f"Moving to {file_char}{rank} ({target_x}, {target_y})...")
+    move_to(target_x, target_y, delay)
 
 # ==========================
 # MAGNET CONTROL
 # ==========================
 def magnet_engage():
-    magnet_pwm.ChangeDutyCycle(2.5)  # Down
+    magnet_pwm.ChangeDutyCycle(2.5)
     time.sleep(0.5)
     magnet_pwm.ChangeDutyCycle(0)
 
 def magnet_release():
-    magnet_pwm.ChangeDutyCycle(7.5)  # Up
+    magnet_pwm.ChangeDutyCycle(7.5)
     time.sleep(0.5)
     magnet_pwm.ChangeDutyCycle(0)
 
 # ==========================
-# PRE-FLIGHT LIMIT SWITCH TEST
+# PRE-FLIGHT TESTS
 # ==========================
 def test_limit_switches():
     """Verify all limit switches before calibration."""
@@ -212,7 +263,6 @@ def test_limit_switches():
     print("PRE-FLIGHT LIMIT SWITCH VERIFICATION")
     print("="*50)
     
-    # Test X limit
     print("\n[1/3] Testing X-MIN limit switch...")
     print("      Please PRESS the X limit switch.")
     while not read_x_limit():
@@ -224,7 +274,6 @@ def test_limit_switches():
     print("      ✓ X-MIN released!")
     wait_for_clock("Press clock to confirm X limit works")
     
-    # Test Y limit
     print("\n[2/3] Testing Y-MIN limit switch...")
     print("      Please PRESS the Y limit switch.")
     while not read_y_limit():
@@ -236,176 +285,308 @@ def test_limit_switches():
     print("      ✓ Y-MIN released!")
     wait_for_clock("Press clock to confirm Y limit works")
     
-    # Test Clock limit (already used for confirmation)
-    print("\n[3/3] Clock switch already verified through confirmations!")
+    print("\n[3/3] Clock switch verified through confirmations!")
     print("      ✓ All limit switches working!")
-    
     return True
 
 # ==========================
-# PRUSA-STYLE HOMING
+# HOMING SEQUENCE
 # ==========================
-def home_axis(axis_name, motor_pins, limit_func, max_steps=10000):
-    """Home a single axis using Prusa-style sequence."""
-    print(f"\n  Homing {axis_name} axis...")
+def pre_home_safety():
+    """Move away from limits before homing to avoid crashes."""
+    print("\n  Safety offset: Moving away from potential limits...")
+    
+    # First check if we're already on a limit
+    on_x = read_x_limit()
+    on_y = read_y_limit()
+    
+    if on_x or on_y:
+        print(f"    Currently on limits: X={on_x}, Y={on_y}")
+        print("    Moving away from limits...")
+        
+        # Move away from limits (positive direction = away from origin)
+        if on_x:
+            move_x(1000, FAST_DELAY)
+        if on_y:
+            move_y(1000, FAST_DELAY)
+    else:
+        # Not on limits, but move a bit just to be safe
+        move_x(500, FAST_DELAY)
+        move_y(500, FAST_DELAY)
+    
+    print("    ✓ Safety offset complete")
+
+def home_x_axis(max_steps: int = 50000):
+    """Home X axis using CoreXY movement."""
+    print("\n  Homing X axis...")
     
     # Phase 1: Fast approach
-    print(f"    Phase 1: Fast approach...")
+    print("    Phase 1: Fast approach...")
     steps = 0
-    while not limit_func() and steps < max_steps:
-        step_motor(motor_pins, -10, FAST_DELAY)
-        steps += 10
+    while not read_x_limit() and steps < max_steps:
+        move_x(-100, FAST_DELAY)
+        steps += 100
     
     if steps >= max_steps:
-        print(f"    [ERROR] {axis_name} limit not found!")
+        print("    [ERROR] X limit not found!")
         return False
     
-    print(f"    Limit triggered at {steps} steps")
+    print(f"    Limit triggered at ~{steps} steps")
     
     # Phase 2: Back off
-    print(f"    Phase 2: Back off...")
-    step_motor(motor_pins, 100, NORMAL_DELAY)
+    print("    Phase 2: Back off...")
+    move_x(200, NORMAL_DELAY)
     
     # Phase 3: Slow approach
-    print(f"    Phase 3: Slow approach...")
-    steps = 0
-    while not limit_func() and steps < 200:
-        step_motor(motor_pins, -1, SLOW_DELAY)
-        steps += 1
+    print("    Phase 3: Slow approach...")
+    while not read_x_limit():
+        move_x(-10, SLOW_DELAY)
     
     # Phase 4: Small back off
-    print(f"    Phase 4: Small back off...")
-    step_motor(motor_pins, 20, NORMAL_DELAY)
+    print("    Phase 4: Small back off...")
+    move_x(50, NORMAL_DELAY)
     
     # Phase 5: Final approach
-    print(f"    Phase 5: Final approach...")
-    while not limit_func():
-        step_motor(motor_pins, -1, SLOW_DELAY * 2)
+    print("    Phase 5: Final approach...")
+    while not read_x_limit():
+        move_x(-1, SLOW_DELAY)
     
-    print(f"    ✓ {axis_name} axis homed!")
+    print("    ✓ X axis homed!")
+    return True
+
+def home_y_axis(max_steps: int = 50000):
+    """Home Y axis using CoreXY movement."""
+    print("\n  Homing Y axis...")
+    
+    # Phase 1: Fast approach
+    print("    Phase 1: Fast approach...")
+    steps = 0
+    while not read_y_limit() and steps < max_steps:
+        move_y(-100, FAST_DELAY)
+        steps += 100
+    
+    if steps >= max_steps:
+        print("    [ERROR] Y limit not found!")
+        return False
+    
+    print(f"    Limit triggered at ~{steps} steps")
+    
+    # Phase 2: Back off
+    print("    Phase 2: Back off...")
+    move_y(200, NORMAL_DELAY)
+    
+    # Phase 3: Slow approach
+    print("    Phase 3: Slow approach...")
+    while not read_y_limit():
+        move_y(-10, SLOW_DELAY)
+    
+    # Phase 4: Small back off
+    print("    Phase 4: Small back off...")
+    move_y(50, NORMAL_DELAY)
+    
+    # Phase 5: Final approach
+    print("    Phase 5: Final approach...")
+    while not read_y_limit():
+        move_y(-1, SLOW_DELAY)
+    
+    print("    ✓ Y axis homed!")
     return True
 
 def home_all():
-    """Home both axes to (0,0)."""
-    global current_pos
-    
+    """Home both axes with safety offset."""
     print("\n" + "="*50)
     print("PRUSA-STYLE HOMING SEQUENCE")
     print("="*50)
     
-    if not home_axis("X", MOTOR_A_PINS, read_x_limit):
+    # Safety offset first
+    pre_home_safety()
+    
+    # Home X
+    if not home_x_axis():
         return False
     
-    if not home_axis("Y", MOTOR_B_PINS, read_y_limit):
+    # Home Y
+    if not home_y_axis():
         return False
     
-    current_pos = {'x': 0, 'y': 0}
+    # Reset position to origin
+    gantry.pos_x = 0
+    gantry.pos_y = 0
+    gantry.homed = True
+    
     print("\n✓ Homing complete! Position: (0, 0)")
+    save_state()
     return True
 
 # ==========================
-# INTERACTIVE CALIBRATION
+# CALIBRATION
 # ==========================
 def interactive_calibrate():
     """Interactive piece-based calibration."""
-    global calibration
-    
     print("\n" + "="*50)
     print("INTERACTIVE PIECE CALIBRATION")
     print("="*50)
     
-    # Estimate center position
-    estimated_center_x = int(6 * SQUARE_SIZE_INCHES * calibration['steps_per_inch_x'])
-    estimated_center_y = int(6 * SQUARE_SIZE_INCHES * calibration['steps_per_inch_y'])
-    
-    print(f"\nMoving to estimated board center...")
-    move_corexy(estimated_center_x, estimated_center_y)
+    # Move to approx center (4 inches from origin)
+    center_steps = int(4 * gantry.calibration['steps_per_inch_x'])
+    print(f"\nMoving to estimated center ({center_steps} steps)...")
+    move_to(center_steps, center_steps)
     
     print("\nEngaging magnet...")
     magnet_engage()
     
     wait_for_clock("Place a chess piece under the magnet, then press clock")
     
-    # Calibrate X axis
+    # Calibrate X
     print("\n--- X-Axis Calibration ---")
-    print("The gantry will move slowly in +X direction.")
-    print("Press clock when piece is CENTERED on column H (far edge).")
+    print("Gantry will move in +X direction.")
+    print("Press clock when piece is CENTERED on column H.")
     
-    start_x = current_pos['x']
+    start_x = gantry.pos_x
     while not read_clock():
-        move_corexy(10, 0, SLOW_DELAY)
-        time.sleep(0.05)
+        move_x(50, SLOW_DELAY)
+        time.sleep(0.02)
     
-    x_edge_steps = current_pos['x']
-    time.sleep(0.3)  # Debounce
+    x_edge = gantry.pos_x
+    time.sleep(0.3)
     
-    # Return to center
-    move_corexy(estimated_center_x - current_pos['x'], 0)
+    # Move back to center for Y calibration
+    move_to(center_steps, gantry.pos_y)
     
-    # Calibrate Y axis
+    # Calibrate Y
     print("\n--- Y-Axis Calibration ---")
-    print("The gantry will move slowly in +Y direction.")
-    print("Press clock when piece is CENTERED on rank 8 (far edge).")
+    print("Gantry will move in +Y direction.")
+    print("Press clock when piece is CENTERED on rank 8.")
     
     while not read_clock():
-        move_corexy(0, 10, SLOW_DELAY)
-        time.sleep(0.05)
+        move_y(50, SLOW_DELAY)
+        time.sleep(0.02)
     
-    y_edge_steps = current_pos['y']
+    y_edge = gantry.pos_y
     time.sleep(0.3)
     
     # Calculate steps per inch
-    # Edge should be at 7.5 squares from origin (center of H8)
-    edge_distance = 7.5 * SQUARE_SIZE_INCHES  # inches
+    # H8 center is at 7.5 squares from origin = 7.5 * 1.5 = 11.25 inches
+    edge_inches = 7.5 * SQUARE_SIZE_INCHES
     
-    calibration['steps_per_inch_x'] = x_edge_steps / edge_distance
-    calibration['steps_per_inch_y'] = y_edge_steps / edge_distance
-    calibration['last_calibrated'] = datetime.now().isoformat()
+    gantry.calibration['steps_per_inch_x'] = x_edge / edge_inches
+    gantry.calibration['steps_per_inch_y'] = y_edge / edge_inches
+    gantry.calibration['last_calibrated'] = datetime.now().isoformat()
     
     print(f"\n✓ Calibration complete!")
-    print(f"  Steps/inch X: {calibration['steps_per_inch_x']:.2f}")
-    print(f"  Steps/inch Y: {calibration['steps_per_inch_y']:.2f}")
+    print(f"  Steps/inch X: {gantry.calibration['steps_per_inch_x']:.1f}")
+    print(f"  Steps/inch Y: {gantry.calibration['steps_per_inch_y']:.1f}")
     
     magnet_release()
     return True
 
 # ==========================
-# CALIBRATION PERSISTENCE
+# STATE PERSISTENCE
 # ==========================
-def save_calibration():
-    """Save calibration to file."""
+def save_state():
+    """Save calibration and current position."""
+    state = {
+        'calibration': gantry.calibration,
+        'position': {'x': gantry.pos_x, 'y': gantry.pos_y},
+        'homed': gantry.homed,
+        'saved_at': datetime.now().isoformat()
+    }
     with open(CALIBRATION_FILE, 'w') as f:
-        json.dump(calibration, f, indent=2)
-    print(f"\n✓ Calibration saved to {CALIBRATION_FILE}")
+        json.dump(state, f, indent=2)
+    print(f"✓ State saved to {CALIBRATION_FILE}")
 
-def load_calibration():
-    """Load calibration from file."""
-    global calibration
+def load_state():
+    """Load calibration and position if available."""
     if os.path.exists(CALIBRATION_FILE):
         with open(CALIBRATION_FILE, 'r') as f:
-            calibration = json.load(f)
-        print(f"✓ Loaded calibration from {CALIBRATION_FILE}")
-        print(f"  Last calibrated: {calibration.get('last_calibrated', 'Unknown')}")
+            state = json.load(f)
+        
+        gantry.calibration = state.get('calibration', gantry.calibration)
+        pos = state.get('position', {'x': 0, 'y': 0})
+        gantry.pos_x = pos['x']
+        gantry.pos_y = pos['y']
+        gantry.homed = state.get('homed', False)
+        
+        print(f"✓ Loaded state from {CALIBRATION_FILE}")
+        print(f"  Position: ({gantry.pos_x}, {gantry.pos_y})")
+        print(f"  Steps/inch: X={gantry.calibration['steps_per_inch_x']:.0f}, Y={gantry.calibration['steps_per_inch_y']:.0f}")
+        print(f"  Homed: {gantry.homed}")
         return True
     return False
+
+# ==========================
+# VERIFICATION
+# ==========================
+def verify_calibration():
+    """Trace board perimeter to verify calibration."""
+    print("\n--- Calibration Verification ---")
+    
+    if not gantry.homed:
+        print("[WARNING] Gantry not homed. Homing first...")
+        if not home_all():
+            return False
+    
+    magnet_engage()
+    wait_for_clock("Place a piece, then press clock to start")
+    
+    corners = [('a', 1), ('h', 1), ('h', 8), ('a', 8), ('a', 1)]
+    
+    for f, r in corners:
+        move_to_square(f, r)
+        wait_for_clock(f"Confirm piece is centered on {f}{r}")
+    
+    magnet_release()
+    save_state()
+    print("\n✓ Verification complete!")
+    return True
+
+def manual_move():
+    """Move to a specific square."""
+    if not gantry.homed:
+        print("[WARNING] Gantry not homed!")
+    
+    try:
+        square = input("Enter square (e.g., e4): ").strip().lower()
+        if len(square) == 2:
+            file_char = square[0]
+            rank = int(square[1])
+            if file_char in 'abcdefgh' and 1 <= rank <= 8:
+                move_to_square(file_char, rank)
+                print(f"Current position: ({gantry.pos_x}, {gantry.pos_y})")
+                return
+        print("Invalid square.")
+    except:
+        print("Invalid input.")
+
+def show_status():
+    """Display current gantry status."""
+    print("\n--- Gantry Status ---")
+    print(f"Position: ({gantry.pos_x}, {gantry.pos_y}) steps")
+    if gantry.calibration['steps_per_inch_x'] > 0:
+        x_in = gantry.pos_x / gantry.calibration['steps_per_inch_x']
+        y_in = gantry.pos_y / gantry.calibration['steps_per_inch_y']
+        print(f"Position: ({x_in:.2f}\", {y_in:.2f}\")")
+    print(f"Homed: {gantry.homed}")
+    print(f"Steps/inch: X={gantry.calibration['steps_per_inch_x']:.0f}, Y={gantry.calibration['steps_per_inch_y']:.0f}")
 
 # ==========================
 # MAIN MENU
 # ==========================
 def main():
     setup()
-    load_calibration()
+    load_state()
     
     try:
         while True:
             print("\n" + "="*50)
             print("SMART CHESS BOARD CALIBRATION")
             print("="*50)
-            print("1. Test Limit Switches (Pre-flight)")
-            print("2. Home Gantry (Prusa-style)")
+            print("1. Test Limit Switches")
+            print("2. Home Gantry")
             print("3. Full Calibration (Home + Interactive)")
             print("4. Verify Calibration (Edge Trace)")
-            print("5. Move to Square (Manual Test)")
+            print("5. Move to Square")
+            print("6. Show Status")
             print("q. Quit")
             
             choice = input("\nSelect option: ").strip().lower()
@@ -418,72 +599,22 @@ def main():
                 if test_limit_switches():
                     if home_all():
                         if interactive_calibrate():
-                            save_calibration()
+                            save_state()
             elif choice == '4':
                 verify_calibration()
             elif choice == '5':
                 manual_move()
+            elif choice == '6':
+                show_status()
             elif choice == 'q':
                 break
     
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
+        save_state()
         cleanup()
         print("GPIO cleaned up. Goodbye!")
-
-def verify_calibration():
-    """Trace the edge of the board to verify calibration."""
-    print("\n--- Calibration Verification ---")
-    print("The gantry will trace the board perimeter.")
-    
-    magnet_engage()
-    wait_for_clock("Place a piece, then press clock to start")
-    
-    # Move to A1 (0,0)
-    print("Moving to A1...")
-    move_to_square(0, 0)
-    wait_for_clock("Confirm piece is centered on A1")
-    
-    # A1 -> H1
-    print("Moving to H1...")
-    move_to_square(7, 0)
-    wait_for_clock("Confirm piece is centered on H1")
-    
-    # H1 -> H8
-    print("Moving to H8...")
-    move_to_square(7, 7)
-    wait_for_clock("Confirm piece is centered on H8")
-    
-    # H8 -> A8
-    print("Moving to A8...")
-    move_to_square(0, 7)
-    wait_for_clock("Confirm piece is centered on A8")
-    
-    # A8 -> A1
-    print("Returning to A1...")
-    move_to_square(0, 0)
-    
-    magnet_release()
-    print("\n✓ Verification complete!")
-
-def manual_move():
-    """Manually move to a specific square."""
-    try:
-        file_str = input("Enter file (a-h): ").strip().lower()
-        rank_str = input("Enter rank (1-8): ").strip()
-        
-        file_idx = ord(file_str) - ord('a')
-        rank_idx = int(rank_str) - 1
-        
-        if 0 <= file_idx <= 7 and 0 <= rank_idx <= 7:
-            print(f"Moving to {file_str}{rank_str}...")
-            move_to_square(file_idx, rank_idx)
-            print("Done.")
-        else:
-            print("Invalid square.")
-    except:
-        print("Invalid input.")
 
 if __name__ == "__main__":
     main()

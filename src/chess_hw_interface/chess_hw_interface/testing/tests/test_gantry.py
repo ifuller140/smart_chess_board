@@ -167,11 +167,6 @@ class GantryTest(HardwareTest):
     def _step_motor(self, pins: List[int], steps: int, delay: float = None):
         """
         Move a motor a given number of steps.
-        
-        Args:
-            pins: Motor pin list [IN1, IN2, IN3, IN4]
-            steps: Number of steps (positive = forward, negative = backward)
-            delay: Delay between steps (uses default if None)
         """
         if delay is None:
             delay = self.STEP_DELAY
@@ -184,6 +179,61 @@ class GantryTest(HardwareTest):
                 for pin_idx, pin in enumerate(pins):
                     self.gpio.write(pin, bool(seq[pin_idx]))
                 time.sleep(delay)
+    
+    def _step_both_motors(self, steps_a: int, steps_b: int, delay: float = None):
+        """
+        Step both motors simultaneously with interpolation.
+        Required for CoreXY kinematics.
+        """
+        if delay is None:
+            delay = self.STEP_DELAY
+        
+        if steps_a == 0 and steps_b == 0:
+            return
+        
+        dir_a = 1 if steps_a >= 0 else -1
+        dir_b = 1 if steps_b >= 0 else -1
+        abs_a = abs(steps_a)
+        abs_b = abs(steps_b)
+        max_steps = max(abs_a, abs_b)
+        
+        err_a = 0
+        err_b = 0
+        idx_a = 0
+        idx_b = 0
+        
+        for _ in range(max_steps):
+            err_a += abs_a
+            if err_a >= max_steps:
+                err_a -= max_steps
+                idx_a = (idx_a + dir_a) % len(self.STEP_SEQUENCE)
+                seq = self.STEP_SEQUENCE[idx_a]
+                for i, pin in enumerate(self.MOTOR_A_PINS):
+                    self.gpio.write(pin, bool(seq[i]))
+            
+            err_b += abs_b
+            if err_b >= max_steps:
+                err_b -= max_steps
+                idx_b = (idx_b + dir_b) % len(self.STEP_SEQUENCE)
+                seq = self.STEP_SEQUENCE[idx_b]
+                for i, pin in enumerate(self.MOTOR_B_PINS):
+                    self.gpio.write(pin, bool(seq[i]))
+            
+            time.sleep(delay)
+    
+    def _move_x(self, steps: int, delay: float = None):
+        """
+        Pure X movement using CoreXY kinematics.
+        X movement: Both motors move SAME direction.
+        """
+        self._step_both_motors(steps, steps, delay)
+    
+    def _move_y(self, steps: int, delay: float = None):
+        """
+        Pure Y movement using CoreXY kinematics.
+        Y movement: Motors move OPPOSITE directions.
+        """
+        self._step_both_motors(steps, -steps, delay)
     
     def _test_motor_a(self) -> bool:
         """Test Motor A movement."""
@@ -209,77 +259,103 @@ class GantryTest(HardwareTest):
     
     def _run_homing_sequence(self) -> bool:
         """
-        Run Prusa-style homing sequence.
-        
-        1. Fast move to limit switch
-        2. Back off
-        3. Slow approach
-        4. Back off slightly
-        5. Very slow final approach
+        Run Prusa-style homing sequence with proper CoreXY movement.
         """
         print("\n  Starting Prusa-style homing sequence...")
         
-        # Home X axis
-        if not self._home_axis("X", self.MOTOR_A_PINS, self.gpio.read_x_limit if self.gpio else lambda: False):
+        # Safety: Move away from limits first
+        print("  Safety offset: Moving away from limits...")
+        self._move_x(500, self.FAST_STEP_DELAY)
+        self._move_y(500, self.FAST_STEP_DELAY)
+        
+        # Home X axis with CoreXY movement
+        if not self._home_x_axis():
             return False
         
-        # Home Y axis
-        if not self._home_axis("Y", self.MOTOR_B_PINS, self.gpio.read_y_limit if self.gpio else lambda: False):
+        # Home Y axis with CoreXY movement
+        if not self._home_y_axis():
             return False
         
         print("  Homing complete!")
         return True
     
-    def _home_axis(self, axis_name: str, motor_pins: List[int], limit_func) -> bool:
-        """
-        Home a single axis using Prusa-style sequence.
-        
-        Args:
-            axis_name: Name for logging
-            motor_pins: Motor pins for this axis
-            limit_func: Function to read limit switch state
-            
-        Returns:
-            True if homing successful
-        """
-        print(f"  Homing {axis_name} axis...")
+    def _home_x_axis(self, max_steps: int = 50000) -> bool:
+        """Home X axis using proper CoreXY movement."""
+        print("  Homing X axis...")
+        limit_func = self.gpio.read_x_limit if self.gpio else lambda: False
         
         # Phase 1: Fast approach
-        print(f"    Phase 1: Fast approach to {axis_name}-MIN...")
-        steps_taken = 0
-        max_steps = 5000  # Safety limit
+        print("    Phase 1: Fast approach...")
+        steps = 0
+        while not limit_func() and steps < max_steps:
+            self._move_x(-100, self.FAST_STEP_DELAY)
+            steps += 100
         
-        while not limit_func() and steps_taken < max_steps:
-            self._step_motor(motor_pins, -10, self.FAST_STEP_DELAY)
-            steps_taken += 10
-        
-        if steps_taken >= max_steps:
-            print(f"    [ERROR] {axis_name}-MIN not found within {max_steps} steps")
+        if steps >= max_steps:
+            print("    [ERROR] X limit not found!")
             return False
         
-        print(f"    {axis_name}-MIN triggered after {steps_taken} steps")
+        print(f"    Limit triggered at ~{steps} steps")
         
-        # Phase 2: Back off 100 steps
-        print(f"    Phase 2: Backing off...")
-        self._step_motor(motor_pins, 100, self.STEP_DELAY)
+        # Phase 2: Back off
+        print("    Phase 2: Back off...")
+        self._move_x(200, self.STEP_DELAY)
         
         # Phase 3: Slow approach
-        print(f"    Phase 3: Slow approach...")
-        steps_taken = 0
-        while not limit_func() and steps_taken < 200:
-            self._step_motor(motor_pins, -1, self.SLOW_STEP_DELAY)
-            steps_taken += 1
+        print("    Phase 3: Slow approach...")
+        while not limit_func():
+            self._move_x(-10, self.SLOW_STEP_DELAY)
         
-        # Phase 4: Back off 20 steps
-        print(f"    Phase 4: Small backoff...")
-        self._step_motor(motor_pins, 20, self.STEP_DELAY)
+        # Phase 4: Small back off
+        print("    Phase 4: Small back off...")
+        self._move_x(50, self.STEP_DELAY)
         
-        # Phase 5: Very slow final approach
-        print(f"    Phase 5: Final approach...")
-        steps_taken = 0
-        while not limit_func() and steps_taken < 50:
-            self._step_motor(motor_pins, -1, self.SLOW_STEP_DELAY * 2)
-            steps_taken += 1
+        # Phase 5: Final approach
+        print("    Phase 5: Final approach...")
+        while not limit_func():
+            self._move_x(-1, self.SLOW_STEP_DELAY)
         
-        print(f"    {axis_name}-axis homed successfully")
+        print("    ✓ X axis homed!")
         return True
+    
+    def _home_y_axis(self, max_steps: int = 50000) -> bool:
+        """Home Y axis using proper CoreXY movement."""
+        print("  Homing Y axis...")
+        limit_func = self.gpio.read_y_limit if self.gpio else lambda: False
+        
+        # Phase 1: Fast approach
+        print("    Phase 1: Fast approach...")
+        steps = 0
+        while not limit_func() and steps < max_steps:
+            self._move_y(-100, self.FAST_STEP_DELAY)
+            steps += 100
+        
+        if steps >= max_steps:
+            print("    [ERROR] Y limit not found!")
+            return False
+        
+        print(f"    Limit triggered at ~{steps} steps")
+        
+        # Phase 2: Back off
+        print("    Phase 2: Back off...")
+        self._move_y(200, self.STEP_DELAY)
+        
+        # Phase 3: Slow approach
+        print("    Phase 3: Slow approach...")
+        while not limit_func():
+            self._move_y(-10, self.SLOW_STEP_DELAY)
+        
+        # Phase 4: Small back off
+        print("    Phase 4: Small back off...")
+        self._move_y(50, self.STEP_DELAY)
+        
+        # Phase 5: Final approach
+        print("    Phase 5: Final approach...")
+        while not limit_func():
+            self._move_y(-1, self.SLOW_STEP_DELAY)
+        
+        print("    ✓ Y axis homed!")
+        return True
+    
+    # Legacy _home_axis method removed - now using _home_x_axis and _home_y_axis
+    # with proper CoreXY kinematics
