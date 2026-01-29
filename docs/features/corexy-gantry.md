@@ -73,10 +73,14 @@ Pulley teeth: 20
 Belt pitch: 2mm (GT2)
 Pulley circumference = 20 × 2mm = 40mm
 
-Motor steps per revolution: 2048 (28BYJ-48, half-step)
+Motor steps per revolution: 200 (NEMA 11, full-step)
 
-steps_per_mm = 2048 / 40 = 51.2 steps/mm
+steps_per_mm = 200 / 40 = 5 steps/mm
 ```
+
+> [!NOTE]
+> With microstepping (1/16), this becomes 80 steps/mm.
+> Currently using full-step mode (MS1/MS2/MS3 not connected).
 
 ### Calibration Procedure
 
@@ -88,7 +92,7 @@ steps_per_mm = 2048 / 40 = 51.2 steps/mm
 4. Measure actual distance traveled
 5. Calculate correction:
    ```
-   actual_steps_per_mm = commanded_distance / measured_distance * 51.2
+   actual_steps_per_mm = commanded_distance / measured_distance * 5
    ```
 6. Update `board_map.yaml` with calibrated value
 
@@ -100,10 +104,15 @@ steps_per_mm = 2048 / 40 = 51.2 steps/mm
 
 | Parameter | Value | Reason |
 |-----------|-------|--------|
-| Maximum speed | ~15 mm/s | 28BYJ-48 motor limit |
-| Safe travel speed | 10 mm/s | Reliable without missed steps |
-| Approach speed | 5 mm/s | Precise piece pickup |
-| Homing speed | 5 mm/s | Controlled contact with switches |
+| Maximum speed | ~200+ mm/s | NEMA 11 motor capability |
+| Safe travel speed | 100 mm/s | Reliable without missed steps |
+| Approach speed | 30 mm/s | Precise piece pickup |
+| Homing speed | 20 mm/s | Controlled contact with switches |
+
+> [!NOTE]
+> NEMA 11 motors are significantly faster than 28BYJ-48.
+> Use speed control (0-100%) to find optimal operating speed.
+> Start testing at low speeds (20-40%) to verify wiring.
 
 ### Acceleration
 

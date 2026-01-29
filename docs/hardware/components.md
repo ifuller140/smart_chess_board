@@ -9,8 +9,8 @@
 | Component | Quantity | Est. Price | Supplier | Part Number | Status |
 |-----------|----------|------------|----------|-------------|--------|
 | Raspberry Pi 4B (4GB) | 1 | $55 | Various | RPI4-MODBP-4GB | ✅ |
-| 28BYJ-48 Stepper Motor | 2 | $5 ea | Amazon/AliExpress | 28BYJ-48 | ⬜ |
-| ULN2003 Driver Board | 2 | $2 ea | Amazon/AliExpress | ULN2003A | ⬜ |
+| NEMA 11 Stepper Motor | 2 | $15 ea | StepperOnline | 11HS13-0404S | ✅ |
+| A4988 Stepper Driver | 2 | $3 ea | Amazon/AliExpress | A4988 | ✅ |
 | SG90 Micro Servo (Z-axis) | 1 | $3 | Amazon/AliExpress | SG90 | ⬜ |
 | SG90 Micro Servo (Clock) | 1 | $3 | Amazon/AliExpress | SG90 | ⬜ |
 | Electromagnet 5V | 1 | $8 | Amazon | P20/15 | ⬜ |
@@ -20,10 +20,11 @@
 | GT2 Pulley 20T | 2 | $3 ea | Amazon | GT2-20T-5mm | ⬜ |
 | Linear Rails/Rods | 4 | $10 | Amazon | 8mm smooth rod | ⬜ |
 | Linear Bearings | 4 | $5 | Amazon | LM8UU | ⬜ |
+| 12V 2A Power Supply | 1 | $12 | Amazon | | ⬜ |
 | 5V 3A Power Supply | 1 | $10 | Amazon | | ⬜ |
 | Dupont Wires | 40pcs | $5 | Amazon | F-F jumpers | ⬜ |
 
-**Estimated Total**: ~$150-200
+**Estimated Total**: ~$180-230
 
 ---
 
@@ -51,79 +52,82 @@
 
 ---
 
-## 28BYJ-48 Stepper Motor
+## NEMA 11 Stepper Motor
 
 ### Specifications
 | Parameter | Value |
 |-----------|-------|
-| Type | Unipolar stepper motor |
-| Voltage | 5V DC |
-| Phases | 4 |
-| Step Angle | 5.625° / 64 (with gearbox) |
-| Gear Ratio | 1:64 |
-| Steps/Revolution | 2048 (half-step) / 4096 (full-step) |
-| Holding Torque | ~3 N·cm |
-| Current | ~240mA per phase |
-| Max Speed | ~15 RPM (reliable) |
-
-### Step Sequences
-
-**Half-Step Sequence (Recommended - 2048 steps/rev)**:
-```
-Step  IN1  IN2  IN3  IN4
-  1    1    0    0    0
-  2    1    1    0    0
-  3    0    1    0    0
-  4    0    1    1    0
-  5    0    0    1    0
-  6    0    0    1    1
-  7    0    0    0    1
-  8    1    0    0    1
-```
-
-**Full-Step Sequence (4096 steps/rev)**:
-```
-Step  IN1  IN2  IN3  IN4
-  1    1    1    0    0
-  2    0    1    1    0
-  3    0    0    1    1
-  4    1    0    0    1
-```
-
-<!-- USER_ATTENTION: Verify which stepping mode works best for your application -->
+| Type | Bipolar stepper motor |
+| Frame Size | NEMA 11 (28mm x 28mm) |
+| Voltage | 12V DC (typical) |
+| Phases | 2 |
+| Step Angle | 1.8° |
+| Steps/Revolution | 200 (full-step) |
+| Holding Torque | ~6 N·cm |
+| Current | ~0.4A per phase |
+| Max Speed | ~1000+ RPM |
 
 ### Speed Calculations
-- Minimum step delay: ~0.001s (1ms)
-- Maximum practical speed: ~15 RPM
-- With 10mm pulley: ~0.31 mm/step, ~7.8 mm/s max
+- Full-step: 200 steps/revolution
+- With microstepping (1/16): 3200 steps/revolution
+- Minimum step pulse: 2µs (using 10µs for safety)
+- Maximum practical speed: Very fast - use speed control (0-100%)
+
+> [!NOTE]
+> NEMA 11 motors are significantly faster than 28BYJ-48 motors.
+> Use the speed control (0-100%) to find optimal operating speed.
 
 ---
 
-## ULN2003A Driver Board
+## A4988 Stepper Driver
 
 ### Specifications
 | Parameter | Value |
 |-----------|-------|
-| Chip | ULN2003APG |
-| Channels | 7 Darlington pairs |
-| Max Voltage | 50V |
-| Max Current | 500mA per channel |
-| Input Logic | 3.3V or 5V compatible |
-| Flyback Diodes | Built-in |
+| Chip | Allegro A4988 |
+| Motor Type | Bipolar stepper |
+| Max Voltage | 35V |
+| Max Current | 2A per phase (with heatsink) |
+| Logic Voltage | 3.3V - 5V compatible |
+| Microstepping | 1, 1/2, 1/4, 1/8, 1/16 |
+| Control Pins | 2 (STEP, DIR) |
 
 ### Pinout
-| Board Pin | Function | Connect To |
-|-----------|----------|------------|
-| IN1 | Motor Phase A | GPIO (BCM) |
-| IN2 | Motor Phase B | GPIO (BCM) |
-| IN3 | Motor Phase C | GPIO (BCM) |
-| IN4 | Motor Phase D | GPIO (BCM) |
-| VCC | Motor Power | 5V (separate supply) |
+| Pin | Function | Connect To |
+|-----|----------|------------|
+| STEP | Step pulse input | GPIO (BCM) |
+| DIR | Direction input | GPIO (BCM) |
+| VDD | Logic power | 3.3V from Pi |
 | GND | Ground | Common ground |
+| VMOT | Motor power | 12V supply |
+| 1A, 1B | Motor coil 1 | Motor wires |
+| 2A, 2B | Motor coil 2 | Motor wires |
+| MS1, MS2, MS3 | Microstepping | Not connected (full-step) |
+| ENABLE | Enable (active low) | GND or GPIO |
+| SLEEP | Sleep (active low) | Tied to RESET |
+| RESET | Reset (active low) | Tied to SLEEP |
 
-### LED Indicators
-- 4 LEDs show which phase is active
-- Useful for debugging step sequences
+### Control Method
+```
+To step the motor:
+1. Set DIR pin HIGH (forward) or LOW (reverse)
+2. Pulse STEP pin: LOW → HIGH → LOW
+3. Each rising edge = 1 step
+4. Delay between pulses controls speed
+```
+
+### Microstepping Configuration
+| MS1 | MS2 | MS3 | Resolution |
+|-----|-----|-----|------------|
+| LOW | LOW | LOW | Full step (200 steps/rev) |
+| HIGH | LOW | LOW | 1/2 step (400 steps/rev) |
+| LOW | HIGH | LOW | 1/4 step (800 steps/rev) |
+| HIGH | HIGH | LOW | 1/8 step (1600 steps/rev) |
+| HIGH | HIGH | HIGH | 1/16 step (3200 steps/rev) |
+
+> [!NOTE]
+> MS1/MS2/MS3 pins are not connected in current setup (full-step mode).
+> Can be added later for smoother motion if needed.
 
 ---
 

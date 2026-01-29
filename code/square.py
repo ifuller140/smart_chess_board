@@ -1,106 +1,167 @@
 #!/usr/bin/env python3
+"""
+CoreXY Square Pattern Test for A4988 Drivers + NEMA 11 Motors.
+
+A quick test to verify motor wiring and CoreXY movement.
+"""
+
 import RPi.GPIO as GPIO
 import time
 
 # ==========================
-# GPIO PIN DEFINITIONS
+# GPIO PIN DEFINITIONS (BCM)
 # ==========================
-# Motor A
-IN1_A = 14
-IN2_A = 4
-IN3_A = 3
-IN4_A = 2
-
-# Motor B
-IN1_B = 24
-IN2_B = 23
-IN3_B = 22
-IN4_B = 27
-
-# Define GPIO pins in arrays
-motorA_pins = [IN1_A, IN2_A, IN3_A, IN4_A]
-motorB_pins = [IN1_B, IN2_B, IN3_B, IN4_B]
+# A4988 Driver Pins (NEMA 11 Motors)
+MOTOR_A_DIR_PIN = 27    # Direction pin for Motor A
+MOTOR_A_STEP_PIN = 22   # Step pin for Motor A
+MOTOR_B_DIR_PIN = 6     # Direction pin for Motor B
+MOTOR_B_STEP_PIN = 5    # Step pin for Motor B
 
 # ==========================
-# STEPPER SEQUENCE
+# TIMING CONSTANTS
 # ==========================
-# Full_step sequence for 28BYJ-48
-seq = [
-    [1,1,0,0],
-    [0,1,1,0],
-    [0,0,1,1],
-    [1,0,0,1]
-]
+STEP_PULSE_US = 10      # Microseconds for step pulse width
+DEFAULT_SPEED = 50      # Default speed (0-100)
+MIN_STEP_DELAY_US = 100     # Maximum speed (100%)
+MAX_STEP_DELAY_US = 5000    # Minimum speed (0%)
+
+
+def speed_to_delay(speed_percent):
+    """Convert speed percentage (0-100) to step delay in seconds."""
+    speed = max(0, min(100, speed_percent))
+    delay_us = MAX_STEP_DELAY_US - (speed / 100.0) * (MAX_STEP_DELAY_US - MIN_STEP_DELAY_US)
+    return delay_us / 1_000_000
+
 
 # ==========================
 # GPIO SETUP
 # ==========================
 GPIO.setmode(GPIO.BCM)
-for pin in motorA_pins + motorB_pins:
+GPIO.setwarnings(False)
+
+for pin in [MOTOR_A_DIR_PIN, MOTOR_A_STEP_PIN, MOTOR_B_DIR_PIN, MOTOR_B_STEP_PIN]:
     GPIO.setup(pin, GPIO.OUT)
     GPIO.output(pin, 0)
 
+
 # ==========================
-# STEPPER MOTOR FUNCTION
+# STEPPER FUNCTIONS
 # ==========================
-def step_motor(pins, direction=1, delay=0.002):
-    """Step a single motor one step in the given direction."""
-    global seq
-    seq_len = len(seq)
-    for step in range(seq_len):
-        for pin in range(4):
-            GPIO.output(pins[pin], seq[step][pin] if direction > 0 else seq[-step - 1][pin])
+def step_both_motors(steps_a, steps_b, speed=DEFAULT_SPEED):
+    """
+    Step both motors simultaneously with Bresenham interpolation.
+    
+    Args:
+        steps_a: Steps for motor A (negative = reverse)
+        steps_b: Steps for motor B (negative = reverse)
+        speed: Speed percentage (0-100)
+    """
+    delay = speed_to_delay(speed)
+    pulse_sec = STEP_PULSE_US / 1_000_000
+    
+    if steps_a == 0 and steps_b == 0:
+        return
+    
+    # Set directions
+    GPIO.output(MOTOR_A_DIR_PIN, GPIO.HIGH if steps_a >= 0 else GPIO.LOW)
+    GPIO.output(MOTOR_B_DIR_PIN, GPIO.HIGH if steps_b >= 0 else GPIO.LOW)
+    
+    abs_a = abs(steps_a)
+    abs_b = abs(steps_b)
+    max_steps = max(abs_a, abs_b)
+    
+    # Bresenham interpolation
+    err_a = 0
+    err_b = 0
+    
+    for _ in range(max_steps):
+        do_step_a = False
+        do_step_b = False
+        
+        err_a += abs_a
+        if err_a >= max_steps:
+            err_a -= max_steps
+            do_step_a = True
+            
+        err_b += abs_b
+        if err_b >= max_steps:
+            err_b -= max_steps
+            do_step_b = True
+        
+        # Pulse step pins simultaneously
+        if do_step_a:
+            GPIO.output(MOTOR_A_STEP_PIN, GPIO.HIGH)
+        if do_step_b:
+            GPIO.output(MOTOR_B_STEP_PIN, GPIO.HIGH)
+        
+        time.sleep(pulse_sec)
+        
+        GPIO.output(MOTOR_A_STEP_PIN, GPIO.LOW)
+        GPIO.output(MOTOR_B_STEP_PIN, GPIO.LOW)
+        
         time.sleep(delay)
 
-def move_both(dirA, dirB, steps, delay=0.002):
-    """Move both motors simultaneously."""
-    for _ in range(steps):
-        step_motor(motorA_pins, dirA, delay)
-        step_motor(motorB_pins, dirB, delay)
 
-# ==========================
-# COREXY MOTION FUNCTIONS
-# ==========================
-def move_x(distance_steps, delay=0.002):
-    """Move along X axis (both motors same direction)."""
-    move_both(1, 1, distance_steps, delay)
+def move_x(steps, speed=DEFAULT_SPEED):
+    """Move along X axis (motors opposite directions for CoreXY)."""
+    step_both_motors(steps, -steps, speed)
 
-def move_y(distance_steps, delay=0.002):
-    """Move along Y axis (motors opposite directions)."""
-    move_both(1, -1, distance_steps, delay)
 
-def move_diag_xy(distance_steps, delay=0.002):
-    """Move along diagonal bottom-left to top-right (X+Y+)."""
-    move_both(1, 0, distance_steps, delay)  # Adjust ratio if needed
+def move_y(steps, speed=DEFAULT_SPEED):
+    """Move along Y axis (motors same direction for CoreXY)."""
+    step_both_motors(steps, steps, speed)
 
-def move_diag_yx(distance_steps, delay=0.002):
-    """Move along diagonal top-left to bottom-right (X-Y+)."""
-    move_both(1, -1, distance_steps, delay)
 
 # ==========================
 # MAIN PROGRAM
 # ==========================
 try:
-    steps_per_side = 300  # Adjust for desired size
-    delay = 0.002
-
-    print("Starting CoreXY square pattern...")
-
-    # Square movement
-    move_x(steps_per_side, delay)
-    move_y(steps_per_side, delay)
-    move_x(-steps_per_side, delay)
-    move_y(-steps_per_side, delay)
-
-    print("Square complete. Drawing X pattern...")
-
-    # X pattern (diagonals)
-    move_both(1, -1, steps_per_side, delay)   # diagonal 1
-    move_both(-1, 1, steps_per_side, delay)   # diagonal 2
-
-    print("Pattern complete.")
+    steps_per_side = 200  # Adjust for desired size
+    speed = 50  # Start at 50% speed
+    
+    print("╔════════════════════════════════════════════╗")
+    print("║   CoreXY Square Pattern Test               ║")
+    print("║   (A4988 + NEMA 11 Motors)                 ║")
+    print("╠════════════════════════════════════════════╣")
+    print(f"║   Steps per side: {steps_per_side:4d}                    ║")
+    print(f"║   Speed: {speed:3d}%                              ║")
+    print("╚════════════════════════════════════════════╝")
+    print()
+    
+    print("Drawing square pattern...")
+    print("  → Moving +X...")
+    move_x(steps_per_side, speed)
+    time.sleep(0.3)
+    
+    print("  ↑ Moving +Y...")
+    move_y(steps_per_side, speed)
+    time.sleep(0.3)
+    
+    print("  ← Moving -X...")
+    move_x(-steps_per_side, speed)
+    time.sleep(0.3)
+    
+    print("  ↓ Moving -Y...")
+    move_y(-steps_per_side, speed)
+    time.sleep(0.3)
+    
+    print()
+    print("Square complete! Drawing X pattern (diagonals)...")
+    
+    # X pattern (diagonals) - Motor A only, then Motor B only
+    print("  ╱ Moving diagonal (Motor A only)...")
+    step_both_motors(steps_per_side, 0, speed)
+    time.sleep(0.3)
+    
+    print("  ╲ Moving diagonal (Motor B only)...")
+    step_both_motors(-steps_per_side, steps_per_side, speed)
+    time.sleep(0.3)
+    
+    print()
+    print("✓ Pattern complete!")
 
 except KeyboardInterrupt:
-    print("Interrupted by user.")
+    print("\nInterrupted by user.")
 finally:
     GPIO.cleanup()
+    print("GPIO cleaned up.")
