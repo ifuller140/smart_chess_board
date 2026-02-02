@@ -34,12 +34,21 @@ CLOCK_2 = {'clk': 7, 'dio': 1}
 # ==========================
 # STEPPER TIMING (A4988)
 # ==========================
-STEP_PULSE_US = 10      # Microseconds for step pulse width (min 2µs for A4988)
-MIN_STEP_DELAY_US = 100     # Maximum speed (100%)
-MAX_STEP_DELAY_US = 5000    # Minimum speed (0%)
+# A4988 Timing Requirements:
+# - DIR setup time: 200ns minimum (we use 10µs for safety)
+# - STEP pulse width: 1µs minimum (we use 50µs for stability)
+# - STEP low time: 1µs minimum
+
+DIR_SETUP_US = 10           # Microseconds to wait after setting DIR
+STEP_PULSE_US = 50          # Microseconds for step pulse width (increased for stability)
+
+# Speed range - MUCH SLOWER for debugging jittery motors
+# These are step delays in MILLISECONDS
+MIN_STEP_DELAY_MS = 2.0     # Maximum speed (100%) - 500 steps/sec
+MAX_STEP_DELAY_MS = 50.0    # Minimum speed (0%) - 20 steps/sec
 
 # Current speed setting (0-100)
-current_speed = 50
+current_speed = 20  # Start slow for testing
 
 
 # ==========================
@@ -48,8 +57,8 @@ current_speed = 50
 def speed_to_delay(speed_percent):
     """Convert speed percentage (0-100) to step delay in seconds."""
     speed = max(0, min(100, speed_percent))
-    delay_us = MAX_STEP_DELAY_US - (speed / 100.0) * (MAX_STEP_DELAY_US - MIN_STEP_DELAY_US)
-    return delay_us / 1_000_000
+    delay_ms = MAX_STEP_DELAY_MS - (speed / 100.0) * (MAX_STEP_DELAY_MS - MIN_STEP_DELAY_MS)
+    return delay_ms / 1000.0  # Convert to seconds
 
 
 def set_speed(speed_percent):
@@ -108,6 +117,20 @@ class TM1637:
 
 
 # ==========================
+# MOTOR STOP FUNCTION
+# ==========================
+def stop_motors():
+    """Immediately stop all motors by setting STEP pins low."""
+    try:
+        GPIO.output(MOTOR_A_STEP_PIN, GPIO.LOW)
+        GPIO.output(MOTOR_B_STEP_PIN, GPIO.LOW)
+        GPIO.output(MOTOR_A_DIR_PIN, GPIO.LOW)
+        GPIO.output(MOTOR_B_DIR_PIN, GPIO.LOW)
+    except:
+        pass  # GPIO may not be initialized
+
+
+# ==========================
 # HARDWARE SETUP
 # ==========================
 def setup():
@@ -156,6 +179,10 @@ def step_motor(step_pin, dir_pin, steps, speed=None):
     # Set direction
     GPIO.output(dir_pin, GPIO.HIGH if steps >= 0 else GPIO.LOW)
     
+    # CRITICAL: Wait for DIR setup time before stepping
+    # A4988 requires DIR to be stable before STEP rising edge
+    time.sleep(DIR_SETUP_US / 1_000_000)
+    
     # Generate step pulses
     for _ in range(abs(steps)):
         step_pulse(step_pin)
@@ -182,6 +209,9 @@ def step_both_motors(steps_a, steps_b, speed=None):
     # Set directions
     GPIO.output(MOTOR_A_DIR_PIN, GPIO.HIGH if steps_a >= 0 else GPIO.LOW)
     GPIO.output(MOTOR_B_DIR_PIN, GPIO.HIGH if steps_b >= 0 else GPIO.LOW)
+    
+    # CRITICAL: Wait for DIR setup time before stepping
+    time.sleep(DIR_SETUP_US / 1_000_000)
     
     abs_a = abs(steps_a)
     abs_b = abs(steps_b)
@@ -425,6 +455,7 @@ def main():
             print("║   6. Test Clock Displays                   ║")
             print("║   7. Set Motor Speed                       ║")
             print("║   8. Run All Tests                         ║")
+            print("║   9. Interactive Stepper Test (NEW)        ║")
             print("║   q. Quit                                  ║")
             print("╚════════════════════════════════════════════╝")
             
@@ -450,6 +481,11 @@ def main():
                 test_speed_range()
                 test_servos()
                 test_clocks()
+            elif choice == '9':
+                print("\nLaunching interactive stepper test...")
+                print("Run: python3 stepper_interactive_test.py")
+                import subprocess
+                subprocess.run(['python3', 'stepper_interactive_test.py'])
             elif choice == 'q':
                 break
             else:
@@ -458,8 +494,10 @@ def main():
     except KeyboardInterrupt:
         print("\nTest interrupted.")
     finally:
+        print("\n🛑 Stopping motors...")
+        stop_motors()
         GPIO.cleanup()
-        print("GPIO cleaned up. Goodbye!")
+        print("✅ Motors stopped. GPIO cleaned up. Goodbye!")
 
 
 if __name__ == "__main__":
