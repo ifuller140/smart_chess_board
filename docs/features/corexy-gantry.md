@@ -39,28 +39,37 @@ The gantry uses a CoreXY belt configuration that converts rotational motion from
 
 ### Motion Equations
 
+> [!IMPORTANT]
+> Our physical layout: Motor A at bottom-left, Motor B at top-right.
+> This affects the kinematic equations compared to standard CoreXY.
+
 **Forward Kinematics** (Motor steps → Cartesian position):
 ```
-X_position = (steps_A + steps_B) / 2 / steps_per_mm
-Y_position = (steps_A - steps_B) / 2 / steps_per_mm
+X_position = (steps_A - steps_B) / 2 / steps_per_mm
+Y_position = (steps_A + steps_B) / 2 / steps_per_mm
 ```
 
 **Inverse Kinematics** (Cartesian position → Motor steps):
 ```
 steps_A = (X_mm + Y_mm) * steps_per_mm
-steps_B = (X_mm - Y_mm) * steps_per_mm
+steps_B = (-X_mm + Y_mm) * steps_per_mm
 ```
 
 ### Movement Examples
 
-| Desired Motion | Motor A | Motor B |
-|----------------|---------|---------|
-| +X (right) | + steps | + steps |
-| -X (left) | - steps | - steps |
-| +Y (forward) | + steps | - steps |
-| -Y (backward) | - steps | + steps |
-| +X +Y (diagonal) | + steps | 0 steps |
-| +X -Y (diagonal) | 0 steps | + steps |
+| Desired Motion | Motor A | Motor B | Direction Pattern |
+|----------------|---------|---------|-------------------|
+| +X (right) | + steps (CW) | - steps (CCW) | OPPOSITE |
+| -X (left) | - steps (CCW) | + steps (CW) | OPPOSITE |
+| +Y (up/forward) | + steps (CW) | + steps (CW) | SAME |
+| -Y (down/backward) | - steps (CCW) | - steps (CCW) | SAME |
+| +X +Y (diagonal) | + steps | 0 steps | |
+| -X +Y (diagonal) | 0 steps | + steps | |
+
+> [!NOTE]
+> **Key insight**: 
+> - X movement uses OPPOSITE motor directions
+> - Y movement uses SAME motor directions
 
 ---
 

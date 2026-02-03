@@ -255,13 +255,15 @@ def step_both_motors(steps_a, steps_b, speed=None):
 
 
 def move_x(steps, speed=None):
-    """Move along X axis. CoreXY: A and B move SAME direction."""
-    step_both_motors(steps, steps, speed)
+    """Move along X axis. Motor A at bottom-left, Motor B at top-right.
+    For +X (right): A CW (+), B CCW (-) = OPPOSITE directions."""
+    step_both_motors(steps, -steps, speed)
 
 
 def move_y(steps, speed=None):
-    """Move along Y axis. CoreXY: A and B move OPPOSITE directions."""
-    step_both_motors(steps, -steps, speed)
+    """Move along Y axis. Motor A at bottom-left, Motor B at top-right.
+    For +Y (up): A CW (+), B CW (+) = SAME direction."""
+    step_both_motors(steps, steps, speed)
 
 
 # ==========================

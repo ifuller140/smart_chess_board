@@ -11,9 +11,16 @@ This script provides:
 5. Persistent calibration and odometry storage
 6. Safety mechanism: auto-stop on unexpected limit triggers
 
+Physical Layout:
+- Motor A at bottom-left corner of board
+- Motor B at top-right corner of board
+- Origin (0,0) at back-left corner (X-MIN, Y-MIN limit switches)
+
+CoreXY Kinematics for this layout:
+- +X (right): Motor A CW (+), Motor B CCW (-) = OPPOSITE directions
+- +Y (up): Motor A CW (+), Motor B CW (+) = SAME direction
+
 Board: 12" x 12" total, 8x8 grid = 1.5" per square
-Origin: Back-right corner (X-MIN, Y-MIN limit switches) - past H8
-Coordinate System: +X = towards A file, +Y = towards rank 1
 """
 
 import RPi.GPIO as GPIO
@@ -235,6 +242,30 @@ def cleanup():
         pass
 
 # ==========================
+# MAGNET SERVO CONTROL
+# ==========================
+SERVO_RELEASE_DUTY = 7.5  # Raised position (disengaged from pieces)
+SERVO_ENGAGE_DUTY = 2.5   # Lowered position (engaged with pieces)
+
+def disengage_magnet():
+    """Raise the magnet servo to disengage from pieces (for homing)."""
+    global magnet_pwm
+    if magnet_pwm:
+        print("  Disengaging magnet (raising servo)...")
+        magnet_pwm.ChangeDutyCycle(SERVO_RELEASE_DUTY)
+        time.sleep(0.5)  # Wait for servo to reach position
+        magnet_pwm.ChangeDutyCycle(0)  # Stop pulses to avoid jitter
+
+def engage_magnet():
+    """Lower the magnet servo to engage with pieces."""
+    global magnet_pwm
+    if magnet_pwm:
+        print("  Engaging magnet (lowering servo)...")
+        magnet_pwm.ChangeDutyCycle(SERVO_ENGAGE_DUTY)
+        time.sleep(0.5)  # Wait for servo to reach position
+        magnet_pwm.ChangeDutyCycle(0)  # Stop pulses to avoid jitter
+
+# ==========================
 # LIMIT SWITCH READING
 # ==========================
 def read_x_limit():
@@ -381,11 +412,13 @@ def step_both_motors(steps_a: int, steps_b: int, speed: int = None, check_limits
 def move_x(steps: int, speed: int = None, check_limits: bool = True):
     """
     Move in pure X direction.
-    CoreXY: X = (A + B) / 2, so for X movement, A and B move SAME direction.
+    
+    Physical layout: Motor A at bottom-left, Motor B at top-right.
+    For +X (right): A turns CW (+), B turns CCW (-) = OPPOSITE directions.
     
     Returns True if completed, False if emergency stopped.
     """
-    result = step_both_motors(steps, steps, speed, check_limits)
+    result = step_both_motors(steps, -steps, speed, check_limits)
     if result:
         gantry.pos_x += steps
     return result
@@ -393,11 +426,14 @@ def move_x(steps: int, speed: int = None, check_limits: bool = True):
 def move_y(steps: int, speed: int = None, check_limits: bool = True):
     """
     Move in pure Y direction.
-    CoreXY: Y = (A - B) / 2, so for Y movement, A and B move OPPOSITE directions.
+    
+    Physical layout: Motor A at bottom-left, Motor B at top-right.
+    For +Y (up): A turns CW (+), B turns CW (+) = SAME direction.
+    For -Y (down): A turns CCW (-), B turns CCW (-) = SAME direction.
     
     Returns True if completed, False if emergency stopped.
     """
-    result = step_both_motors(steps, -steps, speed, check_limits)
+    result = step_both_motors(steps, steps, speed, check_limits)
     if result:
         gantry.pos_y += steps
     return result
@@ -408,10 +444,14 @@ def move_to(target_x: int, target_y: int, speed: int = None, check_limits: bool 
     dy = target_y - gantry.pos_y
     
     # Convert to motor steps for CoreXY
-    # A = X + Y
-    # B = X - Y
+    # Based on physical layout (Motor A at bottom-left, Motor B at top-right):
+    # For +X: A+, B- (opposite)
+    # For +Y: A+, B+ (same)
+    # Combined: A = -X + Y (note: signs adjusted for our motor orientation)
+    #           B = -X - Y (note: signs adjusted for our motor orientation)
+    # Simplified: A = dx + dy, B = -dx + dy
     steps_a = dx + dy
-    steps_b = dx - dy
+    steps_b = -dx + dy
     
     result = step_both_motors(steps_a, steps_b, speed, check_limits)
     if result:
@@ -591,10 +631,13 @@ def home_y_axis(max_steps: int = 100000):
     return True
 
 def home_all():
-    """Home both axes with safety offset."""
+    """Home both axes with safety offset. Disengages magnet first."""
     print("\n" + "="*50)
     print("PRUSA-STYLE HOMING SEQUENCE")
     print("="*50)
+    
+    # SAFETY: Disengage magnet before homing to avoid dragging on pieces
+    disengage_magnet()
     
     # Safety offset first
     pre_home_safety()

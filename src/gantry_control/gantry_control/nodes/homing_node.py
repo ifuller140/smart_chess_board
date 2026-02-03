@@ -3,17 +3,24 @@
 Homing Node for CoreXY Gantry with NEMA 11 + A4988 Drivers.
 
 Implements Prusa-style homing:
-1. Approach limit switch at fast speed
-2. Back off slowly
-3. Re-approach at precision speed for accuracy
+1. Disengage magnet (raise servo) before homing
+2. Approach limit switch at fast speed
+3. Back off slowly
+4. Re-approach at precision speed for accuracy
 
-Uses A4988 STEP/DIR control with proper timing.
+Physical Layout:
+- Motor A at bottom-left corner
+- Motor B at top-right corner
+- Origin (0,0) at bottom-left (where limit switches are)
+
+CoreXY Kinematics for this layout:
+- +X (right): A CW (+), B CCW (-) = OPPOSITE directions
+- +Y (up): A CW (+), B CW (+) = SAME direction
 """
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, String
-from geometry_msgs.msg import Point
 import RPi.GPIO as GPIO
 import time
 import signal
@@ -36,6 +43,11 @@ class HomingNode(Node):
     # Limit switch pins
     X_LIMIT_PIN = 10
     Y_LIMIT_PIN = 9
+    
+    # Servo pin for magnet (Z-axis)
+    SERVO_PIN = 12
+    SERVO_RELEASE_DUTY = 7.5  # Raised position (disengaged)
+    SERVO_ENGAGE_DUTY = 2.5   # Lowered position (engaged)
     
     # Timing constants (matching calibration.py)
     DIR_SETUP_US = 5          # Microseconds for DIR to stabilize
@@ -60,6 +72,7 @@ class HomingNode(Node):
         self.declare_parameter('motorB_step_pin', self.MOTOR_B_STEP_PIN)
         self.declare_parameter('x_limit_pin', self.X_LIMIT_PIN)
         self.declare_parameter('y_limit_pin', self.Y_LIMIT_PIN)
+        self.declare_parameter('servo_pin', self.SERVO_PIN)
         self.declare_parameter('backoff_steps', self.BACKOFF_STEPS)
         
         # Get parameters
@@ -69,11 +82,13 @@ class HomingNode(Node):
         self.motorB_step = self.get_parameter('motorB_step_pin').get_parameter_value().integer_value
         self.x_limit_pin = self.get_parameter('x_limit_pin').get_parameter_value().integer_value
         self.y_limit_pin = self.get_parameter('y_limit_pin').get_parameter_value().integer_value
+        self.servo_pin = self.get_parameter('servo_pin').get_parameter_value().integer_value
         self.backoff_steps = self.get_parameter('backoff_steps').get_parameter_value().integer_value
         
         # State
         self.is_homed = False
         self.emergency_stop = False
+        self.servo_pwm = None
         
         # Setup GPIO
         self._setup_gpio()
@@ -92,13 +107,14 @@ class HomingNode(Node):
         signal.signal(signal.SIGTERM, self._signal_handler)
         
         self.get_logger().info('Homing Node initialized')
-        self.get_logger().info(f'Motor A: DIR={self.motorA_dir}, STEP={self.motorA_step}')
-        self.get_logger().info(f'Motor B: DIR={self.motorB_dir}, STEP={self.motorB_step}')
+        self.get_logger().info(f'Motor A (bottom-left): DIR={self.motorA_dir}, STEP={self.motorA_step}')
+        self.get_logger().info(f'Motor B (top-right): DIR={self.motorB_dir}, STEP={self.motorB_step}')
         self.get_logger().info(f'Limits: X={self.x_limit_pin}, Y={self.y_limit_pin}')
+        self.get_logger().info(f'Servo (magnet): PIN={self.servo_pin}')
         self.get_logger().info('Service available: /gantry/home')
     
     def _setup_gpio(self):
-        """Initialize GPIO pins for A4988 drivers."""
+        """Initialize GPIO pins for A4988 drivers and servo."""
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
         
@@ -111,6 +127,11 @@ class HomingNode(Node):
         # Limit switches with pull-ups
         GPIO.setup(self.x_limit_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(self.y_limit_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        
+        # Servo for magnet
+        GPIO.setup(self.servo_pin, GPIO.OUT)
+        self.servo_pwm = GPIO.PWM(self.servo_pin, 50)  # 50Hz for servo
+        self.servo_pwm.start(0)
     
     def _signal_handler(self, sig, frame):
         """Handle shutdown signals."""
@@ -121,7 +142,16 @@ class HomingNode(Node):
         """Clean up GPIO on shutdown."""
         GPIO.output(self.motorA_step, GPIO.LOW)
         GPIO.output(self.motorB_step, GPIO.LOW)
+        if self.servo_pwm:
+            self.servo_pwm.stop()
         GPIO.cleanup()
+    
+    def _disengage_magnet(self):
+        """Raise the magnet (disengage) before homing."""
+        self.get_logger().info('Disengaging magnet (raising servo)...')
+        self.servo_pwm.ChangeDutyCycle(self.SERVO_RELEASE_DUTY)
+        time.sleep(0.5)  # Wait for servo to reach position
+        self.servo_pwm.ChangeDutyCycle(0)  # Stop sending pulses to avoid jitter
     
     def _read_x_limit(self) -> bool:
         """Read X limit switch (active low)."""
@@ -140,15 +170,18 @@ class HomingNode(Node):
     def _move_x(self, steps: int, delay_ms: float) -> bool:
         """
         Move in X direction using CoreXY kinematics.
-        X movement: Both motors move SAME direction.
+        
+        Physical layout: Motor A at bottom-left, Motor B at top-right.
+        For +X (right): A CW (+), B CCW (-) = OPPOSITE directions.
         
         Returns True if completed, False if limit triggered.
         """
-        dir_value = GPIO.HIGH if steps > 0 else GPIO.LOW
+        # Opposite directions: A gets the sign, B gets opposite sign
+        dir_a = GPIO.HIGH if steps > 0 else GPIO.LOW
+        dir_b = GPIO.LOW if steps > 0 else GPIO.HIGH  # OPPOSITE of A
         
-        # Set direction for both motors (same direction for X)
-        GPIO.output(self.motorA_dir, dir_value)
-        GPIO.output(self.motorB_dir, dir_value)
+        GPIO.output(self.motorA_dir, dir_a)
+        GPIO.output(self.motorB_dir, dir_b)
         time.sleep(self.DIR_SETUP_US / 1_000_000)
         
         delay_sec = delay_ms / 1000.0
@@ -173,16 +206,17 @@ class HomingNode(Node):
     def _move_y(self, steps: int, delay_ms: float) -> bool:
         """
         Move in Y direction using CoreXY kinematics.
-        Y movement: Motors move OPPOSITE directions.
+        
+        Physical layout: Motor A at bottom-left, Motor B at top-right.
+        For +Y (up): A CW (+), B CW (+) = SAME direction.
         
         Returns True if completed, False if limit triggered.
         """
-        # For +Y: Motor A positive, Motor B negative
-        dir_a = GPIO.HIGH if steps > 0 else GPIO.LOW
-        dir_b = GPIO.LOW if steps > 0 else GPIO.HIGH
+        # Same direction: both motors get the same sign
+        dir_value = GPIO.HIGH if steps > 0 else GPIO.LOW
         
-        GPIO.output(self.motorA_dir, dir_a)
-        GPIO.output(self.motorB_dir, dir_b)
+        GPIO.output(self.motorA_dir, dir_value)
+        GPIO.output(self.motorB_dir, dir_value)
         time.sleep(self.DIR_SETUP_US / 1_000_000)
         
         delay_sec = delay_ms / 1000.0
@@ -208,17 +242,18 @@ class HomingNode(Node):
         """
         Home X axis using Prusa-style homing.
         
+        Move in -X direction (left, toward origin) until limit triggered.
         1. Fast approach until limit triggered
         2. Back off slowly
         3. Precision approach for final position
         """
-        self.get_logger().info('Homing X axis...')
+        self.get_logger().info('Homing X axis (moving left toward origin)...')
         
-        # Phase 1: Fast approach (negative direction toward limit)
+        # Phase 1: Fast approach (negative X = left toward limit)
         self.get_logger().info('  Phase 1: Fast approach')
         already_at_limit = self._read_x_limit()
         if not already_at_limit:
-            # Move negative (toward limit) until triggered
+            # Move left (negative X) until triggered
             self._move_x(-self.MAX_HOMING_STEPS, self.SPEED_FAST_DELAY_MS)
         
         if not self._read_x_limit():
@@ -227,7 +262,7 @@ class HomingNode(Node):
         
         self.get_logger().info('  X limit triggered')
         
-        # Phase 2: Back off slowly (positive direction)
+        # Phase 2: Back off slowly (positive X = right)
         self.get_logger().info('  Phase 2: Backing off')
         self._move_x(self.backoff_steps, self.SPEED_SLOW_DELAY_MS)
         
@@ -250,13 +285,14 @@ class HomingNode(Node):
         """
         Home Y axis using Prusa-style homing.
         
+        Move in -Y direction (down, toward origin) until limit triggered.
         1. Fast approach until limit triggered
         2. Back off slowly
         3. Precision approach for final position
         """
-        self.get_logger().info('Homing Y axis...')
+        self.get_logger().info('Homing Y axis (moving down toward origin)...')
         
-        # Phase 1: Fast approach
+        # Phase 1: Fast approach (negative Y = down toward limit)
         self.get_logger().info('  Phase 1: Fast approach')
         already_at_limit = self._read_y_limit()
         if not already_at_limit:
@@ -268,7 +304,7 @@ class HomingNode(Node):
         
         self.get_logger().info('  Y limit triggered')
         
-        # Phase 2: Back off slowly
+        # Phase 2: Back off slowly (positive Y = up)
         self.get_logger().info('  Phase 2: Backing off')
         self._move_y(self.backoff_steps, self.SPEED_SLOW_DELAY_MS)
         
@@ -296,6 +332,9 @@ class HomingNode(Node):
         self.status_pub.publish(status_msg)
         
         self.emergency_stop = False
+        
+        # SAFETY: Disengage magnet before homing
+        self._disengage_magnet()
         
         # Home X first, then Y
         x_success = self._home_x()

@@ -433,16 +433,18 @@ class GantryTest(HardwareTest):
     def _move_x(self, steps: int, speed: int = None, check_limits: bool = True):
         """
         Pure X movement using CoreXY kinematics.
-        X movement: Both motors move SAME direction.
+        Motor A at bottom-left, Motor B at top-right.
+        For +X (right): A CW (+), B CCW (-) = OPPOSITE directions.
         """
-        return self._step_both_motors(steps, steps, speed, check_limits)
+        return self._step_both_motors(steps, -steps, speed, check_limits)
     
     def _move_y(self, steps: int, speed: int = None, check_limits: bool = True):
         """
         Pure Y movement using CoreXY kinematics.
-        Y movement: Motors move OPPOSITE directions.
+        Motor A at bottom-left, Motor B at top-right.
+        For +Y (up): A CW (+), B CW (+) = SAME direction.
         """
-        return self._step_both_motors(steps, -steps, speed, check_limits)
+        return self._step_both_motors(steps, steps, speed, check_limits)
     
     def _test_motor_a(self) -> bool:
         """Test Motor A movement."""
