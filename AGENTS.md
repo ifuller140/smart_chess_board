@@ -43,7 +43,7 @@ smart_chess_board/
 | Component | Model | Purpose | Status |
 |-----------|-------|---------|--------|
 | Controller | Raspberry Pi 4B (4GB) | Main compute | ✅ Working |
-| Stepper Motors | 28BYJ-48 + ULN2003 (×2) | CoreXY gantry X/Y | ⚠️ Testing |
+| Stepper Motors | NEMA 11 + A4988 (×2) | CoreXY gantry X/Y | ⚠️ Testing |
 | Z-Axis Servo | SG90 | Magnet lift | ⚠️ Testing |
 | Clock Servo | SG90 | Hits clock button | ⚠️ Testing |
 | Electromagnet | 5V DC | Piece pickup | ⚠️ Testing |

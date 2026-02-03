@@ -9,10 +9,11 @@ stepper_driver:
     motorB_dir_pin: 6             # Direction pin for Motor B (GPIO6, Physical 31)
     motorB_step_pin: 5            # Step pin for Motor B (GPIO5, Physical 29)
     
-    # Timing Parameters
-    step_pulse_us: 10             # Microseconds for STEP pulse width (min 2µs for A4988)
-    min_step_delay_us: 100        # Minimum delay between steps (max speed)
-    max_step_delay_us: 5000       # Maximum delay between steps (min speed)
+    # Timing Parameters (matching calibration.py)
+    dir_setup_us: 5               # DIR setup time in microseconds (200ns min for A4988)
+    step_pulse_us: 20             # STEP pulse width in microseconds (1µs min for A4988)
+    min_step_delay_ms: 3.0        # Minimum delay between steps (max speed, ~90%)
+    max_step_delay_ms: 50.0       # Maximum delay between steps (min speed, ~0%)
 
 
 servo_node:

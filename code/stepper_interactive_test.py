@@ -45,12 +45,12 @@ CLOCK_2 = {'clk': 7, 'dio': 1}
 # TIMING CONSTANTS
 # ==========================
 # A4988 Timing Requirements:
-# - DIR setup time: 200ns minimum (we use 10µs for safety)
-# - STEP pulse width: 1µs minimum (we use 50µs for visibility)
+# - DIR setup time: 200ns minimum (we use 5µs for safety)
+# - STEP pulse width: 1µs minimum (we use 20µs for stability)
 # - STEP low time: 1µs minimum (we use step_delay)
 
-DIR_SETUP_TIME_US = 10          # Microseconds to wait after setting DIR
-STEP_PULSE_WIDTH_US = 50        # Microseconds to hold STEP high (increased for stability)
+DIR_SETUP_TIME_US = 5           # Microseconds to wait after setting DIR
+STEP_PULSE_WIDTH_US = 20        # Microseconds to hold STEP high
 
 # Speed levels (1-10) mapped to step delays in MILLISECONDS
 # Slower = higher delay, Faster = lower delay

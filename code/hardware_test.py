@@ -35,20 +35,25 @@ CLOCK_2 = {'clk': 7, 'dio': 1}
 # STEPPER TIMING (A4988)
 # ==========================
 # A4988 Timing Requirements:
-# - DIR setup time: 200ns minimum (we use 10µs for safety)
-# - STEP pulse width: 1µs minimum (we use 50µs for stability)
+# - DIR setup time: 200ns minimum (we use 5µs for safety)
+# - STEP pulse width: 1µs minimum (we use 20µs for stability)
 # - STEP low time: 1µs minimum
 
-DIR_SETUP_US = 10           # Microseconds to wait after setting DIR
-STEP_PULSE_US = 50          # Microseconds for step pulse width (increased for stability)
+DIR_SETUP_US = 5            # Microseconds to wait after setting DIR
+STEP_PULSE_US = 20          # Microseconds for step pulse width
 
-# Speed range - MUCH SLOWER for debugging jittery motors
-# These are step delays in MILLISECONDS
-MIN_STEP_DELAY_MS = 2.0     # Maximum speed (100%) - 500 steps/sec
+# Speed range
+# These are step delays in MILLISECONDS (larger = slower)
+MIN_STEP_DELAY_MS = 3.0     # Maximum speed (100%) - ~333 steps/sec
 MAX_STEP_DELAY_MS = 50.0    # Minimum speed (0%) - 20 steps/sec
 
+# Named speeds (matching calibration.py)
+OPERATIONAL_SPEED = 90      # Normal movement
+CALIBRATION_SPEED = 50      # Calibration movements
+PRECISION_SPEED = 20        # Slow/precise movements
+
 # Current speed setting (0-100)
-current_speed = 20  # Start slow for testing
+current_speed = CALIBRATION_SPEED  # Start at calibration speed
 
 
 # ==========================
@@ -250,13 +255,13 @@ def step_both_motors(steps_a, steps_b, speed=None):
 
 
 def move_x(steps, speed=None):
-    """Move along X axis (motors opposite directions for CoreXY)."""
-    step_both_motors(steps, -steps, speed)
+    """Move along X axis. CoreXY: A and B move SAME direction."""
+    step_both_motors(steps, steps, speed)
 
 
 def move_y(steps, speed=None):
-    """Move along Y axis (motors same direction for CoreXY)."""
-    step_both_motors(steps, steps, speed)
+    """Move along Y axis. CoreXY: A and B move OPPOSITE directions."""
+    step_both_motors(steps, -steps, speed)
 
 
 # ==========================

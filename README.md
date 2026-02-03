@@ -27,7 +27,7 @@ An automated chess board that plays physical chess against a human opponent usin
 | Component | Model | Quantity |
 |-----------|-------|----------|
 | Controller | Raspberry Pi 4B (4GB+) | 1 |
-| Stepper Motors | 28BYJ-48 + ULN2003 | 2 |
+| Stepper Motors | NEMA 11 + A4988 Driver | 2 |
 | Servo Motor | SG90 | 1 |
 | Electromagnet | 5V DC (~2.5kg hold) | 1 |
 | Camera | RPi Camera Module v2 or USB | 1 |

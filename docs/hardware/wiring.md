@@ -20,30 +20,30 @@
                               │        RASPBERRY PI 4B          │
                               │                                 │
     ┌─────────────┐           │  ┌───────────────────────────┐  │
-    │ 5V/3A PSU   │           │  │      GPIO HEADER          │  │
+    │ 12V/2A PSU  │           │  │      GPIO HEADER          │  │
     │ (Motors)    │           │  │                           │  │
-    │   (+) ──────┼───────────┼──┼─→ (not connected to Pi!)  │  │
-    │   (-) ──────┼──┬────────┼──┼─→ GND (multiple pins)     │  │
+    │   (+) ──────┼───────────┼──┼─→ A4988 VMOT (not to Pi!) │  │
+    │   (-) ──────┼──┬────────┼──┼─→ GND (common)            │  │
     └─────────────┘  │        │  │                           │  │
-                     │        │  │  14 ─→ ULN2003 A IN1      │  │
-    ┌─────────────┐  │        │  │   4 ─→ ULN2003 A IN2      │  │
-    │ 5V/2A PSU   │  │        │  │   3 ─→ ULN2003 A IN3      │  │
-    │ (Servo/Mag) │  │        │  │   2 ─→ ULN2003 A IN4      │  │
+                     │        │  │  27 ─→ A4988 A DIR        │  │
+    ┌─────────────┐  │        │  │  22 ─→ A4988 A STEP       │  │
+    │ 5V/2A PSU   │  │        │  │   6 ─→ A4988 B DIR        │  │
+    │ (Servo/Mag) │  │        │  │   5 ─→ A4988 B STEP       │  │
     │   (+) ──────┼──┼────────┼──┼─→ Servo VCC (red)         │  │
     │   (-) ──────┼──┼────────┼──┼─→ GND                     │  │
     └─────────────┘  │        │  │                           │  │
-                     │        │  │  24 ─→ ULN2003 B IN1      │  │
-    ┌─────────────┐  │        │  │  23 ─→ ULN2003 B IN2      │  │
-    │ USB-C PSU   │  │        │  │  22 ─→ ULN2003 B IN3      │  │
-    │ (Pi)        │──┼────────┼──┼─→ Pi Power                │  │
-    └─────────────┘  │        │  │  27 ─→ ULN2003 B IN4      │  │
-                     │        │  │                           │  │
                      │        │  │  12 ─→ Magnet Servo       │  │
-                     │        │  │  16 ─→ Clock Servo        │  │
-                     │        │  │                           │  │
-                     │        │  │  10 ─→ Limit X-MIN        │  │
+    ┌─────────────┐  │        │  │  16 ─→ Clock Servo        │  │
+    │ USB-C PSU   │  │        │  │                           │  │
+    │ (Pi)        │──┼────────┼──┼─→ Pi Power                │  │
+    └─────────────┘  │        │  │  10 ─→ Limit X-MIN        │  │
                      │        │  │   9 ─→ Limit Y-MIN        │  │
                      │        │  │  15 ─→ Limit CLOCK        │  │
+                     │        │  │                           │  │
+                     │        │  │  25 ─→ Clock 1 CLK        │  │
+                     │        │  │   8 ─→ Clock 1 DIO        │  │
+                     │        │  │   7 ─→ Clock 2 CLK        │  │
+                     │        │  │   1 ─→ Clock 2 DIO        │  │
                      │        │  │                           │  │
                      │        │  └───────────────────────────┘  │
                      │        │                                 │
@@ -62,44 +62,72 @@
 
 ## Stepper Motor Wiring
 
-### ULN2003 Driver to Raspberry Pi
+### A4988 Driver to Raspberry Pi
+
+The A4988 only requires 2 GPIO pins per motor (STEP and DIR):
 
 ```
-   RASPBERRY PI                    ULN2003A DRIVER
+   RASPBERRY PI                    A4988 DRIVER
    ┌──────────┐                    ┌──────────────┐
    │          │                    │              │
-   │ GPIO 14 ─┼────────────────────┼─ IN1         │
-   │ GPIO 4  ─┼────────────────────┼─ IN2         │
-   │ GPIO 3  ─┼────────────────────┼─ IN3         │
-   │ GPIO 2  ─┼────────────────────┼─ IN4         │
+   │ GPIO 27 ─┼────────────────────┼─ DIR         │    ┌──────────────┐
+   │ GPIO 22 ─┼────────────────────┼─ STEP        │    │   NEMA 11    │
+   │          │                    │              │    │   STEPPER    │
+   │          │                    │ 1A ──────────┼────┤   MOTOR      │
+   │          │                    │ 1B ──────────┼────┤              │
+   │          │                    │ 2A ──────────┼────┤              │
+   │          │                    │ 2B ──────────┼────┤              │
+   │          │                    │              │    └──────────────┘
+   │   3.3V ──┼────────────────────┼─ VDD (logic) │
+   │   GND ───┼────────────────────┼─ GND ────────┼──── PSU (-) 12V
    │          │                    │              │
-   │   GND ───┼────────────────────┼─ GND ────────┼──── PSU (-)
-   │          │                    │              │
-   │          │    ┌───────────────┼─ VCC ────────┼──── PSU (+) 5V
+   │          │    ┌───────────────┼─ VMOT ───────┼──── PSU (+) 12V
    │          │    │               │              │
    └──────────┘    │               └──────────────┘
-                   │                     │
-                   │                     │ Motor connector
-                   │                     ▼
-                   │               ┌──────────────┐
-                   │               │   28BYJ-48   │
-                   │               │   STEPPER    │
-                   │               │   MOTOR      │
-                   └───────────────┤              │
-                     (5-wire conn) └──────────────┘
+                   │
+             MOTOR POWER (8-35V, 1A+)
 ```
 
-### Motor Wire Colors (28BYJ-48)
+> [!IMPORTANT]
+> - A4988 logic (VDD) runs on 3.3V from Pi
+> - Motor power (VMOT) is separate 12V supply
+> - Do NOT connect VMOT to Pi!
 
-| Wire Color | Function | ULN2003 Pin |
-|------------|----------|-------------|
-| Red | Common (+) | (internal to board) |
-| Orange | Coil A (end) | OUT1 |
-| Yellow | Coil A (center) | OUT3 |
-| Pink | Coil B (end) | OUT2 |
-| Blue | Coil B (center) | OUT4 |
+### Motor A (GPIO 27/22) and Motor B (GPIO 6/5)
 
-<!-- USER_ATTENTION: Wire colors may vary by manufacturer - verify with multimeter -->
+| Driver | DIR Pin | STEP Pin |
+|--------|---------|----------|
+| Motor A | GPIO 27 | GPIO 22 |
+| Motor B | GPIO 6 | GPIO 5 |
+
+### A4988 Connections
+
+| A4988 Pin | Connection | Notes |
+|-----------|------------|-------|
+| VDD | 3.3V from Pi | Logic power |
+| GND | Common ground | Pi GND + PSU GND |
+| VMOT | +12V PSU | Motor power (8-35V) |
+| STEP | GPIO (22 or 5) | Step pulse |
+| DIR | GPIO (27 or 6) | Direction |
+| 1A, 1B | Motor coil 1 | NEMA 11 wires |
+| 2A, 2B | Motor coil 2 | NEMA 11 wires |
+| ENABLE | Not connected (or GND) | Low = enabled |
+| MS1/MS2/MS3 | See microstepping | Optional |
+| SLEEP | Connect to RESET | Keep awake |
+| RESET | Connect to SLEEP | Keep awake |
+
+### NEMA 11 Motor Wire Colors (typical)
+
+| Wire Color | Function | A4988 Pin |
+|------------|----------|-----------|
+| Black | Coil A+ | 1A |
+| Green | Coil A- | 1B |
+| Red | Coil B+ | 2A |
+| Blue | Coil B- | 2B |
+
+> [!WARNING]
+> Wire colors may vary by manufacturer - verify with multimeter!
+> Test resistance: 5-50Ω between wires of same coil, infinite between coils.
 
 ---
 

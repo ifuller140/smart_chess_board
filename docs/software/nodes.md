@@ -8,7 +8,7 @@
 
 ### stepper_driver_node
 
-**Purpose**: Low-level control of 28BYJ-48 stepper motors via ULN2003 drivers.
+**Purpose**: Low-level control of NEMA 11 stepper motors via A4988 drivers.
 
 | Property | Value |
 |----------|-------|
@@ -19,20 +19,25 @@
 **Subscriptions**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/stepper/command` | `StepperCommand` | Step commands for motors A and B |
+| `/stepper/command` | `geometry_msgs/Point` | Step commands for motors A (x) and B (y), speed (z) |
+| `/emergency_stop` | `std_msgs/Bool` | Emergency stop signal |
 
 **Publications**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/stepper/status` | `StepperStatus` | Current motor position and state |
+| `/stepper/status` | `std_msgs/String` | Current motor status |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `motorA_pins` | int[4] | [17,18,27,22] | BCM pins for motor A |
-| `motorB_pins` | int[4] | [23,24,25,5] | BCM pins for motor B |
-| `step_sequence` | string | "half" | Step mode: "half" or "full" |
-| `step_delay_default` | float | 0.001 | Seconds between steps |
+| `motorA_dir_pin` | int | 27 | BCM pin for Motor A direction |
+| `motorA_step_pin` | int | 22 | BCM pin for Motor A step |
+| `motorB_dir_pin` | int | 6 | BCM pin for Motor B direction |
+| `motorB_step_pin` | int | 5 | BCM pin for Motor B step |
+| `dir_setup_us` | int | 5 | DIR setup time in microseconds |
+| `step_pulse_us` | int | 20 | STEP pulse width in microseconds |
+| `min_step_delay_ms` | float | 3.0 | Min delay (max speed, ~90%) |
+| `max_step_delay_ms` | float | 50.0 | Max delay (min speed, ~0%) |
 
 ---
 

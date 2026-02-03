@@ -24,27 +24,30 @@ class StepperDriverNode(Node):
     def __init__(self):
         super().__init__('stepper_driver_node')
         
-        # Declare parameters with defaults matching pins.yaml
+        # Declare parameters with defaults matching calibration.py timing
         self.declare_parameter('motorA_dir_pin', 27)
         self.declare_parameter('motorA_step_pin', 22)
         self.declare_parameter('motorB_dir_pin', 6)
         self.declare_parameter('motorB_step_pin', 5)
-        self.declare_parameter('step_pulse_us', 10)
-        self.declare_parameter('min_step_delay_us', 100)
-        self.declare_parameter('max_step_delay_us', 5000)
+        self.declare_parameter('dir_setup_us', 5)          # DIR setup time
+        self.declare_parameter('step_pulse_us', 20)        # Reduced from 10µs
+        self.declare_parameter('min_step_delay_ms', 3.0)   # 90% speed (milliseconds)
+        self.declare_parameter('max_step_delay_ms', 50.0)  # 0% speed (milliseconds)
         
         # Get parameter values
         self.motorA_dir = self.get_parameter('motorA_dir_pin').value
         self.motorA_step = self.get_parameter('motorA_step_pin').value
         self.motorB_dir = self.get_parameter('motorB_dir_pin').value
         self.motorB_step = self.get_parameter('motorB_step_pin').value
+        self.dir_setup_us = self.get_parameter('dir_setup_us').value
         self.step_pulse_us = self.get_parameter('step_pulse_us').value
-        self.min_step_delay_us = self.get_parameter('min_step_delay_us').value
-        self.max_step_delay_us = self.get_parameter('max_step_delay_us').value
+        self.min_step_delay_ms = self.get_parameter('min_step_delay_ms').value
+        self.max_step_delay_ms = self.get_parameter('max_step_delay_ms').value
         
         # Convert timing to seconds for time.sleep()
+        self.dir_setup_sec = self.dir_setup_us / 1_000_000
         self.step_pulse_sec = self.step_pulse_us / 1_000_000
-        self.default_step_delay_sec = self.max_step_delay_us / 1_000_000  # Start slow
+        self.default_step_delay_sec = self.max_step_delay_ms / 1000.0  # Start slow
         
         # GPIO Setup
         GPIO.setmode(GPIO.BCM)
@@ -97,12 +100,12 @@ class StepperDriverNode(Node):
         """
         Convert speed percentage (0-100) to step delay in seconds.
         
-        0 = slowest (max_step_delay_us)
-        100 = fastest (min_step_delay_us)
+        0 = slowest (max_step_delay_ms)
+        100 = fastest (min_step_delay_ms)
         """
         speed = max(0.0, min(100.0, speed_percent))
-        delay_us = self.max_step_delay_us - (speed / 100.0) * (self.max_step_delay_us - self.min_step_delay_us)
-        return delay_us / 1_000_000
+        delay_ms = self.max_step_delay_ms - (speed / 100.0) * (self.max_step_delay_ms - self.min_step_delay_ms)
+        return delay_ms / 1000.0  # Convert to seconds
         
     def command_callback(self, msg):
         """Handle movement commands."""
@@ -152,6 +155,9 @@ class StepperDriverNode(Node):
         
         GPIO.output(self.motorA_dir, GPIO.HIGH if dir_a > 0 else GPIO.LOW)
         GPIO.output(self.motorB_dir, GPIO.HIGH if dir_b > 0 else GPIO.LOW)
+        
+        # CRITICAL: Wait for DIR setup time before stepping
+        time.sleep(self.dir_setup_sec)
         
         abs_a = abs(steps_a)
         abs_b = abs(steps_b)
