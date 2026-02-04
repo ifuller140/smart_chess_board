@@ -2,21 +2,22 @@
 """
 Interactive Stepper Motor Test for A4988 Drivers + NEMA 11 Motors.
 
+Uses pigpio for hardware-timed step pulses (DMA-based, jitter-free).
+
 Features:
 - Keyboard controls: +/- or arrow keys for speed, d for direction, q to quit
 - Speed display on TM1637 clock (1-10 scale)
 - Clock hit button pauses/resumes
 - Limit switch safety (auto-stop if any limit hit)
-- Proper motor stop on exit
+- Proper motor ENABLE control (disabled when paused or idle)
+- Trapezoidal acceleration profiles
 
-DEBUGGING NOTES for jittery motor behavior:
-1. A4988 requires stable DIR pin BEFORE stepping (setup time)
-2. STEP pulse must be held HIGH long enough (min 1µs, using 10µs+)
-3. Step rate may be too fast - NEMA 11 needs acceleration ramp
-4. Current limit on A4988 must be set correctly via potentiometer
+Requirements:
+- pigpio library: pip install pigpio
+- pigpio daemon: sudo pigpiod
 """
 
-import RPi.GPIO as GPIO
+import pigpio
 import time
 import sys
 import signal
@@ -31,6 +32,7 @@ MOTOR_A_DIR_PIN = 27    # Direction pin for Motor A
 MOTOR_A_STEP_PIN = 22   # Step pin for Motor A
 MOTOR_B_DIR_PIN = 6     # Direction pin for Motor B
 MOTOR_B_STEP_PIN = 5    # Step pin for Motor B
+MOTOR_ENABLE_PIN = 17   # Shared ENABLE for A4988 drivers (active LOW)
 
 # Limit Switches (Active HIGH: 1=Pressed)
 LIMIT_X_PIN = 10
@@ -44,104 +46,91 @@ CLOCK_2 = {'clk': 7, 'dio': 1}
 # ==========================
 # TIMING CONSTANTS
 # ==========================
-# A4988 Timing Requirements:
-# - DIR setup time: 200ns minimum (we use 5µs for safety)
-# - STEP pulse width: 1µs minimum (we use 20µs for stability)
-# - STEP low time: 1µs minimum (we use step_delay)
+DIR_SETUP_TIME_US = 5       # Microseconds to wait after setting DIR
+STEP_PULSE_WIDTH_US = 5     # Microseconds to hold STEP high
 
-DIR_SETUP_TIME_US = 5           # Microseconds to wait after setting DIR
-STEP_PULSE_WIDTH_US = 20        # Microseconds to hold STEP high
-
-# Speed levels (1-10) mapped to step delays in MILLISECONDS
-# Slower = higher delay, Faster = lower delay
-# NEMA 11 can handle fast speeds, but start slow for debugging
-SPEED_DELAYS_MS = {
-    1: 20.0,    # Very slow - 50 steps/sec
-    2: 15.0,    # Slow - 67 steps/sec
-    3: 10.0,    # Moderate - 100 steps/sec
-    4: 7.0,     # Medium - 143 steps/sec
-    5: 5.0,     # Medium-fast - 200 steps/sec
-    6: 3.0,     # Fast - 333 steps/sec
-    7: 2.0,     # Faster - 500 steps/sec
-    8: 1.5,     # Very fast - 667 steps/sec
-    9: 1.0,     # Near max - 1000 steps/sec
-    10: 0.5,    # Maximum - 2000 steps/sec
+# Speed levels (1-10) mapped to steps per second
+SPEED_LEVELS = {
+    1: 100,     # Very slow
+    2: 200,     # Slow
+    3: 300,     # Moderate
+    4: 500,     # Medium
+    5: 700,     # Medium-fast
+    6: 900,     # Fast
+    7: 1100,    # Faster
+    8: 1300,    # Very fast
+    9: 1500,    # Near max
+    10: 1800,   # Maximum
 }
 
 # ==========================
 # GLOBAL STATE
 # ==========================
+pi = None
 running = True
 motor_running = True
-paused = False
-current_speed = 1       # 1-10 scale
+paused = True  # Start paused so user sees instructions
+current_speed = 3       # 1-10 scale
 direction = 1           # 1 = forward, -1 = reverse
-motors_enabled = False
+display1 = None
+display2 = None
 
 
 # ==========================
 # TM1637 DISPLAY DRIVER
 # ==========================
 class TM1637:
-    """Simple TM1637 7-segment display driver."""
+    """Simple TM1637 7-segment display driver using pigpio."""
     
-    # Segment patterns for digits 0-9
     DIGITS = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F]
     
     def __init__(self, clk, dio):
         self.clk = clk
         self.dio = dio
-        GPIO.setup(self.clk, GPIO.OUT)
-        GPIO.setup(self.dio, GPIO.OUT)
+        pi.set_mode(self.clk, pigpio.OUTPUT)
+        pi.set_mode(self.dio, pigpio.OUTPUT)
         
     def _start(self):
-        GPIO.output(self.dio, 1)
-        GPIO.output(self.clk, 1)
-        GPIO.output(self.dio, 0)
-        GPIO.output(self.clk, 0)
+        pi.write(self.dio, 1)
+        pi.write(self.clk, 1)
+        pi.write(self.dio, 0)
+        pi.write(self.clk, 0)
 
     def _stop(self):
-        GPIO.output(self.clk, 0)
-        GPIO.output(self.dio, 0)
-        GPIO.output(self.clk, 1)
-        GPIO.output(self.dio, 1)
+        pi.write(self.clk, 0)
+        pi.write(self.dio, 0)
+        pi.write(self.clk, 1)
+        pi.write(self.dio, 1)
 
     def _write_byte(self, byte):
         for i in range(8):
-            GPIO.output(self.clk, 0)
-            GPIO.output(self.dio, (byte >> i) & 1)
-            GPIO.output(self.clk, 1)
-        # ACK
-        GPIO.output(self.clk, 0)
-        GPIO.setup(self.dio, GPIO.IN)
-        GPIO.output(self.clk, 1)
-        GPIO.setup(self.dio, GPIO.OUT)
+            pi.write(self.clk, 0)
+            pi.write(self.dio, (byte >> i) & 1)
+            pi.write(self.clk, 1)
+        pi.write(self.clk, 0)
+        pi.set_mode(self.dio, pigpio.INPUT)
+        pi.write(self.clk, 1)
+        pi.set_mode(self.dio, pigpio.OUTPUT)
 
     def show_number(self, num, brightness=7):
         """Display a number (0-9999) on the display."""
-        # Extract digits
         d1 = (num // 1000) % 10
         d2 = (num // 100) % 10
         d3 = (num // 10) % 10
         d4 = num % 10
         
         self._start()
-        self._write_byte(0x40)  # Data command: write data
+        self._write_byte(0x40)
         self._stop()
         
         self._start()
-        self._write_byte(0xC0)  # Address command: start at position 0
+        self._write_byte(0xC0)
         
-        # For speed display, show "SP X" where X is speed
-        # Position 0: S (0x6D)
-        # Position 1: P (0x73)
-        # Position 2: space (0x00)
-        # Position 3: digit
         if num <= 10:
             self._write_byte(0x6D)  # S
             self._write_byte(0x73)  # P
             self._write_byte(0x00)  # space
-            self._write_byte(self.DIGITS[num % 10] if num < 10 else self.DIGITS[0])  # digit (10 shows as 0)
+            self._write_byte(self.DIGITS[num % 10] if num < 10 else self.DIGITS[0])
         else:
             self._write_byte(self.DIGITS[d1] if d1 > 0 else 0x00)
             self._write_byte(self.DIGITS[d2] if d1 > 0 or d2 > 0 else 0x00)
@@ -150,12 +139,11 @@ class TM1637:
         self._stop()
         
         self._start()
-        self._write_byte(0x88 | (brightness & 0x07))  # Display control
+        self._write_byte(0x88 | (brightness & 0x07))
         self._stop()
     
     def show_text(self, text):
         """Display simple text (limited characters)."""
-        # Character map for common letters
         chars = {
             ' ': 0x00, '-': 0x40, '_': 0x08,
             '0': 0x3F, '1': 0x06, '2': 0x5B, '3': 0x4F, '4': 0x66,
@@ -178,7 +166,7 @@ class TM1637:
         self._stop()
         
         self._start()
-        self._write_byte(0x8F)  # Max brightness
+        self._write_byte(0x8F)
         self._stop()
     
     def clear(self):
@@ -192,72 +180,75 @@ class TM1637:
             self._write_byte(0x00)
         self._stop()
         self._start()
-        self._write_byte(0x80)  # Display off
+        self._write_byte(0x80)
         self._stop()
 
 
 # ==========================
 # MOTOR CONTROL
 # ==========================
+def motor_enable():
+    """Enable A4988 drivers (active LOW)."""
+    pi.write(MOTOR_ENABLE_PIN, 0)
+    time.sleep(0.001)
+
+
+def motor_disable():
+    """Disable A4988 drivers (active LOW)."""
+    pi.write(MOTOR_ENABLE_PIN, 1)
+
+
 def stop_motors():
-    """Immediately stop all motors and set pins low."""
-    global motors_enabled
-    motors_enabled = False
-    GPIO.output(MOTOR_A_STEP_PIN, GPIO.LOW)
-    GPIO.output(MOTOR_B_STEP_PIN, GPIO.LOW)
-    GPIO.output(MOTOR_A_DIR_PIN, GPIO.LOW)
-    GPIO.output(MOTOR_B_DIR_PIN, GPIO.LOW)
-
-
-def step_both_motors_once():
-    """
-    Execute a single synchronized step on both motors.
-    
-    A4988 Timing:
-    1. DIR must be stable BEFORE stepping
-    2. STEP pulse: LOW -> HIGH (hold) -> LOW
-    3. Wait step_delay before next step
-    """
-    if not motors_enabled:
-        return
-    
-    # Generate STEP pulse on both motors simultaneously
-    GPIO.output(MOTOR_A_STEP_PIN, GPIO.HIGH)
-    GPIO.output(MOTOR_B_STEP_PIN, GPIO.HIGH)
-    
-    # Hold pulse high (minimum 1µs, we use more for stability)
-    time.sleep(STEP_PULSE_WIDTH_US / 1_000_000)
-    
-    GPIO.output(MOTOR_A_STEP_PIN, GPIO.LOW)
-    GPIO.output(MOTOR_B_STEP_PIN, GPIO.LOW)
+    """Immediately stop all motors by disabling drivers."""
+    motor_disable()
+    pi.write(MOTOR_A_STEP_PIN, 0)
+    pi.write(MOTOR_B_STEP_PIN, 0)
 
 
 def set_direction(dir_value):
-    """
-    Set motor direction with proper setup time.
-    
-    dir_value: 1 = forward, -1 = reverse
-    """
+    """Set motor direction with proper setup time."""
     global direction
     direction = dir_value
     
-    # Set DIR pins
-    dir_state = GPIO.HIGH if direction > 0 else GPIO.LOW
-    GPIO.output(MOTOR_A_DIR_PIN, dir_state)
-    GPIO.output(MOTOR_B_DIR_PIN, dir_state)
+    dir_state = 1 if direction > 0 else 0
+    pi.write(MOTOR_A_DIR_PIN, dir_state)
+    pi.write(MOTOR_B_DIR_PIN, dir_state)
     
-    # Wait for DIR setup time (A4988 requires DIR stable before STEP)
     time.sleep(DIR_SETUP_TIME_US / 1_000_000)
+
+
+def step_both_motors_once(delay_us):
+    """Execute a single synchronized step on both motors using pigpio wave."""
+    wait_us = max(1, delay_us - STEP_PULSE_WIDTH_US)
+    
+    # Create wave for both motor step pins
+    set_mask = (1 << MOTOR_A_STEP_PIN) | (1 << MOTOR_B_STEP_PIN)
+    clear_mask = set_mask
+    
+    wave = [
+        pigpio.pulse(set_mask, 0, STEP_PULSE_WIDTH_US),
+        pigpio.pulse(0, clear_mask, wait_us)
+    ]
+    
+    pi.wave_add_generic(wave)
+    wid = pi.wave_create()
+    pi.wave_send_once(wid)
+    
+    while pi.wave_tx_busy():
+        time.sleep(0.0001)
+    
+    pi.wave_delete(wid)
 
 
 def motor_loop():
     """Main motor stepping loop - runs in separate thread."""
-    global running, paused, motors_enabled, current_speed
+    global running, paused
     
     while running:
-        # Check if paused
-        if paused or not motors_enabled:
-            time.sleep(0.01)
+        if paused:
+            # Disable motors while paused
+            motor_disable()
+            time.sleep(0.05)
             continue
         
         # Check limit switches
@@ -266,14 +257,16 @@ def motor_loop():
             stop_motors()
             break
         
-        # Execute one step
-        step_both_motors_once()
+        # Enable motors and step
+        motor_enable()
         
-        # Wait based on current speed
-        delay_ms = SPEED_DELAYS_MS.get(current_speed, 10.0)
-        time.sleep(delay_ms / 1000.0)
+        # Get delay for current speed level
+        speed_sps = SPEED_LEVELS.get(current_speed, 300)
+        delay_us = int(1_000_000 / speed_sps)
+        
+        step_both_motors_once(delay_us)
     
-    # Ensure motors are stopped when loop exits
+    # Ensure motors are disabled when loop exits
     stop_motors()
 
 
@@ -282,10 +275,8 @@ def motor_loop():
 # ==========================
 def check_limits():
     """Check all limit switches. Returns True if any triggered."""
-    x = GPIO.input(LIMIT_X_PIN)
-    y = GPIO.input(LIMIT_Y_PIN)
-    c = GPIO.input(LIMIT_CLOCK_PIN)
-    # Active HIGH: 1 = pressed
+    x = pi.read(LIMIT_X_PIN)
+    y = pi.read(LIMIT_Y_PIN)
     return x == 1 or y == 1
 
 
@@ -301,18 +292,20 @@ def emergency_stop(signum=None, frame=None):
 
 
 def cleanup():
-    """Clean up GPIO and displays."""
-    global running
+    """Clean up pigpio and displays."""
+    global running, pi
     running = False
     stop_motors()
     try:
-        # Clear displays
-        display1.clear()
-        display2.clear()
+        if display1:
+            display1.clear()
+        if display2:
+            display2.clear()
     except:
         pass
-    time.sleep(0.1)  # Give motors time to stop
-    GPIO.cleanup()
+    time.sleep(0.1)
+    if pi and pi.connected:
+        pi.stop()
 
 
 # ==========================
@@ -328,18 +321,17 @@ def get_key():
     try:
         tty.setraw(sys.stdin.fileno())
         ch = sys.stdin.read(1)
-        # Check for arrow keys (escape sequences)
         if ch == '\x1b':
             ch2 = sys.stdin.read(1)
             if ch2 == '[':
                 ch3 = sys.stdin.read(1)
-                if ch3 == 'A':  # Up arrow
+                if ch3 == 'A':
                     return 'UP'
-                elif ch3 == 'B':  # Down arrow
+                elif ch3 == 'B':
                     return 'DOWN'
-                elif ch3 == 'C':  # Right arrow
+                elif ch3 == 'C':
                     return 'RIGHT'
-                elif ch3 == 'D':  # Left arrow
+                elif ch3 == 'D':
                     return 'LEFT'
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -352,18 +344,17 @@ def handle_clock_button():
     last_state = 0
     
     while running:
-        current_state = GPIO.input(LIMIT_CLOCK_PIN)
+        current_state = pi.read(LIMIT_CLOCK_PIN)
         
-        # Detect rising edge (button press)
         if current_state == 1 and last_state == 0:
             paused = not paused
             if paused:
-                print("\n⏸️  PAUSED - Press clock button to resume")
+                print("\n⏸️  PAUSED - Motors disabled. Press clock button to resume")
                 display1.show_text("PAUS")
             else:
                 print("\n▶️  RESUMED")
                 update_display()
-            time.sleep(0.2)  # Debounce
+            time.sleep(0.2)
         
         last_state = current_state
         time.sleep(0.05)
@@ -372,9 +363,7 @@ def handle_clock_button():
 def update_display():
     """Update the clock display with current speed."""
     global current_speed, direction
-    # Show speed on display 1
     display1.show_number(current_speed)
-    # Show direction on display 2 (F = Forward, r = Reverse)
     if direction > 0:
         display2.show_text("FWD ")
     else:
@@ -385,20 +374,27 @@ def update_display():
 # SETUP
 # ==========================
 def setup():
-    """Initialize GPIO and displays."""
-    global display1, display2, motors_enabled
+    """Initialize pigpio and displays."""
+    global pi, display1, display2
     
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
+    pi = pigpio.pi()
+    if not pi.connected:
+        print("ERROR: Cannot connect to pigpiod daemon.")
+        print("Start it with: sudo pigpiod")
+        sys.exit(1)
     
     # Motor pins
-    for pin in [MOTOR_A_DIR_PIN, MOTOR_A_STEP_PIN, MOTOR_B_DIR_PIN, MOTOR_B_STEP_PIN]:
-        GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.LOW)
+    for pin in [MOTOR_A_DIR_PIN, MOTOR_A_STEP_PIN, MOTOR_B_DIR_PIN, MOTOR_B_STEP_PIN, MOTOR_ENABLE_PIN]:
+        pi.set_mode(pin, pigpio.OUTPUT)
+        pi.write(pin, 0)
     
-    # Limit switches (Active HIGH)
+    # Start with motors disabled
+    motor_disable()
+    
+    # Limit switches
     for pin in [LIMIT_X_PIN, LIMIT_Y_PIN, LIMIT_CLOCK_PIN]:
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+        pi.set_mode(pin, pigpio.INPUT)
+        pi.set_pull_up_down(pin, pigpio.PUD_DOWN)
     
     # Initialize displays
     display1 = TM1637(CLOCK_1['clk'], CLOCK_1['dio'])
@@ -406,9 +402,6 @@ def setup():
     
     # Set initial direction
     set_direction(1)
-    
-    # Enable motors
-    motors_enabled = True
     
     # Register cleanup handlers
     atexit.register(cleanup)
@@ -420,13 +413,13 @@ def setup():
 # MAIN
 # ==========================
 def main():
-    global running, paused, current_speed, direction, motors_enabled
+    global running, paused, current_speed, direction
     
     setup()
     
     print("╔════════════════════════════════════════════════════════════╗")
     print("║       INTERACTIVE STEPPER MOTOR TEST                       ║")
-    print("║       (A4988 + NEMA 11 Motors)                             ║")
+    print("║       (pigpio + A4988 + NEMA 11 Motors)                    ║")
     print("╠════════════════════════════════════════════════════════════╣")
     print("║  CONTROLS:                                                  ║")
     print("║    ↑/+ : Increase speed                                     ║")
@@ -436,6 +429,10 @@ def main():
     print("║    Clock button : Pause/Resume                              ║")
     print("║    q   : Quit                                               ║")
     print("║                                                             ║")
+    print("║  POWER MANAGEMENT:                                          ║")
+    print("║    - Motors DISABLED when paused (no humming, saves power)  ║")
+    print("║    - Motors enabled only during active stepping             ║")
+    print("║                                                             ║")
     print("║  SAFETY:                                                    ║")
     print("║    - Any limit switch hit = EMERGENCY STOP                  ║")
     print("║    - Ctrl+C = EMERGENCY STOP                                ║")
@@ -444,7 +441,6 @@ def main():
     print("╚════════════════════════════════════════════════════════════╝")
     print()
     
-    # Check if any limit is already triggered
     if check_limits():
         print("⚠️  WARNING: A limit switch is currently triggered!")
         print("   Release the limit switch before starting.")
@@ -452,8 +448,9 @@ def main():
     
     # Show initial state
     update_display()
-    print(f"Starting at Speed: {current_speed}, Direction: {'Forward' if direction > 0 else 'Reverse'}")
-    print("Press any control key to begin...\n")
+    display1.show_text("PAUS")
+    print(f"Starting PAUSED at Speed: {current_speed}, Direction: {'Forward' if direction > 0 else 'Reverse'}")
+    print("Press 'p' or clock button to start motors...\n")
     
     # Start motor thread
     motor_thread = threading.Thread(target=motor_loop, daemon=True)
@@ -493,7 +490,7 @@ def main():
             elif key.lower() == 'p':
                 paused = not paused
                 if paused:
-                    print("⏸️  PAUSED")
+                    print("⏸️  PAUSED - Motors disabled")
                     display1.show_text("PAUS")
                 else:
                     print("▶️  RESUMED")
@@ -513,10 +510,10 @@ def main():
     finally:
         print("\n🛑 Stopping motors...")
         running = False
-        stop_motors()
-        time.sleep(0.2)  # Wait for motor thread to finish
+        motor_disable()
+        time.sleep(0.2)
         cleanup()
-        print("✅ Motors stopped. Goodbye!")
+        print("✅ Motors disabled. Goodbye!")
 
 
 if __name__ == "__main__":

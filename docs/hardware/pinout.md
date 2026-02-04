@@ -14,6 +14,8 @@
 | **Stepper A (Motor A)** |         |            |       |
 | Direction | 27 | 13 | <!-- USER: color --> | A4988 Driver Direction |
 | Step | 22 | 15 | <!-- USER: color --> | A4988 Driver Step |
+| **Stepper ENABLE (shared)** | | | | |
+| Enable | 17 | 11 | <!-- USER: color --> | A4988 ENABLE (active LOW) |
 | **Stepper B (Motor B)** | | | | |
 | Direction | 6 | 31 | <!-- USER: color --> | A4988 Driver Direction |
 | Step | 5 | 29 | <!-- USER: color --> | A4988 Driver Step |
@@ -41,7 +43,7 @@ Power to A4988 Driver 3V3  (1)  (2)  5V
                     GPIO3  (5)  (6)  GND     GND for 12V power hub
                     GPIO4  (7)  (8)  GPIO14  
 GND for 5V hub        GND  (9)  (10) GPIO15  Clock limit switch
-                    GPIO17 (11) (12) GPIO18  Clock Servo PWM signal
+Motor ENABLE        GPIO17 (11) (12) GPIO18  Clock Servo PWM signal
 Stepper A Direction GPIO27 (13) (14) GND
 Stepper A Step      GPIO22 (15) (16) GPIO23 
 Power to A4988 Driver 3V3  (17) (18) GPIO24
@@ -202,12 +204,13 @@ Before assigning new pins, verify no conflicts:
 | 10 | X-MIN Limit Switch |
 | 12 | Z-Axis Servo (gantry) |
 | 15 | Clock Limit Switch |
+| 17 | Motor ENABLE (A4988) |
 | 18 | Clock Servo |
 | 22 | Stepper A STEP (A4988) |
 | 25 | Clock 1 CLK |
 | 27 | Stepper A DIR (A4988) |
 
-**Available pins**: 2, 3, 4, 11, 13, 14, 16, 17, 19, 20, 21, 23, 24, 26
+**Available pins**: 2, 3, 4, 11, 13, 14, 16, 19, 20, 21, 23, 24, 26
 
 ---
 
