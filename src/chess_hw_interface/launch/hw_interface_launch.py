@@ -35,6 +35,6 @@ def generate_launch_description():
             package='gantry_control',
             executable='gantry_kinematics_node',
             name='gantry_kinematics',
-            parameters=[{'steps_per_mm': 10.0}] # Example param override
+            parameters=[{'steps_per_mm': 5.0}]
         )
     ])
