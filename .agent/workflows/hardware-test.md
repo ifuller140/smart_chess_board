@@ -34,48 +34,48 @@ python3 -c "import RPi.GPIO; print('GPIO OK')"
 
 ---
 
-## Automated Test Suite (Recommended)
+## Hardware Test Suite
 
-Run the integrated hardware test suite:
+All hardware tests are consolidated in a single script. Run it directly on the Raspberry Pi:
 
 ```bash
-cd ~/smart_chess_ws/src/smart_chess_board
+cd ~/dev/smart_chess_board/code
 
-# List available tests
-python3 -m chess_hw_interface.testing.test_runner --list
-
-# Run all tests
-python3 -m chess_hw_interface.testing.test_runner --all
-
-# Run specific test
-python3 -m chess_hw_interface.testing.test_runner --test gantry
-python3 -m chess_hw_interface.testing.test_runner --test servo
-python3 -m chess_hw_interface.testing.test_runner --test camera
-python3 -m chess_hw_interface.testing.test_runner --test magnet
-python3 -m chess_hw_interface.testing.test_runner --test clock
-python3 -m chess_hw_interface.testing.test_runner --test manual_gantry
+# Start the test suite
+python3 hardware_test.py
 ```
 
-### Manual Gantry Control Test
+### Available Tests
 
-The `manual_gantry` test provides interactive arrow-key control from the player's perspective (sitting at white's side).
+| Option | Test | Description |
+|--------|------|-------------|
+| 1 | Stepper Motors | Test Motor A/B movement + CoreXY axes |
+| 2 | Speed Range | Test motors at 20%, 40%, 60%, 80%, 100% |
+| 3 | Servos | Sweep clock and magnet servos |
+| 4 | Limit Switches (Monitor) | 10-second monitoring mode |
+| 5 | Limit Switches (Interactive) | Guided verification with clock confirmation |
+| 6 | Clock Displays | Display '8888' on both TM1637 displays |
+| 7 | Set Speed | Adjust motor speed percentage |
+| 8 | Enable/Disable | Test motor holding torque |
+| 9 | Run All | Execute full test sequence |
+| 10 | Interactive Stepper | Launch stepper_interactive_test.py |
+| 11 | Manual Gantry Control | Arrow key control with direction chart |
+
+### Manual Gantry Control (Option 11)
+
+Interactive arrow-key control from the player's perspective (sitting at white's side).
 
 **CoreXY Motor Layout:**
 - Motor A: Bottom-left (BCM 27 dir, 22 step)
 - Motor B: Top-right (BCM 6 dir, 5 step)
 
 **Direction Chart:**
-| Arrow Key | X/Y Move | Motor A (BL) | Motor B (TR) |
-|-----------|----------|--------------|--------------|
-| → Right   | +X       | Clockwise    | Counter-CW   |
-| ← Left    | -X       | Counter-CW   | Clockwise    |
-| ↑ Up      | +Y       | Clockwise    | Clockwise    |
-| ↓ Down    | -Y       | Counter-CW   | Counter-CW   |
-
-The test runner will:
-- Automatically initialize GPIO pins
-- Display test status on the 7-segment display (if connected)
-- Wait for clock button input between test steps
+| Arrow Key | Motor A (BL) | Motor B (TR) |
+|-----------|--------------|--------------|
+| → Right   | Clockwise    | Counter-CW   |
+| ← Left    | Counter-CW   | Clockwise    |
+| ↑ Up      | Clockwise    | Clockwise    |
+| ↓ Down    | Counter-CW   | Counter-CW   |
 
 ---
 

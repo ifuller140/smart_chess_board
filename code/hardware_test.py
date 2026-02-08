@@ -21,6 +21,7 @@ import time
 import sys
 import signal
 import atexit
+import curses
 
 # ==========================
 # GPIO PIN DEFINITIONS (BCM)
@@ -53,12 +54,12 @@ CLOCK_2 = {'clk': 7, 'dio': 1}
 # - STEP pulse width: 1µs minimum (we use 5µs for stability)
 
 DIR_SETUP_US = 5        # Microseconds to wait after setting DIR
-STEP_PULSE_US = 5       # Microseconds for step pulse width
+STEP_PULSE_US = 10      # Microseconds for step pulse width (longer for driver stability)
 
-# Speed Parameters (steps/second)
-MAX_SPEED = 1500        # Maximum step rate
-MIN_SPEED = 300         # Starting speed for acceleration
-ACCEL_STEPS = 75        # Steps to accelerate/decelerate
+# Speed Parameters (steps/second) - Tuned for torque
+MAX_SPEED = 1200        # Maximum step rate (reduced for torque)
+MIN_SPEED = 250         # Starting speed for acceleration (slower for torque buildup)
+ACCEL_STEPS = 100       # Steps to accelerate/decelerate (more gradual ramp)
 
 # Named speeds (percentage of max)
 OPERATIONAL_SPEED = 90      # Normal movement
@@ -570,6 +571,107 @@ def speed_menu():
         print("Invalid input. Speed unchanged.")
 
 
+def manual_gantry_control():
+    """Interactive manual gantry control with curses."""
+    print("\n" + "=" * 60)
+    print("  MANUAL GANTRY CONTROL")
+    print("="* 60)
+    print("Use arrow keys to move gantry (player perspective).")
+    print("Press 'q' to exit.")
+    print("\nStarting in 2 seconds...")
+    time.sleep(2)
+    
+    try:
+        curses.wrapper(_gantry_control_loop)
+    except Exception as e:
+        print(f"\nError: {e}")
+    
+    print("\nManual control ended.")
+
+
+def _gantry_control_loop(stdscr):
+    """Curses control loop for manual gantry."""
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    stdscr.timeout(50)
+    
+    pos_x = 0
+    pos_y = 0
+    steps_per_tick = 25
+    min_steps = 5
+    max_steps = 100
+    
+    running = True
+    
+    while running:
+        stdscr.clear()
+        
+        # Header
+        stdscr.addstr(0, 0, "=" * 60)
+        stdscr.addstr(1, 0, "  MANUAL GANTRY CONTROL - Player Perspective")
+        stdscr.addstr(2, 0, "=" * 60)
+        
+        # Position and settings
+        stdscr.addstr(4, 0, f"Position: X={pos_x:6d}  Y={pos_y:6d} steps")
+        stdscr.addstr(5, 0, f"Step size: {steps_per_tick} steps/tick")
+        x_lim = pi.read(LIMIT_X_PIN)
+        y_lim = pi.read(LIMIT_Y_PIN)
+        stdscr.addstr(6, 0, f"Limits: X={x_lim}  Y={y_lim}")
+        
+        # Motor layout diagram
+        stdscr.addstr(8, 0, "Motor Layout (from player's view):")
+        stdscr.addstr(9, 0, "                     +Y (UP)")
+        stdscr.addstr(10, 0, "                        |")
+        stdscr.addstr(11, 0, "    Motor B ----------- + ----------- ")
+        stdscr.addstr(12, 0, "   (top-right)      -X --+-- +X (RIGHT)")
+        stdscr.addstr(13, 0, "                         |")
+        stdscr.addstr(14, 0, "    Motor A ----------- + -----------")
+        stdscr.addstr(15, 0, "  (bottom-left)        -Y (DOWN)")
+        
+        # Direction chart
+        stdscr.addstr(17, 0, "Direction Chart:")
+        stdscr.addstr(18, 0, "+--------+-----------------+-----------------+")
+        stdscr.addstr(19, 0, "| Key    | Motor A (BL)    | Motor B (TR)    |")
+        stdscr.addstr(20, 0, "+--------+-----------------+-----------------+")
+        stdscr.addstr(21, 0, "| RIGHT  | Clockwise (+)   | Counter-CW (-)  |")
+        stdscr.addstr(22, 0, "| LEFT   | Counter-CW (-)  | Clockwise (+)   |")
+        stdscr.addstr(23, 0, "| UP     | Clockwise (+)   | Clockwise (+)   |")
+        stdscr.addstr(24, 0, "| DOWN   | Counter-CW (-)  | Counter-CW (-)  |")
+        stdscr.addstr(25, 0, "+--------+-----------------+-----------------+")
+        
+        # Controls
+        stdscr.addstr(27, 0, "Controls: Arrow keys=Move  +/-=Step size  q=Quit")
+        
+        stdscr.refresh()
+        
+        key = stdscr.getch()
+        
+        if key == ord('q') or key == ord('Q'):
+            running = False
+            continue
+        
+        if key == ord('+') or key == ord('='):
+            steps_per_tick = min(max_steps, steps_per_tick + 5)
+        elif key == ord('-') or key == ord('_'):
+            steps_per_tick = max(min_steps, steps_per_tick - 5)
+        elif key == curses.KEY_RIGHT:
+            # +X: Motor A CW, Motor B CCW
+            move_x(steps_per_tick)
+            pos_x += steps_per_tick
+        elif key == curses.KEY_LEFT:
+            if pi.read(LIMIT_X_PIN) == 0:
+                move_x(-steps_per_tick)
+                pos_x -= steps_per_tick
+        elif key == curses.KEY_UP:
+            # +Y: Both motors CW
+            move_y(steps_per_tick)
+            pos_y += steps_per_tick
+        elif key == curses.KEY_DOWN:
+            if pi.read(LIMIT_Y_PIN) == 0:
+                move_y(-steps_per_tick)
+                pos_y -= steps_per_tick
+
+
 # ==========================
 # MAIN MENU
 # ==========================
@@ -593,7 +695,8 @@ def main():
             print("║   7. Set Motor Speed                       ║")
             print("║   8. Test Enable/Disable                   ║")
             print("║   9. Run All Tests                         ║")
-            print("║   10. Interactive Stepper Test             ║")
+            print("║  10. Interactive Stepper Test              ║")
+            print("║  11. Manual Gantry Control (Arrow Keys)    ║")
             print("║   q. Quit                                  ║")
             print("╚════════════════════════════════════════════╝")
             
@@ -626,6 +729,8 @@ def main():
                 print("Run: python3 stepper_interactive_test.py")
                 import subprocess
                 subprocess.run(['python3', 'stepper_interactive_test.py'])
+            elif choice == '11':
+                manual_gantry_control()
             elif choice == 'q':
                 break
             else:
