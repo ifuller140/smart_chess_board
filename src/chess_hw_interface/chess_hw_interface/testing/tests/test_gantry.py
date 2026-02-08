@@ -2,18 +2,21 @@
 """
 Gantry hardware tests for CoreXY (A4988 + NEMA 11).
 
+Uses pigpio DMA waves for jitter-free stepping.
 The suite is ordered from basic wiring/timing validation to full motion stress.
 """
 
 import time
 from statistics import mean
-from typing import List
+from typing import List, Optional
 
 from ..base_test import HardwareTest, TestStep
+from ..pigpio_stepper import PigpioStepper
+
 
 
 class GantryTestBase(HardwareTest):
-    """Shared pin map and movement helpers for gantry tests."""
+    """Shared pin map and movement helpers for gantry tests using pigpio DMA."""
 
     MOTOR_A_DIR_PIN = 27
     MOTOR_A_STEP_PIN = 22
@@ -24,159 +27,102 @@ class GantryTestBase(HardwareTest):
     LIMIT_X_PIN = 10
     LIMIT_Y_PIN = 9
 
-    DIR_SETUP_US = 50
-    STEP_PULSE_US = 100
-
-    MIN_DELAY_MS = 5.0
-    MAX_DELAY_MS = 50.0
-    DEFAULT_RAMP_STEPS = 30
+    def __init__(self, gpio_interface=None, display_interface=None):
+        super().__init__(gpio_interface, display_interface)
+        self._stepper: Optional[PigpioStepper] = None
+        self._pos_x_steps = 0
+        self._pos_y_steps = 0
 
     def setup(self) -> bool:
-        if self.gpio is None:
-            raise RuntimeError('GPIO interface required - hardware must be connected')
-
+        """Initialize pigpio-based stepper controller."""
         try:
-            for pin in [
-                self.MOTOR_A_DIR_PIN,
-                self.MOTOR_A_STEP_PIN,
-                self.MOTOR_B_DIR_PIN,
-                self.MOTOR_B_STEP_PIN,
-                self.MOTOR_ENABLE_PIN,
-            ]:
-                self.gpio.setup_output(pin)
-
-            self.gpio.setup_input(self.LIMIT_X_PIN, pull_up=True)
-            self.gpio.setup_input(self.LIMIT_Y_PIN, pull_up=True)
-
-            self._disable_motors()
-            self.gpio.write(self.MOTOR_A_STEP_PIN, False)
-            self.gpio.write(self.MOTOR_B_STEP_PIN, False)
+            self._stepper = PigpioStepper()
             self._pos_x_steps = 0
             self._pos_y_steps = 0
             return True
         except Exception as exc:
             print(f'[ERROR] Gantry setup failed: {exc}')
+            print('Make sure pigpiod is running: sudo pigpiod')
             return False
 
     def teardown(self):
-        try:
-            self.gpio.write(self.MOTOR_A_STEP_PIN, False)
-            self.gpio.write(self.MOTOR_B_STEP_PIN, False)
-            self._disable_motors()
-        except Exception:
-            pass
+        """Clean up pigpio resources."""
+        if self._stepper:
+            try:
+                self._stepper.cleanup()
+            except Exception:
+                pass
+            self._stepper = None
 
     def _enable_motors(self):
-        self.gpio.write(self.MOTOR_ENABLE_PIN, False)
-        time.sleep(0.001)
+        if self._stepper:
+            self._stepper.motor_enable()
 
     def _disable_motors(self):
-        self.gpio.write(self.MOTOR_ENABLE_PIN, True)
+        if self._stepper:
+            self._stepper.motor_disable()
 
     def _read_x_limit(self) -> bool:
-        return self.gpio.read_x_limit()
+        if self._stepper:
+            return self._stepper.read_x_limit()
+        return False
 
     def _read_y_limit(self) -> bool:
-        return self.gpio.read_y_limit()
+        if self._stepper:
+            return self._stepper.read_y_limit()
+        return False
 
-    def _speed_to_delay_sec(self, speed_percent: int) -> float:
-        speed = max(0, min(100, speed_percent))
-        delay_ms = self.MAX_DELAY_MS - (speed / 100.0) * (self.MAX_DELAY_MS - self.MIN_DELAY_MS)
-        return delay_ms / 1000.0
+    def _step_both(self, steps_a: int, steps_b: int, speed_percent: int = 35):
+        """Step both motors using pigpio DMA waves."""
+        if self._stepper:
+            self._stepper.step_both_motors(steps_a, steps_b, speed_percent)
 
-    def _ramped_delay(self, step_idx: int, total_steps: int, cruise_delay: float, ramp_steps: int) -> float:
-        if total_steps < 3 or ramp_steps <= 0:
-            return cruise_delay
+    def _step_single(self, motor: str, steps: int, speed_percent: int = 35):
+        """Step a single motor."""
+        if self._stepper:
+            self._stepper.step_single_motor(motor, steps, speed_percent)
 
-        ramp = min(ramp_steps, total_steps // 2)
-        if ramp <= 0:
-            return cruise_delay
+    def _move_x(self, steps: int, speed_percent: int = 35):
+        """Move along X axis (CoreXY: A+, B-)."""
+        if self._stepper:
+            self._stepper.move_x(steps, speed_percent)
+            self._pos_x_steps += steps
 
-        if step_idx < ramp:
-            ratio = (ramp - step_idx) / ramp
-        elif step_idx >= (total_steps - ramp):
-            ratio = (step_idx - (total_steps - ramp - 1)) / ramp
-        else:
-            ratio = 0.0
-
-        slowest_delay = self.MAX_DELAY_MS / 1000.0
-        return cruise_delay + (slowest_delay - cruise_delay) * ratio * 0.8
-
-    def _step_both(self, steps_a: int, steps_b: int, speed_percent: int = 30, ramp_steps: int = DEFAULT_RAMP_STEPS):
-        if steps_a == 0 and steps_b == 0:
-            return
-
-        self._enable_motors()
-        self.gpio.write(self.MOTOR_A_DIR_PIN, steps_a >= 0)
-        self.gpio.write(self.MOTOR_B_DIR_PIN, steps_b >= 0)
-        time.sleep(self.DIR_SETUP_US / 1_000_000.0)
-
-        abs_a = abs(steps_a)
-        abs_b = abs(steps_b)
-        max_steps = max(abs_a, abs_b)
-        cruise_delay = self._speed_to_delay_sec(speed_percent)
-
-        err_a = 0
-        err_b = 0
-
-        for idx in range(max_steps):
-            step_a = False
-            step_b = False
-
-            err_a += abs_a
-            if err_a >= max_steps:
-                err_a -= max_steps
-                step_a = True
-
-            err_b += abs_b
-            if err_b >= max_steps:
-                err_b -= max_steps
-                step_b = True
-
-            if step_a:
-                self.gpio.write(self.MOTOR_A_STEP_PIN, True)
-            if step_b:
-                self.gpio.write(self.MOTOR_B_STEP_PIN, True)
-
-            time.sleep(self.STEP_PULSE_US / 1_000_000.0)
-            self.gpio.write(self.MOTOR_A_STEP_PIN, False)
-            self.gpio.write(self.MOTOR_B_STEP_PIN, False)
-
-            delay = self._ramped_delay(idx, max_steps, cruise_delay, ramp_steps)
-            if delay > (self.STEP_PULSE_US / 1_000_000.0):
-                time.sleep(delay - (self.STEP_PULSE_US / 1_000_000.0))
-
-    def _step_single(self, motor: str, steps: int, speed_percent: int = 30):
-        if motor == 'a':
-            self._step_both(steps, 0, speed_percent)
-        else:
-            self._step_both(0, steps, speed_percent)
-
-    def _move_x(self, steps: int, speed_percent: int = 30):
-        # +X => A+, B-
-        self._step_both(steps, -steps, speed_percent)
-        self._pos_x_steps += steps
-
-    def _move_y(self, steps: int, speed_percent: int = 30):
-        # +Y => A+, B+
-        self._step_both(steps, steps, speed_percent)
-        self._pos_y_steps += steps
+    def _move_y(self, steps: int, speed_percent: int = 35):
+        """Move along Y axis (CoreXY: A+, B+)."""
+        if self._stepper:
+            self._stepper.move_y(steps, speed_percent)
+            self._pos_y_steps += steps
 
     def _timed_pulse_train(self, step_pin: int, pulses: int, delay_us: int) -> List[float]:
-        self._enable_motors()
+        """
+        Generate a pulse train and measure timing jitter.
+        
+        Note: This still uses Python timing for MEASUREMENT purposes only.
+        The actual motor movements use pigpio DMA.
+        """
+        if not self._stepper:
+            return []
+        
+        self._stepper.motor_enable()
         intervals_ms: List[float] = []
         last = time.perf_counter()
 
+        # Set direction
+        self._stepper.pi.write(self.MOTOR_A_DIR_PIN, True)
+        self._stepper.pi.write(self.MOTOR_B_DIR_PIN, True)
+
         for _ in range(pulses):
-            self.gpio.write(step_pin, True)
-            time.sleep(self.STEP_PULSE_US / 1_000_000.0)
-            self.gpio.write(step_pin, False)
+            self._stepper.pi.write(step_pin, True)
+            time.sleep(10 / 1_000_000.0)  # 10us pulse
+            self._stepper.pi.write(step_pin, False)
 
             now = time.perf_counter()
             intervals_ms.append((now - last) * 1000.0)
             last = now
             time.sleep(max(0.0, delay_us / 1_000_000.0))
 
+        self._stepper.motor_disable()
         return intervals_ms
 
 

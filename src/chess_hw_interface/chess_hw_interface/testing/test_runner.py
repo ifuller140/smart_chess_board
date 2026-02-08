@@ -49,10 +49,10 @@ class GPIOInterface:
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
 
-        # Active LOW switches with pull-ups.
-        GPIO.setup(self.PIN_X_LIMIT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(self.PIN_Y_LIMIT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(self.PIN_CLOCK_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        # Active HIGH switches with pull-downs (pressed = 3.3V = HIGH).
+        GPIO.setup(self.PIN_X_LIMIT, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+        GPIO.setup(self.PIN_Y_LIMIT, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+        GPIO.setup(self.PIN_CLOCK_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
     def setup_output(self, pin: int):
         self.GPIO.setup(pin, self.GPIO.OUT)
@@ -68,13 +68,13 @@ class GPIOInterface:
         return self.GPIO.input(pin) == self.GPIO.HIGH
 
     def read_x_limit(self) -> bool:
-        return not self.read(self.PIN_X_LIMIT)
+        return self.read(self.PIN_X_LIMIT)  # Active HIGH: 1 = pressed
 
     def read_y_limit(self) -> bool:
-        return not self.read(self.PIN_Y_LIMIT)
+        return self.read(self.PIN_Y_LIMIT)  # Active HIGH: 1 = pressed
 
     def read_clock_button(self) -> bool:
-        return not self.read(self.PIN_CLOCK_BUTTON)
+        return self.read(self.PIN_CLOCK_BUTTON)  # Active HIGH: 1 = pressed
 
     def cleanup(self):
         self.GPIO.cleanup()
