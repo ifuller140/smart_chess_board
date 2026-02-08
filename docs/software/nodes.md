@@ -34,10 +34,13 @@
 | `motorA_step_pin` | int | 22 | BCM pin for Motor A step |
 | `motorB_dir_pin` | int | 6 | BCM pin for Motor B direction |
 | `motorB_step_pin` | int | 5 | BCM pin for Motor B step |
-| `dir_setup_us` | int | 5 | DIR setup time in microseconds |
-| `step_pulse_us` | int | 20 | STEP pulse width in microseconds |
-| `min_step_delay_ms` | float | 3.0 | Min delay (max speed, ~90%) |
+| `motor_enable_pin` | int | 17 | Shared A4988 enable pin (active LOW) |
+| `dir_setup_us` | int | 50 | DIR setup time in microseconds |
+| `step_pulse_us` | int | 100 | STEP pulse width in microseconds |
+| `min_step_delay_ms` | float | 5.0 | Min delay (max speed, conservative) |
 | `max_step_delay_ms` | float | 50.0 | Max delay (min speed, ~0%) |
+| `accel_ramp_steps` | int | 40 | Ramp steps for acceleration/deceleration |
+| `hold_torque_when_idle` | bool | true | Keep motors enabled after moves |
 
 ---
 
@@ -87,9 +90,9 @@
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `limit_switch_pins.x_min` | int | 6 | BCM pin for X-axis limit |
-| `limit_switch_pins.y_min` | int | 13 | BCM pin for Y-axis limit |
-| `limit_switch_pins.clock_hit` | int | 19 | BCM pin for clock button |
+| `limit_switch_pins.x_min` | int | 10 | BCM pin for X-axis limit |
+| `limit_switch_pins.y_min` | int | 9 | BCM pin for Y-axis limit |
+| `limit_switch_pins.clock_hit` | int | 15 | BCM pin for clock button |
 | `debounce_ms` | int | 20 | Debounce time in milliseconds |
 
 ---
@@ -310,19 +313,19 @@
 **Publications**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/stepper/command` | `StepperCommand` | Motor step commands |
+| `/stepper/command` | `geometry_msgs/Point` | Motor A/B step commands and speed |
 | `/gantry/pose` | `geometry_msgs/Point` | Current X/Y position |
 
 **Subscriptions**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/stepper/status` | `StepperStatus` | Motor feedback |
+| `/stepper/status` | `std_msgs/String` | Motor status |
 | `/limit_switch/state` | `LimitSwitchState` | Limit switch state |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `steps_per_mm` | float | 51.2 | Calibrated steps/mm |
+| `steps_per_mm` | float | 5.0 | Calibrated steps/mm (full-step baseline) |
 | `max_speed_mm_s` | float | 10.0 | Maximum speed |
 | `acceleration_mm_s2` | float | 50.0 | Acceleration |
 

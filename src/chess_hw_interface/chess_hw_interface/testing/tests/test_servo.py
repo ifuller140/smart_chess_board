@@ -20,7 +20,7 @@ class ServoTest(HardwareTest):
     
     # Servo pins (BCM)
     Z_SERVO_PIN = 12      # Gantry Z-axis
-    CLOCK_SERVO_PIN = 16  # Clock button hitter
+    CLOCK_SERVO_PIN = 18  # Clock button hitter
     
     # PWM settings
     PWM_FREQUENCY = 50  # 50Hz for servos

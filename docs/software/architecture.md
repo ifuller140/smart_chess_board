@@ -169,8 +169,8 @@ chess_perception        gantry_control
 
 | Topic | Message Type | Publisher | Subscribers |
 |-------|--------------|-----------|-------------|
-| `/stepper/command` | StepperCommand | gantry_kinematics | stepper_driver |
-| `/stepper/status` | StepperStatus | stepper_driver | gantry_kinematics |
+| `/stepper/command` | geometry_msgs/Point | gantry_kinematics | stepper_driver |
+| `/stepper/status` | std_msgs/String | stepper_driver | gantry_kinematics |
 | `/limit_switch/state` | LimitSwitchState | limit_switch | gantry_kinematics, game_manager |
 | `/camera/image_raw` | sensor_msgs/Image | camera | board_detector |
 | `/perception/board_state` | BoardState | piece_detector | game_manager |

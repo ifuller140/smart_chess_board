@@ -111,9 +111,9 @@ Motor B steps = X_steps - Y_steps
 ```
 
 Key parameters:
-- **Steps per revolution**: 2048 (28BYJ-48 with half-stepping)
-- **Pulley diameter**: 10mm (GT2 timing pulley)
-- **Steps per mm**: ~65 steps/mm
+- **Steps per revolution**: 200 (NEMA 11 full-step)
+- **Pulley pitch length per revolution**: 40mm (20T GT2 pulley)
+- **Steps per mm**: ~5 steps/mm (full-step, no microstepping)
 
 <!-- USER_ATTENTION: Verify these values with actual hardware calibration -->
 
@@ -199,7 +199,7 @@ pip3 install RPi.GPIO python-chess opencv-python numpy
 | Symptom | Likely Cause | Solution |
 |---------|--------------|----------|
 | Motors don't move | Wrong pin config | Check `pins.yaml` BCM numbers |
-| Motors jitter | Insufficient delay | Increase `step_delay_default` |
+| Motors jitter | Step timing too aggressive or noisy power | Increase `min_step_delay_ms`, verify motor PSU and common ground |
 | Camera black | Not enabled | Run `sudo raspi-config`, enable camera |
 | Permission denied | GPIO access | Add user to `gpio` group |
 | Magnet weak | Insufficient power | Check 5V supply current capacity |

@@ -36,34 +36,35 @@ python3 -c "import RPi.GPIO; print('GPIO OK')"
 
 ## Hardware Test Suite
 
-All hardware tests are consolidated in a single script. Run it directly on the Raspberry Pi:
+Primary entrypoint is the ROS package test runner:
 
 ```bash
-cd ~/dev/smart_chess_board/code
-
-# Start the test suite
-python3 hardware_test.py
+cd ~/dev/smart_chess_board
+python3 -m src.chess_hw_interface.chess_hw_interface.testing.test_runner --list
 ```
 
 ### Available Tests
 
-| Option | Test | Description |
-|--------|------|-------------|
-| 1 | Stepper Motors | Test Motor A/B movement + CoreXY axes |
-| 2 | Speed Range | Test motors at 20%, 40%, 60%, 80%, 100% |
-| 3 | Servos | Sweep clock and magnet servos |
-| 4 | Limit Switches (Monitor) | 10-second monitoring mode |
-| 5 | Limit Switches (Interactive) | Guided verification with clock confirmation |
-| 6 | Clock Displays | Display '8888' on both TM1637 displays |
-| 7 | Set Speed | Adjust motor speed percentage |
-| 8 | Enable/Disable | Test motor holding torque |
-| 9 | Run All | Execute full test sequence |
-| 10 | Interactive Stepper | Launch stepper_interactive_test.py |
-| 11 | Manual Gantry Control | Arrow key control with direction chart |
+| Command | Description |
+|---------|-------------|
+| `--category gantry --subtest limits` | Validate X/Y limit polarity |
+| `--category gantry --subtest pulse` | Software pulse timing/jitter diagnostics |
+| `--category gantry --subtest motor_a motor_b` | Single-motor direction/torque checks |
+| `--category gantry --subtest corexy` | Verify axis mapping (+X/-X/+Y/-Y) |
+| `--category gantry --subtest speed_sweep` | Identify stall speed ranges |
+| `--category gantry --subtest repeatability` | Multi-loop stress repeatability |
+| `--category gantry --subtest enable_hold` | Check holding torque behavior |
+| `--category gantry --subtest manual` | Curses manual control/tuning |
+| `--category gantry --subtest full` | Guided full gantry workflow |
 
-### Manual Gantry Control (Option 11)
+### Manual Gantry Control
 
 Interactive arrow-key control from the player's perspective (sitting at white's side).
+
+```bash
+python3 -m src.chess_hw_interface.chess_hw_interface.testing.test_runner \
+  --category gantry --subtest manual
+```
 
 **CoreXY Motor Layout:**
 - Motor A: Bottom-left (BCM 27 dir, 22 step)
@@ -81,27 +82,10 @@ Interactive arrow-key control from the player's perspective (sitting at white's 
 
 ## Manual Component Tests
 
-### 1. Test Stepper Motors
+### Legacy Script Notes
 
-```bash
-cd ~/smart_chess_ws/src/smart_chess_board/code
-
-# Test Motor A (should rotate one direction then back)
-python3 square.py
-```
-
-Expected: Motor A rotates ~90 degrees and returns.
-
-### 2. Test Servo Motor
-
-```bash
-cd ~/smart_chess_ws/src/smart_chess_board/code
-
-# Test servo sweep
-python3 ServoTestController.py
-```
-
-Expected: Servo moves from 0° to 180° and back.
+Standalone scripts in `code/` are useful for ad-hoc checks but are not the canonical suite.
+Prefer the test runner under `src/chess_hw_interface/chess_hw_interface/testing/`.
 
 ### 3. Test Limit Switches
 
@@ -180,6 +164,7 @@ Expected: Magnet engages (should attract steel).
 
 ## Next Steps
 
-After all components pass:
-1. Run individual ROS 2 nodes
-2. Test full system launch
+After gantry tests pass:
+1. Run `gantry/full` once end-to-end.
+2. Launch ROS nodes and test `/gantry/home` and `/gantry/move`.
+3. Record calibration updates in docs and config.

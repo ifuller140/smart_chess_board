@@ -109,7 +109,7 @@ servo_node:
 ```yaml
 clock_servo_node:
   ros__parameters:
-    clock_servo_pin: 16         # Hits clock button after computer move
+    clock_servo_pin: 18         # Hits clock button after computer move
     rest_pwm: 2.5               # Servo at rest (away from button)
     hit_pwm: 7.5                # Servo pressing button
     hit_duration: 0.3           # Seconds to hold button
@@ -119,7 +119,6 @@ clock_servo_node:
 
 ### Limit Switches
 ```yaml
-limit_switch_node:
 limit_switch_node:
   ros__parameters:
     limit_switch_pins:

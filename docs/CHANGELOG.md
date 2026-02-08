@@ -15,6 +15,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 - Reorganized documentation into centralized `docs/` directory
+- Gantry hardware test suite reorganized into focused diagnostics (`limits`, `pulse`, `motor_a`, `motor_b`, `corexy`, `speed_sweep`, `repeatability`, `enable_hold`, `homing`, `manual`, `full`)
+- Manual gantry UI updated with live step-delay tuning and ramped stepping behavior
+- Stepper driver defaults tuned for Linux userspace stability (longer DIR/STEP timing, safer minimum delay, acceleration ramp)
+- Homing node now explicitly controls A4988 `ENABLE` pin
+- Hardware docs aligned to A4988 + NEMA 11 architecture (removed ULN2003/28BYJ guidance in primary docs)
+
+### Fixed
+- Inconsistent clock servo pin documentation (`GPIO18` is now consistently documented)
+- Outdated limit switch defaults in software docs
 
 ### Planned
 <!-- USER_ATTENTION: Add your planned features here -->
