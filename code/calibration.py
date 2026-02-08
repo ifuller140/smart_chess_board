@@ -62,14 +62,15 @@ SERVO_MAGNET_PIN = 12
 # A4988 TIMING CONSTANTS
 # ==========================
 DIR_SETUP_US = 5            # Microseconds to wait after setting DIR
-STEP_PULSE_US = 5           # Microseconds for step pulse width
+STEP_PULSE_US = 10          # Microseconds for step pulse width (longer for driver stability)
 
 # ==========================
 # SPEED CONFIGURATION (steps per second)
+# Tuned for torque: slower start, more gradual acceleration
 # ==========================
-MAX_SPEED = 1500        # Maximum step rate
-MIN_SPEED = 300         # Starting speed for acceleration
-ACCEL_STEPS = 75        # Steps to accelerate/decelerate
+MAX_SPEED = 1200        # Maximum step rate (reduced for torque)
+MIN_SPEED = 250         # Starting speed for acceleration (slower for torque buildup)
+ACCEL_STEPS = 100       # Steps to accelerate/decelerate (more gradual ramp)
 
 # Named speeds (steps per second)
 OPERATIONAL_SPEED = 1200    # General movement
@@ -186,9 +187,10 @@ def setup():
 def signal_handler(sig, frame):
     """Handle Ctrl+C and termination signals."""
     print("\n\n🛑 EMERGENCY STOP - Signal received!")
+    safety.emergency_stop = True
     stop_motors()
-    cleanup()
-    sys.exit(0)
+    # Don't call sys.exit() here - let the main loop exit gracefully
+    # This avoids issues with curses wrapper cleanup
 
 def motor_enable():
     """Enable A4988 drivers (active LOW)."""
@@ -197,7 +199,8 @@ def motor_enable():
 
 def motor_disable():
     """Disable A4988 drivers (no current, no holding torque)."""
-    pi.write(MOTOR_ENABLE_PIN, 1)
+    if pi and pi.connected:
+        pi.write(MOTOR_ENABLE_PIN, 1)
 
 def stop_motors():
     """Immediately stop all motor movement."""

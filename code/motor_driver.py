@@ -45,15 +45,16 @@ MOTOR_ENABLE_PIN = 17   # Shared ENABLE for both A4988 drivers (active LOW)
 # ==========================
 # TIMING PARAMETERS (microseconds)
 # ==========================
-STEP_PULSE_US = 5       # Step pulse width (A4988 min: 1 µs)
+STEP_PULSE_US = 10      # Step pulse width (longer for driver stability)
 DIR_SETUP_US = 5        # Direction setup time before stepping (A4988 min: 200 ns)
 
 # ==========================
 # SPEED PARAMETERS (steps/second)
+# Tuned for torque: slower start, more gradual acceleration
 # ==========================
-MAX_SPEED = 1500        # Maximum step rate
-MIN_SPEED = 300         # Starting/ending speed for acceleration ramp
-ACCEL_STEPS = 75        # Number of steps to accelerate/decelerate
+MAX_SPEED = 1200        # Maximum step rate (reduced for torque)
+MIN_SPEED = 250         # Starting/ending speed for acceleration ramp (slower for torque buildup)
+ACCEL_STEPS = 100       # Number of steps to accelerate/decelerate (more gradual ramp)
 
 # ==========================
 # MOTOR DRIVER CLASS

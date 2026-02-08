@@ -53,7 +53,24 @@ python3 -m chess_hw_interface.testing.test_runner --test servo
 python3 -m chess_hw_interface.testing.test_runner --test camera
 python3 -m chess_hw_interface.testing.test_runner --test magnet
 python3 -m chess_hw_interface.testing.test_runner --test clock
+python3 -m chess_hw_interface.testing.test_runner --test manual_gantry
 ```
+
+### Manual Gantry Control Test
+
+The `manual_gantry` test provides interactive arrow-key control from the player's perspective (sitting at white's side).
+
+**CoreXY Motor Layout:**
+- Motor A: Bottom-left (BCM 27 dir, 22 step)
+- Motor B: Top-right (BCM 6 dir, 5 step)
+
+**Direction Chart:**
+| Arrow Key | X/Y Move | Motor A (BL) | Motor B (TR) |
+|-----------|----------|--------------|--------------|
+| → Right   | +X       | Clockwise    | Counter-CW   |
+| ← Left    | -X       | Counter-CW   | Clockwise    |
+| ↑ Up      | +Y       | Clockwise    | Clockwise    |
+| ↓ Down    | -Y       | Counter-CW   | Counter-CW   |
 
 The test runner will:
 - Automatically initialize GPIO pins

@@ -21,6 +21,7 @@ from .tests.test_servo import ServoTest
 from .tests.test_camera import CameraTest
 from .tests.test_magnet import MagnetTest
 from .tests.test_clock import ClockTest
+from .tests.test_manual_gantry import ManualGantryTest
 
 
 # Registry of available tests
@@ -30,6 +31,7 @@ TEST_REGISTRY: Dict[str, Type[HardwareTest]] = {
     "camera": CameraTest,
     "magnet": MagnetTest,
     "clock": ClockTest,
+    "manual_gantry": ManualGantryTest,
 }
 
 
