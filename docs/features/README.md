@@ -35,10 +35,10 @@ Before implementing features, validate hardware with the testing suite:
 python3 -m chess_hw_interface.testing.test_runner --all
 
 # Run specific category
-python3 -m chess_hw_interface.testing.test_runner --test gantry
+python3 -m chess_hw_interface.testing.test_runner --category gantry --subtest full
 ```
 
-**Available test categories:** gantry, servo, camera, magnet, clock
+**Available test categories:** gantry, servo, camera, magnet, clock (with gantry subtests)
 
 See [AGENTS.md](../../AGENTS.md#hardware-testing-suite) for full CLI reference.
 

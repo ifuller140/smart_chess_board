@@ -8,7 +8,7 @@
 > Before wiring:
 > 1. **Power off all supplies** before making connections
 > 2. **Double-check polarity** - reversed power can destroy components
-> 3. **Verify voltage levels** - Pi GPIO is 3.3V, motors need 5V
+> 3. **Verify voltage levels** - Pi GPIO is 3.3V, A4988 VMOT uses dedicated motor rail
 > 4. **Use appropriate wire gauge** - motor power needs thicker wire
 
 ---
@@ -33,7 +33,7 @@
     │   (-) ──────┼──┼────────┼──┼─→ GND                     │  │
     └─────────────┘  │        │  │                           │  │
                      │        │  │  12 ─→ Magnet Servo       │  │
-    ┌─────────────┐  │        │  │  16 ─→ Clock Servo        │  │
+    ┌─────────────┐  │        │  │  18 ─→ Clock Servo        │  │
     │ USB-C PSU   │  │        │  │                           │  │
     │ (Pi)        │──┼────────┼──┼─→ Pi Power                │  │
     └─────────────┘  │        │  │  10 ─→ Limit X-MIN        │  │
@@ -243,7 +243,7 @@ Repeat for all three limit switches (X-MIN, Y-MIN, CLOCK).
 │         │                  │                                    │
 │         ▼                  ▼                                    │
 │  ┌─────────────┐    ┌─────────────┐                            │
-│  │ ULN2003 ×2  │    │ Servo +     │                            │
+│  │ A4988 ×2    │    │ Servo +     │                            │
 │  │             │    │ Electromagnet│                            │
 │  └─────────────┘    └─────────────┘                            │
 │                                                                 │

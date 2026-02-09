@@ -39,6 +39,7 @@ class HomingNode(Node):
     MOTOR_A_STEP_PIN = 22
     MOTOR_B_DIR_PIN = 6
     MOTOR_B_STEP_PIN = 5
+    MOTOR_ENABLE_PIN = 17
     
     # Limit switch pins
     X_LIMIT_PIN = 10
@@ -70,6 +71,7 @@ class HomingNode(Node):
         self.declare_parameter('motorA_step_pin', self.MOTOR_A_STEP_PIN)
         self.declare_parameter('motorB_dir_pin', self.MOTOR_B_DIR_PIN)
         self.declare_parameter('motorB_step_pin', self.MOTOR_B_STEP_PIN)
+        self.declare_parameter('motor_enable_pin', self.MOTOR_ENABLE_PIN)
         self.declare_parameter('x_limit_pin', self.X_LIMIT_PIN)
         self.declare_parameter('y_limit_pin', self.Y_LIMIT_PIN)
         self.declare_parameter('servo_pin', self.SERVO_PIN)
@@ -80,6 +82,7 @@ class HomingNode(Node):
         self.motorA_step = self.get_parameter('motorA_step_pin').get_parameter_value().integer_value
         self.motorB_dir = self.get_parameter('motorB_dir_pin').get_parameter_value().integer_value
         self.motorB_step = self.get_parameter('motorB_step_pin').get_parameter_value().integer_value
+        self.motor_enable = self.get_parameter('motor_enable_pin').get_parameter_value().integer_value
         self.x_limit_pin = self.get_parameter('x_limit_pin').get_parameter_value().integer_value
         self.y_limit_pin = self.get_parameter('y_limit_pin').get_parameter_value().integer_value
         self.servo_pin = self.get_parameter('servo_pin').get_parameter_value().integer_value
@@ -109,6 +112,7 @@ class HomingNode(Node):
         self.get_logger().info('Homing Node initialized')
         self.get_logger().info(f'Motor A (bottom-left): DIR={self.motorA_dir}, STEP={self.motorA_step}')
         self.get_logger().info(f'Motor B (top-right): DIR={self.motorB_dir}, STEP={self.motorB_step}')
+        self.get_logger().info(f'Motor enable (active LOW): EN={self.motor_enable}')
         self.get_logger().info(f'Limits: X={self.x_limit_pin}, Y={self.y_limit_pin}')
         self.get_logger().info(f'Servo (magnet): PIN={self.servo_pin}')
         self.get_logger().info('Service available: /gantry/home')
@@ -123,6 +127,7 @@ class HomingNode(Node):
         GPIO.setup(self.motorA_step, GPIO.OUT, initial=GPIO.LOW)
         GPIO.setup(self.motorB_dir, GPIO.OUT, initial=GPIO.LOW)
         GPIO.setup(self.motorB_step, GPIO.OUT, initial=GPIO.LOW)
+        GPIO.setup(self.motor_enable, GPIO.OUT, initial=GPIO.HIGH)
         
         # Limit switches with pull-ups
         GPIO.setup(self.x_limit_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -140,6 +145,7 @@ class HomingNode(Node):
     
     def _cleanup(self):
         """Clean up GPIO on shutdown."""
+        GPIO.output(self.motor_enable, GPIO.HIGH)
         GPIO.output(self.motorA_step, GPIO.LOW)
         GPIO.output(self.motorB_step, GPIO.LOW)
         if self.servo_pwm:
@@ -166,6 +172,13 @@ class HomingNode(Node):
         GPIO.output(step_pin, GPIO.HIGH)
         time.sleep(self.STEP_PULSE_US / 1_000_000)
         GPIO.output(step_pin, GPIO.LOW)
+
+    def _enable_motors(self):
+        GPIO.output(self.motor_enable, GPIO.LOW)
+        time.sleep(0.001)
+
+    def _disable_motors(self):
+        GPIO.output(self.motor_enable, GPIO.HIGH)
     
     def _move_x(self, steps: int, delay_ms: float) -> bool:
         """
@@ -332,6 +345,7 @@ class HomingNode(Node):
         self.status_pub.publish(status_msg)
         
         self.emergency_stop = False
+        self._enable_motors()
         
         # SAFETY: Disengage magnet before homing
         self._disengage_magnet()
@@ -339,6 +353,7 @@ class HomingNode(Node):
         # Home X first, then Y
         x_success = self._home_x()
         if not x_success:
+            self._disable_motors()
             response.success = False
             response.message = 'X homing failed'
             status_msg.data = 'HOMING_FAILED'
@@ -347,6 +362,7 @@ class HomingNode(Node):
         
         y_success = self._home_y()
         if not y_success:
+            self._disable_motors()
             response.success = False
             response.message = 'Y homing failed'
             status_msg.data = 'HOMING_FAILED'
@@ -361,6 +377,7 @@ class HomingNode(Node):
         self.status_pub.publish(status_msg)
         
         self.get_logger().info('Homing sequence complete!')
+        self._disable_motors()
         return response
     
     def estop_callback(self, msg):

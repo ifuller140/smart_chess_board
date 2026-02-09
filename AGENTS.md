@@ -203,5 +203,5 @@ These workflows in `.agent/workflows/` provide step-by-step instructions:
 
 ---
 
-*Last updated: 2026-01-20*
+*Last updated: 2026-02-08*
 <!-- USER_ATTENTION: Update this date when making significant changes -->

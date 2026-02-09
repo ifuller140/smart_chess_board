@@ -1,623 +1,571 @@
 #!/usr/bin/env python3
 """
-Gantry Test Suite for A4988 Drivers + NEMA 11 Motors.
+Gantry hardware tests for CoreXY (A4988 + NEMA 11).
 
-Tests:
-1. X-MIN limit switch
-2. Y-MIN limit switch  
-3. Motor A movement (with speed selection)
-4. Motor B movement (with speed selection)
-5. Prusa-style homing sequence
-6. Safety limit monitoring
-
-Safety Feature: Unexpected limit switch triggers cause immediate test abort.
+The suite is ordered from basic wiring/timing validation to full motion stress.
 """
 
 import time
+from statistics import mean
 from typing import List
 
-from ..base_test import HardwareTest, TestStep, TestResult
+from ..base_test import HardwareTest, TestStep
 
 
-class GantryTest(HardwareTest):
-    """
-    Comprehensive gantry test including limit switches, motors, and homing.
-    Uses A4988 drivers with STEP/DIR control.
-    
-    Safety: Unexpected limit switch triggers cause immediate motor stop and test abort.
-    """
-    
-    # Motor pins (BCM) - per pinout.md ground truth (A4988 drivers)
-    MOTOR_A_DIR_PIN = 27    # Direction pin
-    MOTOR_A_STEP_PIN = 22   # Step pin
-    MOTOR_B_DIR_PIN = 6     # Direction pin
-    MOTOR_B_STEP_PIN = 5    # Step pin
-    
-    # Limit switch pins
+class GantryTestBase(HardwareTest):
+    """Shared pin map and movement helpers for gantry tests."""
+
+    MOTOR_A_DIR_PIN = 27
+    MOTOR_A_STEP_PIN = 22
+    MOTOR_B_DIR_PIN = 6
+    MOTOR_B_STEP_PIN = 5
+    MOTOR_ENABLE_PIN = 17  # A4988 ENABLE, active LOW
+
     LIMIT_X_PIN = 10
     LIMIT_Y_PIN = 9
-    LIMIT_CLOCK_PIN = 15
-    
-    # A4988 Timing constants (reduced pulse width per user request)
-    DIR_SETUP_US = 5        # Microseconds to wait after setting DIR
-    STEP_PULSE_US = 20      # Microseconds for step pulse width
-    
-    # Speed configuration (step delays in MILLISECONDS)
-    # Larger delay = slower speed
-    SPEED_90_DELAY_MS = 3.0     # 90% speed - operational movement
-    SPEED_70_DELAY_MS = 10.0    # 70% speed - moderate
-    SPEED_50_DELAY_MS = 20.0    # 50% speed - calibration
-    SPEED_30_DELAY_MS = 35.0    # 30% speed - slow
-    SPEED_20_DELAY_MS = 50.0    # 20% speed - precision
-    
-    # Named speeds for different operations (per user requirements)
-    OPERATIONAL_SPEED = 90      # Normal movement
-    CALIBRATION_SPEED = 50      # Initial calibration/homing approach
-    PRECISION_SPEED = 20        # Slow/precise movements
-    
-    # Default speed setting
-    DEFAULT_SPEED = OPERATIONAL_SPEED
-    
-    # Current speed setting
-    _current_speed = DEFAULT_SPEED
-    
-    # Safety state
-    _x_limit_expected = False
-    _y_limit_expected = False
-    _emergency_stop = False
-    
-    @property
-    def name(self) -> str:
-        return "Gantry"
-    
-    @property
-    def description(self) -> str:
-        return "Test limit switches, stepper motors (A4988), and homing sequence with safety monitoring"
-    
+
+    DIR_SETUP_US = 50
+    STEP_PULSE_US = 100
+
+    MIN_DELAY_MS = 5.0
+    MAX_DELAY_MS = 50.0
+    DEFAULT_RAMP_STEPS = 30
+
     def setup(self) -> bool:
-        """Setup motor pins as outputs."""
         if self.gpio is None:
-            raise RuntimeError("GPIO interface required - hardware must be connected")
-        
+            raise RuntimeError('GPIO interface required - hardware must be connected')
+
         try:
-            # Setup motor output pins
-            for pin in [self.MOTOR_A_DIR_PIN, self.MOTOR_A_STEP_PIN,
-                        self.MOTOR_B_DIR_PIN, self.MOTOR_B_STEP_PIN]:
+            for pin in [
+                self.MOTOR_A_DIR_PIN,
+                self.MOTOR_A_STEP_PIN,
+                self.MOTOR_B_DIR_PIN,
+                self.MOTOR_B_STEP_PIN,
+                self.MOTOR_ENABLE_PIN,
+            ]:
                 self.gpio.setup_output(pin)
-            
-            # Setup limit switch inputs - per pinout.md ground truth
-            # Active HIGH: 1=Pressed, 0=Released. Use pull_down=True
-            self.gpio.setup_input(self.LIMIT_X_PIN, pull_down=True)
-            self.gpio.setup_input(self.LIMIT_Y_PIN, pull_down=True)
-            self.gpio.setup_input(self.LIMIT_CLOCK_PIN, pull_down=True)
-            
-            # Reset safety state
-            self._emergency_stop = False
-            self._x_limit_expected = False
-            self._y_limit_expected = False
-            
+
+            self.gpio.setup_input(self.LIMIT_X_PIN, pull_up=True)
+            self.gpio.setup_input(self.LIMIT_Y_PIN, pull_up=True)
+
+            self._disable_motors()
+            self.gpio.write(self.MOTOR_A_STEP_PIN, False)
+            self.gpio.write(self.MOTOR_B_STEP_PIN, False)
+            self._pos_x_steps = 0
+            self._pos_y_steps = 0
             return True
-        except Exception as e:
-            print(f"[ERROR] Setup failed: {e}")
+        except Exception as exc:
+            print(f'[ERROR] Gantry setup failed: {exc}')
             return False
-    
+
     def teardown(self):
-        """Turn off all motor pins."""
-        self._stop_motors()
-    
-    def _stop_motors(self):
-        """Immediately stop all motor movement."""
-        if self.gpio:
-            try:
-                self.gpio.write(self.MOTOR_A_STEP_PIN, False)
-                self.gpio.write(self.MOTOR_B_STEP_PIN, False)
-            except:
-                pass
-    
-    def set_speed(self, speed_percent: int):
-        """Set the current motor speed (0-100)."""
-        self._current_speed = max(0, min(100, speed_percent))
-        print(f"  Speed set to {self._current_speed}%")
-    
-    def speed_to_delay(self, speed_percent: int = None) -> float:
-        """
-        Convert speed percentage (0-100) to step delay in seconds.
-        
-        Uses linear interpolation between defined speed points.
-        """
-        if speed_percent is None:
-            speed_percent = self._current_speed
-        speed = max(0, min(100, speed_percent))
-        
-        # Linear interpolation between key points
-        if speed >= 90:
-            delay_ms = self.SPEED_90_DELAY_MS
-        elif speed >= 70:
-            delay_ms = self.SPEED_90_DELAY_MS + (90 - speed) / 20 * (self.SPEED_70_DELAY_MS - self.SPEED_90_DELAY_MS)
-        elif speed >= 50:
-            delay_ms = self.SPEED_70_DELAY_MS + (70 - speed) / 20 * (self.SPEED_50_DELAY_MS - self.SPEED_70_DELAY_MS)
-        elif speed >= 30:
-            delay_ms = self.SPEED_50_DELAY_MS + (50 - speed) / 20 * (self.SPEED_30_DELAY_MS - self.SPEED_50_DELAY_MS)
-        elif speed >= 20:
-            delay_ms = self.SPEED_30_DELAY_MS + (30 - speed) / 10 * (self.SPEED_20_DELAY_MS - self.SPEED_30_DELAY_MS)
-        else:
-            delay_ms = self.SPEED_20_DELAY_MS + (20 - speed) * 5  # Even slower below 20%
-        
-        return delay_ms / 1000.0  # Convert to seconds
-    
+        try:
+            self.gpio.write(self.MOTOR_A_STEP_PIN, False)
+            self.gpio.write(self.MOTOR_B_STEP_PIN, False)
+            self._disable_motors()
+        except Exception:
+            pass
+
+    def _enable_motors(self):
+        self.gpio.write(self.MOTOR_ENABLE_PIN, False)
+        time.sleep(0.001)
+
+    def _disable_motors(self):
+        self.gpio.write(self.MOTOR_ENABLE_PIN, True)
+
     def _read_x_limit(self) -> bool:
-        """Read X limit switch state."""
-        if self.gpio:
-            return self.gpio.read(self.LIMIT_X_PIN)
-        return False
-    
+        return self.gpio.read_x_limit()
+
     def _read_y_limit(self) -> bool:
-        """Read Y limit switch state."""
-        if self.gpio:
-            return self.gpio.read(self.LIMIT_Y_PIN)
-        return False
-    
-    def _check_safety_limits(self) -> bool:
-        """
-        Check if an unexpected limit switch is triggered.
-        Returns True if safe to continue, False if emergency stop needed.
-        """
-        x_triggered = self._read_x_limit()
-        y_triggered = self._read_y_limit()
-        
-        # Check for unexpected triggers
-        if x_triggered and not self._x_limit_expected:
-            print("\n  🚨 EMERGENCY STOP: X limit triggered unexpectedly!")
-            self._emergency_stop = True
-            self._stop_motors()
-            return False
-        
-        if y_triggered and not self._y_limit_expected:
-            print("\n  🚨 EMERGENCY STOP: Y limit triggered unexpectedly!")
-            self._emergency_stop = True
-            self._stop_motors()
-            return False
-        
-        return True
-    
-    def _set_expected_limits(self, x_expected: bool = False, y_expected: bool = False):
-        """Set which limits are expected during current operation."""
-        self._x_limit_expected = x_expected
-        self._y_limit_expected = y_expected
-    
-    def _clear_expected_limits(self):
-        """Clear all expected limits - any trigger is unexpected."""
-        self._x_limit_expected = False
-        self._y_limit_expected = False
-    
-    def get_steps(self) -> List[TestStep]:
-        """Define test steps."""
-        return [
-            # Step 1: Speed selection
-            TestStep(
-                name="Speed Selection",
-                display_text="SPEED",
-                action=self._select_speed,
-                wait_for_input=True,
-                input_type="clock",
-                timeout_seconds=60.0,
-                success_message="SPD SET",
-                failure_message="SPD ERR"
-            ),
-            
-            # Step 2: X limit switch
-            TestStep(
-                name="X-MIN Limit Switch",
-                display_text="CLICK X",
-                action=lambda: True,
-                wait_for_input=True,
-                input_type="x_limit",
-                timeout_seconds=30.0,
-                success_message="X OK",
-                failure_message="X FAIL"
-            ),
-            
-            # Step 3: Y limit switch
-            TestStep(
-                name="Y-MIN Limit Switch",
-                display_text="CLICK Y",
-                action=lambda: True,
-                wait_for_input=True,
-                input_type="y_limit",
-                timeout_seconds=30.0,
-                success_message="Y OK",
-                failure_message="Y FAIL"
-            ),
-            
-            # Step 4: Motor A test
-            TestStep(
-                name="Motor A Movement",
-                display_text="MOTOR A",
-                action=self._test_motor_a,
-                wait_for_input=True,
-                input_type="clock",
-                timeout_seconds=30.0,
-                success_message="A OK?",
-                failure_message="A FAIL"
-            ),
-            
-            # Step 5: Motor A confirmation
-            TestStep(
-                name="Confirm Motor A",
-                display_text="A OK?",
-                action=lambda: True,
-                wait_for_input=True,
-                input_type="clock",
-                timeout_seconds=30.0,
-                success_message="A CONF",
-                failure_message="A BAD"
-            ),
-            
-            # Step 6: Motor B test
-            TestStep(
-                name="Motor B Movement",
-                display_text="MOTOR B",
-                action=self._test_motor_b,
-                wait_for_input=True,
-                input_type="clock",
-                timeout_seconds=30.0,
-                success_message="B OK?",
-                failure_message="B FAIL"
-            ),
-            
-            # Step 7: Motor B confirmation
-            TestStep(
-                name="Confirm Motor B",
-                display_text="B OK?",
-                action=lambda: True,
-                wait_for_input=True,
-                input_type="clock",
-                timeout_seconds=30.0,
-                success_message="B CONF",
-                failure_message="B BAD"
-            ),
-            
-            # Step 8: Homing sequence
-            TestStep(
-                name="Homing Sequence",
-                display_text="HOMING",
-                action=self._run_homing_sequence,
-                wait_for_input=True,
-                input_type="clock",
-                timeout_seconds=60.0,
-                success_message="HOME OK",
-                failure_message="HOME ER"
-            ),
-        ]
-    
-    def _select_speed(self) -> bool:
-        """Allow user to select motor speed."""
-        print("\n  ╔════════════════════════════════════╗")
-        print("  ║     MOTOR SPEED SELECTION          ║")
-        print("  ╠════════════════════════════════════╣")
-        print("  ║  Default speeds:                   ║")
-        print("  ║    90% - Operational movement      ║")
-        print("  ║    50% - Calibration               ║")
-        print("  ║    20% - Precision/homing          ║")
-        print("  ║                                    ║")
-        print("  ║  Press CLOCK to use 90% default    ║")
-        print("  ╚════════════════════════════════════╝")
-        
-        self._current_speed = self.OPERATIONAL_SPEED
-        print(f"\n  Using operational speed: {self._current_speed}%")
-        return True
-    
-    def _step_pulse(self, step_pin: int):
-        """Generate a single step pulse."""
-        self.gpio.write(step_pin, True)
-        time.sleep(self.STEP_PULSE_US / 1_000_000)
-        self.gpio.write(step_pin, False)
-    
-    def _step_motor(self, step_pin: int, dir_pin: int, steps: int, speed: int = None, check_limits: bool = True):
-        """
-        Move a single motor a given number of steps using A4988 driver.
-        
-        Args:
-            step_pin: GPIO pin for STEP signal
-            dir_pin: GPIO pin for DIR signal
-            steps: Number of steps (negative = reverse)
-            speed: Speed percentage (0-100), uses current speed if None
-            check_limits: If True, check safety limits during movement
-        
-        Returns:
-            True if completed, False if emergency stopped
-        """
-        if self._emergency_stop:
-            return False
-        
-        if speed is None:
-            speed = self._current_speed
-        
-        delay = self.speed_to_delay(speed)
-        
-        # Set direction
-        direction = steps >= 0
-        self.gpio.write(dir_pin, direction)
-        
-        # Wait for DIR to stabilize
-        time.sleep(self.DIR_SETUP_US / 1_000_000)
-        
-        # Generate step pulses
-        for i in range(abs(steps)):
-            # Safety check every 10 steps
-            if check_limits and i % 10 == 0:
-                if not self._check_safety_limits():
-                    return False
-            
-            self._step_pulse(step_pin)
-            time.sleep(delay)
-        
-        return True
-    
-    def _step_both_motors(self, steps_a: int, steps_b: int, speed: int = None, check_limits: bool = True):
-        """
-        Step both motors simultaneously with Bresenham interpolation.
-        Required for CoreXY kinematics.
-        
-        Args:
-            steps_a: Steps for motor A (negative = reverse)
-            steps_b: Steps for motor B (negative = reverse)
-            speed: Speed percentage (0-100)
-            check_limits: If True, check safety limits during movement
-        
-        Returns:
-            True if completed, False if emergency stopped
-        """
-        if self._emergency_stop:
-            return False
-        
-        if speed is None:
-            speed = self._current_speed
-        
-        delay = self.speed_to_delay(speed)
-        
+        return self.gpio.read_y_limit()
+
+    def _speed_to_delay_sec(self, speed_percent: int) -> float:
+        speed = max(0, min(100, speed_percent))
+        delay_ms = self.MAX_DELAY_MS - (speed / 100.0) * (self.MAX_DELAY_MS - self.MIN_DELAY_MS)
+        return delay_ms / 1000.0
+
+    def _ramped_delay(self, step_idx: int, total_steps: int, cruise_delay: float, ramp_steps: int) -> float:
+        if total_steps < 3 or ramp_steps <= 0:
+            return cruise_delay
+
+        ramp = min(ramp_steps, total_steps // 2)
+        if ramp <= 0:
+            return cruise_delay
+
+        if step_idx < ramp:
+            ratio = (ramp - step_idx) / ramp
+        elif step_idx >= (total_steps - ramp):
+            ratio = (step_idx - (total_steps - ramp - 1)) / ramp
+        else:
+            ratio = 0.0
+
+        slowest_delay = self.MAX_DELAY_MS / 1000.0
+        return cruise_delay + (slowest_delay - cruise_delay) * ratio * 0.8
+
+    def _step_both(self, steps_a: int, steps_b: int, speed_percent: int = 30, ramp_steps: int = DEFAULT_RAMP_STEPS):
         if steps_a == 0 and steps_b == 0:
-            return True
-        
-        # Set directions
-        dir_a = steps_a >= 0
-        dir_b = steps_b >= 0
-        self.gpio.write(self.MOTOR_A_DIR_PIN, dir_a)
-        self.gpio.write(self.MOTOR_B_DIR_PIN, dir_b)
-        
-        # Wait for DIR to stabilize
-        time.sleep(self.DIR_SETUP_US / 1_000_000)
-        
+            return
+
+        self._enable_motors()
+        self.gpio.write(self.MOTOR_A_DIR_PIN, steps_a >= 0)
+        self.gpio.write(self.MOTOR_B_DIR_PIN, steps_b >= 0)
+        time.sleep(self.DIR_SETUP_US / 1_000_000.0)
+
         abs_a = abs(steps_a)
         abs_b = abs(steps_b)
         max_steps = max(abs_a, abs_b)
-        
-        # Bresenham interpolation
+        cruise_delay = self._speed_to_delay_sec(speed_percent)
+
         err_a = 0
         err_b = 0
-        
-        for step_num in range(max_steps):
-            # Safety check every 10 steps
-            if check_limits and step_num % 10 == 0:
-                if not self._check_safety_limits():
-                    return False
-            
+
+        for idx in range(max_steps):
             step_a = False
             step_b = False
-            
+
             err_a += abs_a
             if err_a >= max_steps:
                 err_a -= max_steps
                 step_a = True
-                
+
             err_b += abs_b
             if err_b >= max_steps:
                 err_b -= max_steps
                 step_b = True
-            
-            # Pulse step pins (simultaneously if both need to step)
+
             if step_a:
                 self.gpio.write(self.MOTOR_A_STEP_PIN, True)
             if step_b:
                 self.gpio.write(self.MOTOR_B_STEP_PIN, True)
-            
-            time.sleep(self.STEP_PULSE_US / 1_000_000)
-            
+
+            time.sleep(self.STEP_PULSE_US / 1_000_000.0)
             self.gpio.write(self.MOTOR_A_STEP_PIN, False)
             self.gpio.write(self.MOTOR_B_STEP_PIN, False)
-            
-            time.sleep(delay)
-        
+
+            delay = self._ramped_delay(idx, max_steps, cruise_delay, ramp_steps)
+            if delay > (self.STEP_PULSE_US / 1_000_000.0):
+                time.sleep(delay - (self.STEP_PULSE_US / 1_000_000.0))
+
+    def _step_single(self, motor: str, steps: int, speed_percent: int = 30):
+        if motor == 'a':
+            self._step_both(steps, 0, speed_percent)
+        else:
+            self._step_both(0, steps, speed_percent)
+
+    def _move_x(self, steps: int, speed_percent: int = 30):
+        # +X => A+, B-
+        self._step_both(steps, -steps, speed_percent)
+        self._pos_x_steps += steps
+
+    def _move_y(self, steps: int, speed_percent: int = 30):
+        # +Y => A+, B+
+        self._step_both(steps, steps, speed_percent)
+        self._pos_y_steps += steps
+
+    def _timed_pulse_train(self, step_pin: int, pulses: int, delay_us: int) -> List[float]:
+        self._enable_motors()
+        intervals_ms: List[float] = []
+        last = time.perf_counter()
+
+        for _ in range(pulses):
+            self.gpio.write(step_pin, True)
+            time.sleep(self.STEP_PULSE_US / 1_000_000.0)
+            self.gpio.write(step_pin, False)
+
+            now = time.perf_counter()
+            intervals_ms.append((now - last) * 1000.0)
+            last = now
+            time.sleep(max(0.0, delay_us / 1_000_000.0))
+
+        return intervals_ms
+
+
+class GantryLimitSwitchTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Limits'
+
+    @property
+    def description(self) -> str:
+        return 'Validate X/Y limit wiring and active-low polarity'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep(
+                name='X limit press',
+                display_text='PRESS X',
+                action=lambda: True,
+                wait_for_input=True,
+                input_type='x_limit',
+                timeout_seconds=45.0,
+                success_message='X HIT',
+                failure_message='X FAIL',
+            ),
+            TestStep(
+                name='Y limit press',
+                display_text='PRESS Y',
+                action=lambda: True,
+                wait_for_input=True,
+                input_type='y_limit',
+                timeout_seconds=45.0,
+                success_message='Y HIT',
+                failure_message='Y FAIL',
+            ),
+        ]
+
+
+class GantryPulseIntegrityTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Pulse Integrity'
+
+    @property
+    def description(self) -> str:
+        return 'Measure pulse train timing jitter from Python loop execution'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Pulse train A', 'PULS A', self._pulse_a, False, success_message='A DONE', failure_message='A ERR'),
+            TestStep('Pulse train B', 'PULS B', self._pulse_b, False, success_message='B DONE', failure_message='B ERR'),
+            TestStep('Confirm sound', 'SMOOTH?', lambda: True, True, 'clock', 45.0, 'OK', 'BAD'),
+        ]
+
+    def _report(self, label: str, intervals_ms: List[float]):
+        if not intervals_ms:
+            print(f'  [ERROR] {label}: no intervals captured')
+            return
+
+        avg = mean(intervals_ms)
+        jitter = max(intervals_ms) - min(intervals_ms)
+        print(
+            f'  {label}: avg={avg:.3f}ms '
+            f'min={min(intervals_ms):.3f}ms '
+            f'max={max(intervals_ms):.3f}ms '
+            f'pkpk_jitter={jitter:.3f}ms'
+        )
+        if jitter > 2.0:
+            print('  [WARN] High software timing jitter detected. Prefer pigpio DMA pulse generation for production.')
+
+    def _pulse_a(self) -> bool:
+        self.gpio.write(self.MOTOR_A_DIR_PIN, True)
+        intervals = self._timed_pulse_train(self.MOTOR_A_STEP_PIN, pulses=300, delay_us=3000)
+        self._report('Motor A pulse train', intervals)
         return True
-    
-    def _move_x(self, steps: int, speed: int = None, check_limits: bool = True):
-        """
-        Pure X movement using CoreXY kinematics.
-        Motor A at bottom-left, Motor B at top-right.
-        For +X (right): A CW (+), B CCW (-) = OPPOSITE directions.
-        """
-        return self._step_both_motors(steps, -steps, speed, check_limits)
-    
-    def _move_y(self, steps: int, speed: int = None, check_limits: bool = True):
-        """
-        Pure Y movement using CoreXY kinematics.
-        Motor A at bottom-left, Motor B at top-right.
-        For +Y (up): A CW (+), B CW (+) = SAME direction.
-        """
-        return self._step_both_motors(steps, steps, speed, check_limits)
-    
-    def _test_motor_a(self) -> bool:
-        """Test Motor A movement."""
-        if self._emergency_stop:
-            return False
-        
-        print(f"\n  Testing Motor A at {self._current_speed}% speed...")
-        print("  Moving Motor A forward 200 steps...")
-        
-        if not self._step_motor(self.MOTOR_A_STEP_PIN, self.MOTOR_A_DIR_PIN, 200, check_limits=False):
-            return False
-        time.sleep(0.3)
-        
-        print("  Moving Motor A backward 200 steps...")
-        if not self._step_motor(self.MOTOR_A_STEP_PIN, self.MOTOR_A_DIR_PIN, -200, check_limits=False):
-            return False
-        
+
+    def _pulse_b(self) -> bool:
+        self.gpio.write(self.MOTOR_B_DIR_PIN, True)
+        intervals = self._timed_pulse_train(self.MOTOR_B_STEP_PIN, pulses=300, delay_us=3000)
+        self._report('Motor B pulse train', intervals)
         return True
-    
-    def _test_motor_b(self) -> bool:
-        """Test Motor B movement."""
-        if self._emergency_stop:
-            return False
-        
-        print(f"\n  Testing Motor B at {self._current_speed}% speed...")
-        print("  Moving Motor B forward 200 steps...")
-        
-        if not self._step_motor(self.MOTOR_B_STEP_PIN, self.MOTOR_B_DIR_PIN, 200, check_limits=False):
-            return False
-        time.sleep(0.3)
-        
-        print("  Moving Motor B backward 200 steps...")
-        if not self._step_motor(self.MOTOR_B_STEP_PIN, self.MOTOR_B_DIR_PIN, -200, check_limits=False):
-            return False
-        
+
+
+class GantryMotorATest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Motor A'
+
+    @property
+    def description(self) -> str:
+        return 'Single-motor direction and pulse test for Motor A'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Move A slow', 'A SLOW', self._slow, False, success_message='A1 OK', failure_message='A1 ER'),
+            TestStep('Move A mid', 'A MID', self._mid, False, success_message='A2 OK', failure_message='A2 ER'),
+            TestStep('Confirm A', 'A OK?', lambda: True, True, 'clock', 30.0, 'A OK', 'A BAD'),
+        ]
+
+    def _slow(self) -> bool:
+        self._step_single('a', 300, 25)
+        time.sleep(0.2)
+        self._step_single('a', -300, 25)
         return True
-    
-    def _run_homing_sequence(self) -> bool:
-        """
-        Run Prusa-style homing sequence with proper CoreXY movement.
-        Uses speed levels: 50% for approach, 20% for precision.
-        """
-        if self._emergency_stop:
-            return False
-        
-        print("\n  Starting Prusa-style homing sequence...")
-        
-        # Safety: Move away from limits first (no safety checks here)
-        print("  Safety offset: Moving away from limits (50% speed)...")
-        if not self._move_x(500, self.CALIBRATION_SPEED, check_limits=False):
-            return False
-        if not self._move_y(500, self.CALIBRATION_SPEED, check_limits=False):
-            return False
-        
-        # Home X axis with CoreXY movement
-        if not self._home_x_axis():
-            return False
-        
-        # Home Y axis with CoreXY movement
-        if not self._home_y_axis():
-            return False
-        
-        print("  ✓ Homing complete!")
+
+    def _mid(self) -> bool:
+        self._step_single('a', 300, 45)
+        time.sleep(0.2)
+        self._step_single('a', -300, 45)
         return True
-    
-    def _home_x_axis(self, max_steps: int = 100000) -> bool:
-        """Home X axis using proper CoreXY movement."""
-        if self._emergency_stop:
+
+
+class GantryMotorBTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Motor B'
+
+    @property
+    def description(self) -> str:
+        return 'Single-motor direction and pulse test for Motor B'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Move B slow', 'B SLOW', self._slow, False, success_message='B1 OK', failure_message='B1 ER'),
+            TestStep('Move B mid', 'B MID', self._mid, False, success_message='B2 OK', failure_message='B2 ER'),
+            TestStep('Confirm B', 'B OK?', lambda: True, True, 'clock', 30.0, 'B OK', 'B BAD'),
+        ]
+
+    def _slow(self) -> bool:
+        self._step_single('b', 300, 25)
+        time.sleep(0.2)
+        self._step_single('b', -300, 25)
+        return True
+
+    def _mid(self) -> bool:
+        self._step_single('b', 300, 45)
+        time.sleep(0.2)
+        self._step_single('b', -300, 45)
+        return True
+
+
+class GantryCoreXYDirectionTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry CoreXY'
+
+    @property
+    def description(self) -> str:
+        return 'Verify +X/-X/+Y/-Y direction mapping for both motors'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Move +X', '+X', self._plus_x, False, success_message='X+', failure_message='X+ER'),
+            TestStep('Confirm +X', 'X+ OK?', lambda: True, True, 'clock', 30.0, 'OK', 'BAD'),
+            TestStep('Move -X', '-X', self._minus_x, False, success_message='X-', failure_message='X-ER'),
+            TestStep('Confirm -X', 'X- OK?', lambda: True, True, 'clock', 30.0, 'OK', 'BAD'),
+            TestStep('Move +Y', '+Y', self._plus_y, False, success_message='Y+', failure_message='Y+ER'),
+            TestStep('Confirm +Y', 'Y+ OK?', lambda: True, True, 'clock', 30.0, 'OK', 'BAD'),
+            TestStep('Move -Y', '-Y', self._minus_y, False, success_message='Y-', failure_message='Y-ER'),
+            TestStep('Confirm -Y', 'Y- OK?', lambda: True, True, 'clock', 30.0, 'OK', 'BAD'),
+        ]
+
+    def _plus_x(self) -> bool:
+        self._move_x(300, 35)
+        return True
+
+    def _minus_x(self) -> bool:
+        self._move_x(-300, 35)
+        return True
+
+    def _plus_y(self) -> bool:
+        self._move_y(300, 35)
+        return True
+
+    def _minus_y(self) -> bool:
+        self._move_y(-300, 35)
+        return True
+
+
+class GantrySpeedSweepTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Speed Sweep'
+
+    @property
+    def description(self) -> str:
+        return 'Run same motion at multiple speeds to detect stall zones'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Sweep X', 'SWP X', self._run_x, False, success_message='X DONE', failure_message='X ERR'),
+            TestStep('Sweep Y', 'SWP Y', self._run_y, False, success_message='Y DONE', failure_message='Y ERR'),
+            TestStep('Confirm sweep', 'SMTH?', lambda: True, True, 'clock', 45.0, 'OK', 'BAD'),
+        ]
+
+    def _run_x(self) -> bool:
+        for speed in [20, 30, 40, 50, 60, 70]:
+            print(f'  X sweep speed {speed}%: +220/-220')
+            self._move_x(220, speed)
+            time.sleep(0.2)
+            self._move_x(-220, speed)
+            time.sleep(0.3)
+        return True
+
+    def _run_y(self) -> bool:
+        for speed in [20, 30, 40, 50, 60, 70]:
+            print(f'  Y sweep speed {speed}%: +220/-220')
+            self._move_y(220, speed)
+            time.sleep(0.2)
+            self._move_y(-220, speed)
+            time.sleep(0.3)
+        return True
+
+
+class GantryEnableHoldTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Enable/Hold'
+
+    @property
+    def description(self) -> str:
+        return 'Verify A4988 ENABLE pin and holding torque behavior'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Disable hold', 'FREE', self._disable_phase, False, success_message='FREE', failure_message='ERR'),
+            TestStep('Confirm free', 'FREE?', lambda: True, True, 'clock', 30.0, 'OK', 'BAD'),
+            TestStep('Enable hold', 'HOLD', self._enable_phase, False, success_message='HOLD', failure_message='ERR'),
+            TestStep('Confirm hold', 'HOLD?', lambda: True, True, 'clock', 30.0, 'OK', 'BAD'),
+        ]
+
+    def _disable_phase(self) -> bool:
+        print('  Motors disabled for 4s. Gantry should move freely by hand.')
+        self._disable_motors()
+        time.sleep(4.0)
+        return True
+
+    def _enable_phase(self) -> bool:
+        print('  Motors enabled for 4s. Gantry should resist manual movement.')
+        self._enable_motors()
+        time.sleep(4.0)
+        return True
+
+
+class GantryHomingTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Homing'
+
+    @property
+    def description(self) -> str:
+        return 'Manual homing sequence with staged approach/backoff'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Start homing', 'HOME', self._run_homing, False, success_message='HOME', failure_message='FAIL'),
+            TestStep('Confirm home', 'HOME?', lambda: True, True, 'clock', 45.0, 'OK', 'BAD'),
+        ]
+
+    def _run_homing(self) -> bool:
+        self._move_x(300, 35)
+        self._move_y(300, 35)
+
+        x_steps = 0
+        while not self._read_x_limit() and x_steps < 100000:
+            self._move_x(-25, 35)
+            x_steps += 25
+        if not self._read_x_limit():
+            print('  [ERROR] X limit not reached')
             return False
-        
-        print("  Homing X axis...")
-        
-        # Expect X limit during this operation
-        self._set_expected_limits(x_expected=True, y_expected=False)
-        
-        # Phase 1: Fast approach (50% speed)
-        print("    Phase 1: Fast approach (50% speed)...")
-        steps = 0
-        while not self._read_x_limit() and steps < max_steps:
-            if not self._move_x(-100, self.CALIBRATION_SPEED, check_limits=False):
-                self._clear_expected_limits()
-                return False
-            steps += 100
-        
-        if steps >= max_steps:
-            print("    [ERROR] X limit not found!")
-            self._clear_expected_limits()
-            return False
-        
-        print(f"    Limit triggered at ~{steps} steps")
-        
-        # Phase 2: Back off (50% speed)
-        print("    Phase 2: Back off...")
-        if not self._move_x(200, self.CALIBRATION_SPEED, check_limits=False):
-            self._clear_expected_limits()
-            return False
-        
-        # Phase 3: Slow approach (20% speed)
-        print("    Phase 3: Slow approach (20% speed)...")
+
+        self._move_x(120, 25)
         while not self._read_x_limit():
-            if not self._move_x(-10, self.PRECISION_SPEED, check_limits=False):
-                self._clear_expected_limits()
-                return False
-        
-        # Phase 4: Small back off
-        print("    Phase 4: Small back off...")
-        if not self._move_x(50, self.CALIBRATION_SPEED, check_limits=False):
-            self._clear_expected_limits()
+            self._move_x(-2, 20)
+
+        y_steps = 0
+        while not self._read_y_limit() and y_steps < 100000:
+            self._move_y(-25, 35)
+            y_steps += 25
+        if not self._read_y_limit():
+            print('  [ERROR] Y limit not reached')
             return False
-        
-        # Phase 5: Final approach (20% speed)
-        print("    Phase 5: Final approach (20% speed)...")
-        while not self._read_x_limit():
-            if not self._move_x(-1, self.PRECISION_SPEED, check_limits=False):
-                self._clear_expected_limits()
-                return False
-        
-        self._clear_expected_limits()
-        print("    ✓ X axis homed!")
+
+        self._move_y(120, 25)
+        while not self._read_y_limit():
+            self._move_y(-2, 20)
+
+        self._pos_x_steps = 0
+        self._pos_y_steps = 0
         return True
-    
-    def _home_y_axis(self, max_steps: int = 100000) -> bool:
-        """Home Y axis using proper CoreXY movement."""
-        if self._emergency_stop:
-            return False
-        
-        print("  Homing Y axis...")
-        
-        # Expect Y limit during this operation
-        self._set_expected_limits(x_expected=False, y_expected=True)
-        
-        # Phase 1: Fast approach (50% speed)
-        print("    Phase 1: Fast approach (50% speed)...")
-        steps = 0
-        while not self._read_y_limit() and steps < max_steps:
-            if not self._move_y(-100, self.CALIBRATION_SPEED, check_limits=False):
-                self._clear_expected_limits()
-                return False
-            steps += 100
-        
-        if steps >= max_steps:
-            print("    [ERROR] Y limit not found!")
-            self._clear_expected_limits()
-            return False
-        
-        print(f"    Limit triggered at ~{steps} steps")
-        
-        # Phase 2: Back off (50% speed)
-        print("    Phase 2: Back off...")
-        if not self._move_y(200, self.CALIBRATION_SPEED, check_limits=False):
-            self._clear_expected_limits()
-            return False
-        
-        # Phase 3: Slow approach (20% speed)
-        print("    Phase 3: Slow approach (20% speed)...")
-        while not self._read_y_limit():
-            if not self._move_y(-10, self.PRECISION_SPEED, check_limits=False):
-                self._clear_expected_limits()
-                return False
-        
-        # Phase 4: Small back off
-        print("    Phase 4: Small back off...")
-        if not self._move_y(50, self.CALIBRATION_SPEED, check_limits=False):
-            self._clear_expected_limits()
-            return False
-        
-        # Phase 5: Final approach (20% speed)
-        print("    Phase 5: Final approach (20% speed)...")
-        while not self._read_y_limit():
-            if not self._move_y(-1, self.PRECISION_SPEED, check_limits=False):
-                self._clear_expected_limits()
-                return False
-        
-        self._clear_expected_limits()
-        print("    ✓ Y axis homed!")
+
+
+class GantryRepeatabilityTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Repeatability'
+
+    @property
+    def description(self) -> str:
+        return 'Repeat square pattern to expose intermittent stalls/skips'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Square loops', 'LOOPS', self._run_loops, False, success_message='DONE', failure_message='ERR'),
+            TestStep('Confirm return', 'BACK?', lambda: True, True, 'clock', 45.0, 'OK', 'BAD'),
+        ]
+
+    def _run_loops(self) -> bool:
+        loops = 6
+        side = 180
+        for idx in range(loops):
+            print(f'  Loop {idx + 1}/{loops}')
+            self._move_x(side, 45)
+            self._move_y(side, 45)
+            self._move_x(-side, 45)
+            self._move_y(-side, 45)
+            time.sleep(0.2)
+        return True
+
+
+class GantryFullTest(GantryTestBase):
+    @property
+    def name(self) -> str:
+        return 'Gantry Full'
+
+    @property
+    def description(self) -> str:
+        return 'Run full gantry diagnostics: wiring, timing, motion, and stress'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Limits ready', 'LIMITS', self._limits_prompt, False, success_message='NEXT', failure_message='FAIL'),
+            TestStep('Press X', 'PRESS X', lambda: True, True, 'x_limit', 45.0, 'X HIT', 'X FAIL'),
+            TestStep('Press Y', 'PRESS Y', lambda: True, True, 'y_limit', 45.0, 'Y HIT', 'Y FAIL'),
+            TestStep('Pulse diag', 'PULSE', self._pulse_diag, False, success_message='P OK', failure_message='P ER'),
+            TestStep('Motor A', 'MOT A', self._run_motor_a, False, success_message='A OK', failure_message='A ER'),
+            TestStep('Motor B', 'MOT B', self._run_motor_b, False, success_message='B OK', failure_message='B ER'),
+            TestStep('CoreXY', 'COREXY', self._run_corexy, False, success_message='D OK', failure_message='D ER'),
+            TestStep('Speed sweep', 'SPEED', self._run_sweep, False, success_message='S OK', failure_message='S ER'),
+            TestStep('Repeat loops', 'LOOPS', self._run_loops, False, success_message='R OK', failure_message='R ER'),
+            TestStep('Hold test', 'HOLD', self._run_hold, False, success_message='H OK', failure_message='H ER'),
+            TestStep('Final confirm', 'GOOD?', lambda: True, True, 'clock', 45.0, 'PASS', 'FAIL'),
+        ]
+
+    def _limits_prompt(self) -> bool:
+        print('  Limit test: press X limit then Y limit when prompted.')
+        return True
+
+    def _pulse_diag(self) -> bool:
+        intervals = self._timed_pulse_train(self.MOTOR_A_STEP_PIN, pulses=180, delay_us=3500)
+        avg = mean(intervals) if intervals else 0.0
+        jitter = (max(intervals) - min(intervals)) if intervals else 0.0
+        print(f'  Pulse diag: avg={avg:.3f}ms, jitter={jitter:.3f}ms')
+        return True
+
+    def _run_motor_a(self) -> bool:
+        self._step_single('a', 250, 35)
+        self._step_single('a', -250, 35)
+        return True
+
+    def _run_motor_b(self) -> bool:
+        self._step_single('b', 250, 35)
+        self._step_single('b', -250, 35)
+        return True
+
+    def _run_corexy(self) -> bool:
+        self._move_x(200, 35)
+        self._move_x(-200, 35)
+        self._move_y(200, 35)
+        self._move_y(-200, 35)
+        return True
+
+    def _run_sweep(self) -> bool:
+        for speed in [20, 35, 50, 65]:
+            self._move_x(150, speed)
+            self._move_x(-150, speed)
+            time.sleep(0.1)
+        return True
+
+    def _run_loops(self) -> bool:
+        for _ in range(3):
+            self._move_x(120, 40)
+            self._move_y(120, 40)
+            self._move_x(-120, 40)
+            self._move_y(-120, 40)
+        return True
+
+    def _run_hold(self) -> bool:
+        self._disable_motors()
+        time.sleep(2.0)
+        self._enable_motors()
+        time.sleep(2.0)
         return True

@@ -1,10 +1,14 @@
 # Hardware Documentation
 
-> **Complete hardware reference for the Smart Chess Board.**
+> Complete hardware reference for the Smart Chess Board.
 
-## Overview
+## Canonical Gantry Stack
 
-This smart chess board uses a CoreXY gantry system to move an electromagnet across the board, picking up and placing magnetic chess pieces. The system is controlled by a Raspberry Pi 4B running ROS 2.
+- Stepper motors: `NEMA 11` x2
+- Stepper drivers: `A4988` x2 (`STEP/DIR`, shared `ENABLE`, active LOW)
+- Controller: Raspberry Pi 4B GPIO (BCM numbering)
+- Limit switches: X-min `GPIO10`, Y-min `GPIO9`, clock button `GPIO15` (active LOW, pull-up)
+- Servos: gantry lift `GPIO12`, clock servo `GPIO18`
 
 ## Quick Links
 
@@ -16,75 +20,31 @@ This smart chess board uses a CoreXY gantry system to move an electromagnet acro
 | [power.md](power.md) | Power distribution and requirements |
 | [mechanical.md](mechanical.md) | Mechanical assembly and CAD references |
 
-## System Block Diagram
+## Safety Rules
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      POWER DISTRIBUTION                      │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐               │
-│  │ 5V/3A    │    │ 5V/2A    │    │ 5V USB-C │               │
-│  │ Motors   │    │ Servo/Mag│    │ RPi      │               │
-│  └────┬─────┘    └────┬─────┘    └────┬─────┘               │
-└───────┼───────────────┼───────────────┼─────────────────────┘
-        │               │               │
-        ▼               ▼               ▼
-┌───────────────────────────────────────────────────────────┐
-│                     RASPBERRY PI 4B                        │
-│  ┌─────────────────────────────────────────────────────┐  │
-│  │                    GPIO HEADER                       │  │
-│  │  Stepper A (4 pins) │ Stepper B (4 pins)            │  │
-│  │  Servo PWM (1 pin)  │ Limit Switches (3 pins)       │  │
-│  │  Magnet Control     │ Clock Display (8 pins)        │  │
-│  └─────────────────────────────────────────────────────┘  │
-│                          │                                 │
-│  ┌───────────────────────┴───────────────────────────┐    │
-│  │              CAMERA (CSI/USB)                      │    │
-│  └────────────────────────────────────────────────────┘    │
-└────────────────────────────────────────────────────────────┘
-        │               │               │
-        ▼               ▼               ▼
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│  ULN2003A   │  │  ULN2003A   │  │   Servo     │
-│  Driver A   │  │  Driver B   │  │   + Magnet  │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │
-       ▼                ▼                ▼
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│  Stepper A  │  │  Stepper B  │  │   Z-Axis    │
-│  (28BYJ-48) │  │  (28BYJ-48) │  │   Lift      │
-└─────────────┘  └─────────────┘  └─────────────┘
-```
-
-## Safety Considerations
-
-> [!CAUTION]
-> **Critical safety rules:**
-
-1. **Never connect motor power to Pi's 5V pins** - Use separate power supply
-2. **Common ground required** - All power supplies must share ground
-3. **Current limits** - Pi GPIO can only source 16mA per pin, 50mA total
-4. **Flyback diodes** - ULN2003 has built-in protection, but verify for other inductive loads
-5. **Emergency stop** - Consider adding a physical e-stop button
+1. Do not power steppers from Pi 5V pins.
+2. All PSU grounds must share a common ground with Pi ground.
+3. A4988 VMOT must use a dedicated motor supply rail.
+4. Keep `ENABLE` behavior explicit: LOW=enabled, HIGH=disabled.
+5. Always call `GPIO.cleanup()` on process shutdown.
 
 ## Hardware Status
-
-<!-- USER_ATTENTION: Update this table as you test and verify each component -->
 
 | Component | Acquired | Wired | Tested | Notes |
 |-----------|----------|-------|--------|-------|
 | Raspberry Pi 4B | ✅ | ✅ | ✅ | |
-| Stepper Motor A | ⬜ | ⬜ | ⬜ | |
-| Stepper Motor B | ⬜ | ⬜ | ⬜ | |
-| ULN2003 Driver A | ⬜ | ⬜ | ⬜ | |
-| ULN2003 Driver B | ⬜ | ⬜ | ⬜ | |
-| SG90 Servo | ⬜ | ⬜ | ⬜ | |
+| NEMA 11 Motor A | ⬜ | ⬜ | ⬜ | |
+| NEMA 11 Motor B | ⬜ | ⬜ | ⬜ | |
+| A4988 Driver A | ⬜ | ⬜ | ⬜ | |
+| A4988 Driver B | ⬜ | ⬜ | ⬜ | |
+| SG90 Z Servo | ⬜ | ⬜ | ⬜ | |
+| SG90 Clock Servo | ⬜ | ⬜ | ⬜ | |
 | Electromagnet | ⬜ | ⬜ | ⬜ | |
-| Camera Module | ⬜ | ⬜ | ⬜ | |
 | Limit Switch X | ⬜ | ⬜ | ⬜ | |
 | Limit Switch Y | ⬜ | ⬜ | ⬜ | |
 | Limit Switch Clock | ⬜ | ⬜ | ⬜ | |
-| Chess Clock Display | ⬜ | ⬜ | ⬜ | |
+| TM1637 Displays | ⬜ | ⬜ | ⬜ | |
 
 ---
 
-*See [AGENTS.md](../../AGENTS.md) for agent guidelines.*
+See [AGENTS.md](../../AGENTS.md) for agent workflow constraints.

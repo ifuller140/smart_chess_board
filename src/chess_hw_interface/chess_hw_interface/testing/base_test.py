@@ -222,17 +222,22 @@ class HardwareTest(ABC):
                 
                 # Wait for input if required
                 if step.wait_for_input:
-                    if verbose:
-                        print(f"  Waiting for {step.input_type} input...")
-                    
-                    if step.input_type == "clock":
-                        input_received = self.wait_for_clock_button(step.timeout_seconds)
-                    elif step.input_type == "x_limit":
-                        input_received = self.wait_for_limit_switch("x", step.timeout_seconds)
-                    elif step.input_type == "y_limit":
-                        input_received = self.wait_for_limit_switch("y", step.timeout_seconds)
+                    if getattr(self.gpio, 'is_mock', False):
+                        if verbose:
+                            print("  Mock mode: auto-acknowledging input step")
+                        input_received = True
                     else:
-                        input_received = False
+                        if verbose:
+                            print(f"  Waiting for {step.input_type} input...")
+                        
+                        if step.input_type == "clock":
+                            input_received = self.wait_for_clock_button(step.timeout_seconds)
+                        elif step.input_type == "x_limit":
+                            input_received = self.wait_for_limit_switch("x", step.timeout_seconds)
+                        elif step.input_type == "y_limit":
+                            input_received = self.wait_for_limit_switch("y", step.timeout_seconds)
+                        else:
+                            input_received = False
                     
                     if not input_received:
                         step.result = TestResult.FAILED

@@ -26,12 +26,17 @@ GPIO pin configuration for all hardware interfaces.
 
 stepper_driver:
   ros__parameters:
-    # Motor A (CoreXY: X+Y component)
-    motorA_pins: [17, 18, 27, 22]  # [IN1, IN2, IN3, IN4]
-    # Motor B (CoreXY: X-Y component)  
-    motorB_pins: [23, 24, 25, 5]   # [IN1, IN2, IN3, IN4]
-    step_sequence: 'half'          # 'full' or 'half' stepping
-    step_delay_default: 0.001      # Minimum seconds between steps
+    motorA_dir_pin: 27
+    motorA_step_pin: 22
+    motorB_dir_pin: 6
+    motorB_step_pin: 5
+    motor_enable_pin: 17
+    dir_setup_us: 50
+    step_pulse_us: 100
+    min_step_delay_ms: 5.0
+    max_step_delay_ms: 50.0
+    accel_ramp_steps: 40
+    hold_torque_when_idle: true
 
 servo_node:
   ros__parameters:
@@ -43,9 +48,9 @@ servo_node:
 limit_switch_node:
   ros__parameters:
     limit_switch_pins:
-      x_min: 6                     # X-axis homing switch
-      y_min: 13                    # Y-axis homing switch
-      clock_hit: 19                # Clock/turn button
+      x_min: 10                    # X-axis homing switch
+      y_min: 9                     # Y-axis homing switch
+      clock_hit: 15                # Clock/turn button
     debounce_ms: 20                # Debounce time
 
 clock_display:
@@ -125,7 +130,7 @@ gantry_kinematics_node:
     board_origin_y_mm: 25.0        # Y offset to a1 square center
     
     # Calibration
-    steps_per_mm: 51.2             # Calibrated value
+    steps_per_mm: 5.0              # Full-step baseline (calibrate on hardware)
     
 motion_planner_node:
   ros__parameters:
@@ -208,10 +213,10 @@ Key constraints to verify:
 | Parameter | Valid Range | Notes |
 |-----------|-------------|-------|
 | BCM pin numbers | 0-27 | Not all pins are GPIO |
-| step_delay | ≥0.001 | Faster may miss steps |
+| min_step_delay_ms | ≥2.0 | Lower values can reduce torque/reliability |
 | engage_pwm | 0-100 | Percentage |
 | debounce_ms | 10-100 | Too low = false triggers |
-| steps_per_mm | ~40-60 | Depends on pulley/belt |
+| steps_per_mm | ~5 (full-step) | Depends on pulley/belt and microstepping |
 
 ---
 

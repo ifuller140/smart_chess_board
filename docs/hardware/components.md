@@ -204,7 +204,7 @@ After the computer completes its move, the clock servo actuates to press the clo
 ```yaml
 clock_servo_node:
   ros__parameters:
-    clock_servo_pin: 16          # BCM pin (hardware PWM or software PWM)
+    clock_servo_pin: 18          # BCM pin (hardware PWM or software PWM)
     rest_pwm: 2.5                # Duty cycle for rest position
     hit_pwm: 7.5                 # Duty cycle for button press
     hit_duration: 0.3            # How long to hold hit position (seconds)
@@ -334,8 +334,8 @@ When switch is released: GPIO reads HIGH (pulled up)
 ### Motion Calculations
 ```
 Circumference = π × 12.73mm ≈ 40mm
-Steps per revolution = 2048 (half-step)
-Steps per mm = 2048 / 40 ≈ 51.2 steps/mm
+Steps per revolution = 200 (full-step, no microstepping)
+Steps per mm = 200 / 40 = 5 steps/mm
 ```
 
 <!-- USER_ATTENTION: Calibrate steps/mm with actual hardware measurement -->

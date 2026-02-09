@@ -12,7 +12,7 @@ class ClockServoNode(Node):
         super().__init__('clock_servo_node')
         
         # Parameters
-        self.declare_parameter('clock_servo_pin', 16)
+        self.declare_parameter('clock_servo_pin', 18)
         self.declare_parameter('rest_pwm', 2.5)
         self.declare_parameter('hit_pwm', 7.5)
         self.declare_parameter('hit_duration', 0.3)
