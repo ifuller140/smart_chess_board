@@ -107,7 +107,7 @@ The gantry uses CoreXY belting for X/Y motion:
 
 ```
 Motor A steps = X_steps + Y_steps
-Motor B steps = X_steps - Y_steps
+Motor B steps = Y_steps - X_steps
 ```
 
 Key parameters:

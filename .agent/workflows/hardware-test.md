@@ -13,7 +13,8 @@ Step-by-step guide for validating hardware components on Raspberry Pi.
 - [ ] Raspberry Pi running **Raspberry Pi OS** or **Ubuntu**
 - [ ] SSH access to Raspberry Pi
 - [ ] All components wired according to `docs/hardware/wiring.md`
-- [ ] Python 3 installed with `RPi.GPIO`
+- [ ] Python 3 installed with `RPi.GPIO` and `pigpio`
+- [ ] pigpiod daemon running: `sudo systemctl start pigpiod`
 - [ ] User added to `gpio` group
 
 ### Quick Setup Check
@@ -50,11 +51,14 @@ python3 -m src.chess_hw_interface.chess_hw_interface.testing.test_runner --list
 | `--category gantry --subtest limits` | Validate X/Y limit polarity |
 | `--category gantry --subtest pulse` | Software pulse timing/jitter diagnostics |
 | `--category gantry --subtest motor_a motor_b` | Single-motor direction/torque checks |
+| `--category gantry --subtest lockstep` | Both motors sync — hardware validation |
 | `--category gantry --subtest corexy` | Verify axis mapping (+X/-X/+Y/-Y) |
+| `--category gantry --subtest diagonal_sync` | Diagonal motion — no X/Y wobble |
 | `--category gantry --subtest speed_sweep` | Identify stall speed ranges |
+| `--category gantry --subtest square_return` | Return-to-origin accuracy |
 | `--category gantry --subtest repeatability` | Multi-loop stress repeatability |
 | `--category gantry --subtest enable_hold` | Check holding torque behavior |
-| `--category gantry --subtest manual` | Curses manual control/tuning |
+| `--category gantry --subtest manual` | Curses manual control/tuning (with diagonals) |
 | `--category gantry --subtest full` | Guided full gantry workflow |
 
 ### Manual Gantry Control

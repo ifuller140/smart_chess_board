@@ -2,7 +2,8 @@
 """
 Gantry hardware tests for CoreXY (A4988 + NEMA 11).
 
-Uses pigpio DMA waves for jitter-free stepping.
+Uses pigpio DMA wave chains for jitter-free stepping.
+Both motors always step in the same wave pulse — no inter-motor lag.
 The suite is ordered from basic wiring/timing validation to full motion stress.
 """
 
@@ -73,7 +74,7 @@ class GantryTestBase(HardwareTest):
         return False
 
     def _step_both(self, steps_a: int, steps_b: int, speed_percent: int = 35):
-        """Step both motors using pigpio DMA waves."""
+        """Step both motors using pigpio DMA wave chain."""
         if self._stepper:
             self._stepper.step_both_motors(steps_a, steps_b, speed_percent)
 
@@ -93,6 +94,13 @@ class GantryTestBase(HardwareTest):
         if self._stepper:
             self._stepper.move_y(steps, speed_percent)
             self._pos_y_steps += steps
+
+    def _move_xy(self, dx: int, dy: int, speed_percent: int = 35):
+        """Move along both axes simultaneously (single wave chain)."""
+        if self._stepper:
+            self._stepper.move_xy(dx, dy, speed_percent)
+            self._pos_x_steps += dx
+            self._pos_y_steps += dy
 
     def _timed_pulse_train(self, step_pin: int, pulses: int, delay_us: int) -> List[float]:
         """
@@ -515,3 +523,154 @@ class GantryFullTest(GantryTestBase):
         self._enable_motors()
         time.sleep(2.0)
         return True
+
+
+# ==================================================================
+# NEW DIAGNOSTIC TESTS — CoreXY synchronization validation
+# ==================================================================
+
+
+class GantryLockstepTest(GantryTestBase):
+    """
+    Lockstep motor test — both motors same DIR, same steps, single wave.
+
+    This is the 'remove all ambiguity' test:
+    - If this fails → hardware problem
+    - If this passes → software/sync problem (it will pass)
+    """
+
+    @property
+    def name(self) -> str:
+        return 'Gantry Lockstep'
+
+    @property
+    def description(self) -> str:
+        return 'Both motors same DIR, 500 steps, single wave — hardware validation'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Lockstep forward', 'LOCK +', self._forward, False,
+                     success_message='FWD OK', failure_message='FWD ER'),
+            TestStep('Lockstep reverse', 'LOCK -', self._reverse, False,
+                     success_message='REV OK', failure_message='REV ER'),
+            TestStep('Confirm smooth', 'SMOOTH?', lambda: True, True,
+                     'clock', 30.0, 'OK', 'BAD'),
+        ]
+
+    def _forward(self) -> bool:
+        print('  Both motors: +500 steps, same direction, single DMA wave chain')
+        print('  Expected: smooth simultaneous motion, no fighting, no jitter')
+        self._step_both(500, 500, 35)
+        return True
+
+    def _reverse(self) -> bool:
+        print('  Both motors: -500 steps, same direction, single DMA wave chain')
+        self._step_both(-500, -500, 35)
+        return True
+
+
+class GantryDiagonalSyncTest(GantryTestBase):
+    """
+    Pure diagonal CoreXY test — A and B step in one wave for perfect diagonal.
+
+    Tests that move_xy() produces clean 45° motion with no X/Y wobble.
+    """
+
+    @property
+    def name(self) -> str:
+        return 'Gantry Diagonal Sync'
+
+    @property
+    def description(self) -> str:
+        return 'Diagonal motion via move_xy() — both motors in one wave, no wobble'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Diagonal +X+Y', 'D ++', self._diag_pp, False,
+                     success_message='++ OK', failure_message='++ ER'),
+            TestStep('Diagonal -X-Y', 'D --', self._diag_mm, False,
+                     success_message='-- OK', failure_message='-- ER'),
+            TestStep('Diagonal +X-Y', 'D +-', self._diag_pm, False,
+                     success_message='+- OK', failure_message='+- ER'),
+            TestStep('Diagonal -X+Y', 'D -+', self._diag_mp, False,
+                     success_message='-+ OK', failure_message='-+ ER'),
+            TestStep('Confirm diagonal', 'DIAG?', lambda: True, True,
+                     'clock', 30.0, 'OK', 'BAD'),
+        ]
+
+    def _diag_pp(self) -> bool:
+        print('  Diagonal +X +Y: 300 steps — should be clean 45° line')
+        self._move_xy(300, 300, 35)
+        return True
+
+    def _diag_mm(self) -> bool:
+        print('  Diagonal -X -Y: 300 steps — returning')
+        self._move_xy(-300, -300, 35)
+        return True
+
+    def _diag_pm(self) -> bool:
+        print('  Diagonal +X -Y: 300 steps — perpendicular diagonal')
+        self._move_xy(300, -300, 35)
+        return True
+
+    def _diag_mp(self) -> bool:
+        print('  Diagonal -X +Y: 300 steps — returning')
+        self._move_xy(-300, 300, 35)
+        return True
+
+
+class GantrySquareReturnTest(GantryTestBase):
+    """
+    Square return-to-origin test.
+
+    Moves +X 1000, +Y 1000, -X 1000, -Y 1000.
+    If sync is correct, gantry returns exactly to start position.
+    Drift = synchronization error.
+    """
+
+    @property
+    def name(self) -> str:
+        return 'Gantry Square Return'
+
+    @property
+    def description(self) -> str:
+        return 'Square pattern (1000 steps/side) — verifies return-to-origin accuracy'
+
+    def get_steps(self) -> List[TestStep]:
+        return [
+            TestStep('Mark start', 'MARK', self._mark_start, False,
+                     success_message='MARKED', failure_message='ERR'),
+            TestStep('Run square', 'SQUARE', self._run_square, False,
+                     success_message='SQ OK', failure_message='SQ ER'),
+            TestStep('Confirm return', 'BACK?', lambda: True, True,
+                     'clock', 45.0, 'EXACT', 'DRIFT'),
+        ]
+
+    def _mark_start(self) -> bool:
+        print('  Mark the current gantry position (use tape or a pen mark).')
+        print('  The gantry will trace a 1000-step square and should return')
+        print('  to exactly this position. Any visible drift = sync error.')
+        time.sleep(2.0)
+        return True
+
+    def _run_square(self) -> bool:
+        side = 1000
+        speed = 40
+
+        print(f'  Running square: {side} steps per side at {speed}% speed')
+        print('  +X...')
+        self._move_x(side, speed)
+        time.sleep(0.3)
+        print('  +Y...')
+        self._move_y(side, speed)
+        time.sleep(0.3)
+        print('  -X...')
+        self._move_x(-side, speed)
+        time.sleep(0.3)
+        print('  -Y...')
+        self._move_y(-side, speed)
+
+        print(f'  Square complete. Position counters: X={self._pos_x_steps}, Y={self._pos_y_steps}')
+        print('  Check if gantry returned to the marked starting position.')
+        return True
+

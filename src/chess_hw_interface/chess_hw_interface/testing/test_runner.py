@@ -20,15 +20,18 @@ from .tests.test_camera import CameraTest
 from .tests.test_clock import ClockTest
 from .tests.test_gantry import (
     GantryCoreXYDirectionTest,
+    GantryDiagonalSyncTest,
     GantryEnableHoldTest,
     GantryFullTest,
     GantryHomingTest,
     GantryLimitSwitchTest,
+    GantryLockstepTest,
     GantryMotorATest,
     GantryMotorBTest,
     GantryPulseIntegrityTest,
     GantryRepeatabilityTest,
     GantrySpeedSweepTest,
+    GantrySquareReturnTest,
 )
 from .tests.test_magnet import MagnetTest
 from .tests.test_manual_gantry import ManualGantryTest
@@ -133,6 +136,9 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
         'enable_hold': GantryEnableHoldTest,
         'homing': GantryHomingTest,
         'manual': ManualGantryTest,
+        'lockstep': GantryLockstepTest,
+        'diagonal_sync': GantryDiagonalSyncTest,
+        'square_return': GantrySquareReturnTest,
     },
     'servo': {
         'full': ServoTest,
@@ -193,14 +199,17 @@ def list_tests():
 
     print('\nRecommended gantry flow:')
     print('-' * 60)
-    print('  1) gantry/limits        Confirm switch polarity and wiring')
-    print('  2) gantry/pulse         Check pulse timing jitter')
+    print('  1) gantry/limits          Confirm switch polarity and wiring')
+    print('  2) gantry/pulse           Check pulse timing jitter')
     print('  3) gantry/motor_a + motor_b')
-    print('  4) gantry/corexy        Verify axis direction mapping')
-    print('  5) gantry/speed_sweep   Identify stall zones')
-    print('  6) gantry/repeatability Run loop stress test')
-    print('  7) gantry/enable_hold   Validate holding torque behavior')
-    print('  8) gantry/manual        Fine-tune by keyboard control')
+    print('  4) gantry/lockstep        Both motors sync — hardware validation')
+    print('  5) gantry/corexy          Verify axis direction mapping')
+    print('  6) gantry/diagonal_sync   Diagonal motion — no X/Y wobble')
+    print('  7) gantry/speed_sweep     Identify stall zones')
+    print('  8) gantry/square_return   Return-to-origin accuracy')
+    print('  9) gantry/repeatability   Run loop stress test')
+    print(' 10) gantry/enable_hold     Validate holding torque behavior')
+    print(' 11) gantry/manual          Fine-tune by keyboard control')
 
     print('\nLegacy aliases (still supported):')
     print('-' * 60)

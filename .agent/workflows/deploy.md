@@ -38,13 +38,23 @@ sudo apt install -y \
     python3-pip \
     python3-opencv \
     libcamera-apps \
-    stockfish
+    stockfish \
+    pigpio
 
 pip3 install \
     RPi.GPIO \
+    pigpio \
     python-chess \
     opencv-python \
     numpy
+```
+
+### Enable pigpiod daemon (required for motor control)
+
+```bash
+# Enable pigpiod to start automatically on boot
+sudo systemctl enable pigpiod
+sudo systemctl start pigpiod
 ```
 
 ## 3. Clone Repository
@@ -108,7 +118,8 @@ Content:
 ```ini
 [Unit]
 Description=Smart Chess Board
-After=network.target
+After=network.target pigpiod.service
+Requires=pigpiod.service
 
 [Service]
 Type=simple

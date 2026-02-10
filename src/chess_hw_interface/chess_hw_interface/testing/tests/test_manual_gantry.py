@@ -4,6 +4,8 @@ Manual Gantry Control Test.
 
 Interactive control with keyboard for CoreXY gantry diagnostics.
 Uses pigpio DMA waves for jitter-free stepping.
+Supports diagonal motion via move_xy() — both motors step in a
+single wave even for combined X+Y movement.
 """
 
 import curses
@@ -32,7 +34,7 @@ class ManualGantryTest(HardwareTest):
 
     @property
     def description(self) -> str:
-        return 'Interactive gantry control with keyboard (pigpio DMA stepping)'
+        return 'Interactive gantry control with keyboard (pigpio DMA stepping, diagonal support)'
 
     def __init__(self, gpio_interface=None, display_interface=None):
         super().__init__(gpio_interface, display_interface)
@@ -76,28 +78,31 @@ class ManualGantryTest(HardwareTest):
             self._enabled = False
 
     def _read_x_limit(self) -> bool:
-        """Read X limit switch (active HIGH)."""
+        """Read X limit switch (active HIGH — pressed = 5V)."""
         if self._stepper:
             return self._stepper.read_x_limit()
         return False
 
     def _read_y_limit(self) -> bool:
-        """Read Y limit switch (active HIGH)."""
+        """Read Y limit switch (active HIGH — pressed = 5V)."""
         if self._stepper:
             return self._stepper.read_y_limit()
         return False
 
+    def _move_xy(self, dx: int, dy: int):
+        """Move along X and Y simultaneously using a single wave chain."""
+        if self._stepper:
+            self._stepper.move_xy(dx, dy, self._speed_percent)
+            self._pos_x += dx
+            self._pos_y += dy
+
     def _move_x(self, steps: int):
         """Move along X axis using pigpio DMA."""
-        if self._stepper:
-            self._stepper.move_x(steps, self._speed_percent)
-            self._pos_x += steps
+        self._move_xy(steps, 0)
 
     def _move_y(self, steps: int):
         """Move along Y axis using pigpio DMA."""
-        if self._stepper:
-            self._stepper.move_y(steps, self._speed_percent)
-            self._pos_y += steps
+        self._move_xy(0, steps)
 
     def get_steps(self) -> List[TestStep]:
         return [
@@ -113,7 +118,7 @@ class ManualGantryTest(HardwareTest):
 
     def _run_manual_control(self) -> bool:
         print('\nStarting manual gantry control in 2 seconds...')
-        print("Controls: arrows move, +/- step size, [/] speed, 'e' toggle enable, 'q' quit")
+        print("Controls: arrows move, shift+arrows diagonal, +/- step size, [/] speed, 'e' toggle, 'q' quit")
         time.sleep(2)
 
         try:
@@ -137,7 +142,7 @@ class ManualGantryTest(HardwareTest):
         while running:
             stdscr.clear()
             stdscr.addstr(0, 0, '=' * 62)
-            stdscr.addstr(1, 0, '  MANUAL GANTRY CONTROL (pigpio DMA)')
+            stdscr.addstr(1, 0, '  MANUAL GANTRY CONTROL (pigpio DMA, sync waves)')
             stdscr.addstr(2, 0, '=' * 62)
             stdscr.addstr(4, 0, f'Position: X={self._pos_x:6d}  Y={self._pos_y:6d} steps')
             stdscr.addstr(5, 0, f'Step size: {steps_per_tick} steps/tick')
@@ -145,18 +150,19 @@ class ManualGantryTest(HardwareTest):
             stdscr.addstr(7, 0, f'Motor enabled: {self._enabled}')
             stdscr.addstr(8, 0, f'Limits: X={self._read_x_limit()}  Y={self._read_y_limit()}')
 
-            stdscr.addstr(10, 0, 'Direction map (CoreXY):')
-            stdscr.addstr(11, 0, '  Right(+X): A+, B-')
-            stdscr.addstr(12, 0, '  Left(-X):  A-, B+')
-            stdscr.addstr(13, 0, '  Up(+Y):    A+, B+')
-            stdscr.addstr(14, 0, '  Down(-Y):  A-, B-')
+            stdscr.addstr(10, 0, 'CoreXY direction map:')
+            stdscr.addstr(11, 0, '  Right(+X): A+, B-     Left(-X): A-, B+')
+            stdscr.addstr(12, 0, '  Up(+Y):    A+, B+     Down(-Y): A-, B-')
+            stdscr.addstr(13, 0, '  Diagonal:  single wave, both motors in lock-step')
 
-            stdscr.addstr(16, 0, 'Controls:')
-            stdscr.addstr(17, 2, 'Arrows: move gantry')
-            stdscr.addstr(18, 2, '+/-: adjust step size')
-            stdscr.addstr(19, 2, '[ / ]: decrease/increase speed')
-            stdscr.addstr(20, 2, 'e: toggle enable/disable motors')
-            stdscr.addstr(21, 2, 'q: quit')
+            stdscr.addstr(15, 0, 'Controls:')
+            stdscr.addstr(16, 2, 'Arrows: cardinal moves (single wave)')
+            stdscr.addstr(17, 2, 'w/a/s/d: cardinal moves (alt keys)')
+            stdscr.addstr(18, 2, 'Numpad 7/9/1/3: diagonal moves')
+            stdscr.addstr(19, 2, '+/-: adjust step size')
+            stdscr.addstr(20, 2, '[ / ]: decrease/increase speed')
+            stdscr.addstr(21, 2, 'e: toggle enable/disable motors')
+            stdscr.addstr(22, 2, 'q: quit')
             stdscr.refresh()
 
             key = stdscr.getch()
@@ -180,17 +186,37 @@ class ManualGantryTest(HardwareTest):
                 self._speed_percent = max(10, self._speed_percent - 5)
             elif key == ord(']'):
                 self._speed_percent = min(100, self._speed_percent + 5)
-            elif key == curses.KEY_RIGHT:
+
+            # Cardinal moves
+            elif key == curses.KEY_RIGHT or key in (ord('d'), ord('D')):
                 self._move_x(steps_per_tick)
-            elif key == curses.KEY_LEFT:
+            elif key == curses.KEY_LEFT or key in (ord('a'), ord('A')):
                 if not self._read_x_limit():
                     self._move_x(-steps_per_tick)
-            elif key == curses.KEY_UP:
+            elif key == curses.KEY_UP or key in (ord('w'), ord('W')):
                 self._move_y(steps_per_tick)
-            elif key == curses.KEY_DOWN:
+            elif key == curses.KEY_DOWN or key in (ord('s'), ord('S')):
                 if not self._read_y_limit():
                     self._move_y(-steps_per_tick)
 
-        stdscr.addstr(23, 0, 'Exiting manual control...')
+            # Diagonal moves (numpad or number keys)
+            # 7 = up-left, 9 = up-right, 1 = down-left, 3 = down-right
+            elif key == ord('9'):
+                # Up-right diagonal
+                self._move_xy(steps_per_tick, steps_per_tick)
+            elif key == ord('7'):
+                # Up-left diagonal
+                if not self._read_x_limit():
+                    self._move_xy(-steps_per_tick, steps_per_tick)
+            elif key == ord('3'):
+                # Down-right diagonal
+                if not self._read_y_limit():
+                    self._move_xy(steps_per_tick, -steps_per_tick)
+            elif key == ord('1'):
+                # Down-left diagonal
+                if not self._read_x_limit() and not self._read_y_limit():
+                    self._move_xy(-steps_per_tick, -steps_per_tick)
+
+        stdscr.addstr(24, 0, 'Exiting manual control...')
         stdscr.refresh()
         time.sleep(0.5)

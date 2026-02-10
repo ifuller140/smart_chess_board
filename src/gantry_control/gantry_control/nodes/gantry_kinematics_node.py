@@ -54,6 +54,7 @@ class GantryKinematicsNode(Node):
 
         # CoreXY map for documented physical layout:
         # +X => A+, B- ; +Y => A+, B+
+        # A = dx + dy ; B = dy - dx
         steps_a = int((dx_mm + dy_mm) * self.steps_per_mm)
         steps_b = int((dy_mm - dx_mm) * self.steps_per_mm)
 
