@@ -16,9 +16,9 @@ Physical Layout:
 - Motor B at top-right corner
 - Origin (0,0) at bottom-left (where limit switches are)
 
-CoreXY Kinematics for this layout:
-- +X (right): A CW (+), B CCW (-) = OPPOSITE directions
-- +Y (up): A CW (+), B CW (+) = SAME direction
+CoreXY Kinematics for this layout (inverted DIR pins):
+- +X (right): A CCW, B CW = OPPOSITE directions
+- +Y (up): A CCW, B CCW = SAME direction
 
 Limit switches: active HIGH (pressed = 5V → GPIO reads HIGH, pull-down).
 
@@ -250,8 +250,9 @@ class HomingNode(Node):
         if steps_a == 0 and steps_b == 0:
             return
 
-        self.pi.write(self.motorA_dir, 1 if steps_a >= 0 else 0)
-        self.pi.write(self.motorB_dir, 1 if steps_b >= 0 else 0)
+        # INVERTED DIR pins — positive steps → DIR LOW for this hardware
+        self.pi.write(self.motorA_dir, 0 if steps_a >= 0 else 1)
+        self.pi.write(self.motorB_dir, 0 if steps_b >= 0 else 1)
         time.sleep(self.DIR_SETUP_US / 1_000_000)
 
         abs_a = abs(steps_a)

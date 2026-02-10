@@ -324,9 +324,9 @@ class PigpioStepper:
         if steps_a == 0 and steps_b == 0:
             return
 
-        # Set directions
-        self.pi.write(MOTOR_A_DIR_PIN, 1 if steps_a >= 0 else 0)
-        self.pi.write(MOTOR_B_DIR_PIN, 1 if steps_b >= 0 else 0)
+        # INVERTED DIR pins — positive steps → DIR LOW for this hardware
+        self.pi.write(MOTOR_A_DIR_PIN, 0 if steps_a >= 0 else 1)
+        self.pi.write(MOTOR_B_DIR_PIN, 0 if steps_b >= 0 else 1)
         time.sleep(DIR_SETUP_US / 1_000_000)
 
         abs_a = abs(steps_a)

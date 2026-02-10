@@ -1,75 +1,93 @@
 #!/usr/bin/env python3
-import rclpy
-from rclpy.node import Node
-from std_srvs.srv import SetBool, Trigger
-from std_msgs.msg import String, Bool
+"""
+Servo Node — controls magnet servo via pigpio hardware PWM.
+
+Uses pigpio's set_servo_pulsewidth() for jitter-free hardware-timed
+servo control (no software PWM).
+
+Services:
+  /servo/engage  (Trigger) — lower magnet to engage
+  /servo/release (Trigger) — raise magnet to disengage
+
+Requires:
+- pigpio daemon running: sudo pigpiod
+"""
 import time
 
-import RPi.GPIO as GPIO
+import pigpio
+import rclpy
+from rclpy.node import Node
+from std_srvs.srv import Trigger
+from std_msgs.msg import String, Bool
+
 
 class ServoNode(Node):
     def __init__(self):
         super().__init__('servo_node')
-        
+
         # Parameters
         self.declare_parameter('servo_pin', 12)
-        self.declare_parameter('engage_pwm', 2.5)
-        self.declare_parameter('release_pwm', 7.5)
+        self.declare_parameter('engage_pulse_us', 500)    # Down position
+        self.declare_parameter('release_pulse_us', 1500)   # Up position
         self.declare_parameter('movement_time', 0.5)
-        
-        self.servo_pin = self.get_parameter('servo_pin').value
-        self.engage_val = self.get_parameter('engage_pwm').value
-        self.release_val = self.get_parameter('release_pwm').value
-        self.move_time = self.get_parameter('movement_time').value
-        
-        self.pwm = None
-        self.current_state = "unknown"
 
-        # GPIO Setup
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-        GPIO.setup(self.servo_pin, GPIO.OUT)
-        self.pwm = GPIO.PWM(self.servo_pin, 50) # 50Hz standard for servos
-        self.pwm.start(0)
-        self.get_logger().info(f"Servo Initialized on Pin {self.servo_pin}")
+        self.servo_pin = self.get_parameter('servo_pin').value
+        self.engage_pw = self.get_parameter('engage_pulse_us').value
+        self.release_pw = self.get_parameter('release_pulse_us').value
+        self.move_time = self.get_parameter('movement_time').value
+
+        self.current_state = "unknown"
+        self.emergency_stop = False
+
+        # pigpio connection
+        self.pi = pigpio.pi()
+        if not self.pi.connected:
+            self.get_logger().fatal(
+                "Cannot connect to pigpiod. Start with: sudo pigpiod")
+            raise RuntimeError("pigpiod not running")
+
+        # Initialize servo pin
+        self.pi.set_mode(self.servo_pin, pigpio.OUTPUT)
+        self.pi.set_servo_pulsewidth(self.servo_pin, 0)  # Stop sending pulses
+
+        self.get_logger().info(
+            f"Servo initialized on pin {self.servo_pin} "
+            f"(engage={self.engage_pw}µs, release={self.release_pw}µs)")
 
         # Services
-        self.engage_srv = self.create_service(Trigger, '/servo/engage', self.engage_callback)
-        self.release_srv = self.create_service(Trigger, '/servo/release', self.release_callback)
-        
+        self.engage_srv = self.create_service(
+            Trigger, '/servo/engage', self.engage_callback)
+        self.release_srv = self.create_service(
+            Trigger, '/servo/release', self.release_callback)
+
         # Subscribers
         self.stop_sub = self.create_subscription(
-            Bool,
-            '/emergency_stop',
-            self.stop_callback,
-            10)
-            
+            Bool, '/emergency_stop', self.stop_callback, 10)
+
         # Publishers
         self.state_pub = self.create_publisher(String, '/servo/state', 10)
-        
-        self.emergency_stop = False
 
     def stop_callback(self, msg):
         if msg.data:
             self.emergency_stop = True
-            self.get_logger().warn("EMERGENCY STOP: Disabling Servo")
-            if self.pwm:
-                self.pwm.ChangeDutyCycle(0)
+            self.get_logger().warn("EMERGENCY STOP: Stopping servo")
+            self.pi.set_servo_pulsewidth(self.servo_pin, 0)
 
-    def set_servo(self, duty_cycle):
+    def set_servo(self, pulse_width_us: int) -> bool:
+        """Set servo position using hardware-timed PWM."""
         if self.emergency_stop:
             return False
-            
-        self.pwm.ChangeDutyCycle(duty_cycle)
+
+        self.pi.set_servo_pulsewidth(self.servo_pin, pulse_width_us)
         time.sleep(self.move_time)
-        self.pwm.ChangeDutyCycle(0) # Stop sending pulses to prevent jitter
-            
+        # Stop sending pulses to avoid jitter
+        self.pi.set_servo_pulsewidth(self.servo_pin, 0)
         return True
 
     def engage_callback(self, request, response):
         self.get_logger().info("Engaging Magnet (Down)")
-        success = self.set_servo(self.engage_val)
-        
+        success = self.set_servo(self.engage_pw)
+
         if success:
             self.current_state = "engaged"
             response.success = True
@@ -77,14 +95,14 @@ class ServoNode(Node):
         else:
             response.success = False
             response.message = "Failed: Emergency Stop Active"
-            
+
         self.state_pub.publish(String(data=self.current_state))
         return response
 
     def release_callback(self, request, response):
         self.get_logger().info("Releasing Magnet (Up)")
-        success = self.set_servo(self.release_val)
-        
+        success = self.set_servo(self.release_pw)
+
         if success:
             self.current_state = "released"
             response.success = True
@@ -92,15 +110,16 @@ class ServoNode(Node):
         else:
             response.success = False
             response.message = "Failed: Emergency Stop Active"
-            
+
         self.state_pub.publish(String(data=self.current_state))
         return response
 
     def destroy_node(self):
-        if self.pwm:
-            self.pwm.stop()
-        GPIO.cleanup()
+        self.pi.set_servo_pulsewidth(self.servo_pin, 0)
+        if self.pi.connected:
+            self.pi.stop()
         super().destroy_node()
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -112,6 +131,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

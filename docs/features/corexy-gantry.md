@@ -59,10 +59,10 @@ steps_B = (-X_mm + Y_mm) * steps_per_mm
 
 | Desired Motion | Motor A | Motor B | Direction Pattern |
 |----------------|---------|---------|-------------------|
-| +X (right) | + steps (CW) | - steps (CCW) | OPPOSITE |
-| -X (left) | - steps (CCW) | + steps (CW) | OPPOSITE |
-| +Y (up/forward) | + steps (CW) | + steps (CW) | SAME |
-| -Y (down/backward) | - steps (CCW) | - steps (CCW) | SAME |
+| +X (right) | + steps (CCW) | - steps (CW) | OPPOSITE |
+| -X (left) | - steps (CW) | + steps (CCW) | OPPOSITE |
+| +Y (up/forward) | + steps (CCW) | + steps (CCW) | SAME |
+| -Y (down/backward) | - steps (CW) | - steps (CW) | SAME |
 | +X +Y (diagonal) | + steps | 0 steps | |
 | -X +Y (diagonal) | 0 steps | + steps | |
 

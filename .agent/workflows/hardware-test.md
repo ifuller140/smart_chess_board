@@ -74,13 +74,16 @@ python3 -m src.chess_hw_interface.chess_hw_interface.testing.test_runner \
 - Motor A: Bottom-left (BCM 27 dir, 22 step)
 - Motor B: Top-right (BCM 6 dir, 5 step)
 
-**Direction Chart:**
+**Direction Chart (inverted DIR pins):**
 | Arrow Key | Motor A (BL) | Motor B (TR) |
 |-----------|--------------|--------------|
-| → Right   | Clockwise    | Counter-CW   |
-| ← Left    | Counter-CW   | Clockwise    |
-| ↑ Up      | Clockwise    | Clockwise    |
-| ↓ Down    | Counter-CW   | Counter-CW   |
+| → Right   | Counter-CW   | Clockwise    |
+| ← Left    | Clockwise    | Counter-CW   |
+| ↑ Up      | Counter-CW   | Counter-CW   |
+| ↓ Down    | Clockwise    | Clockwise    |
+
+> **NOTE**: All gantry tests now run through ROS.
+> Start nodes first: `ros2 launch chess_hw_interface hw_interface_launch.py`
 
 ---
 

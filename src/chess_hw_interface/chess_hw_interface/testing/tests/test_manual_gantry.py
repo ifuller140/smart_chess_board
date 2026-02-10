@@ -1,125 +1,182 @@
 #!/usr/bin/env python3
 """
-Manual Gantry Control Test.
+Manual Gantry Control Test — Joystick Paradigm via ROS.
 
-Interactive control with keyboard for CoreXY gantry diagnostics.
-Uses pigpio DMA waves for jitter-free stepping.
-Supports diagonal motion via move_xy() — both motors step in a
-single wave even for combined X+Y movement.
+Publishes velocity commands to /stepper/velocity (Twist) so the real
+stepper_driver_node handles all acceleration, wave generation, and
+motor control.  This test exercises the ACTUAL ROS system.
+
+Behavior:
+  - Arrow keys / WASD set desired velocity direction
+  - Numpad 7/9/1/3 for diagonals
+  - Release key → velocity goes to zero → smooth deceleration
+  - [ / ] adjust max speed
+  - , / . adjust acceleration
+  - q to quit
+
+All movement goes through:
+  test → /stepper/velocity → stepper_driver_node → pigpio DMA → motors
+
+Requires:
+  ROS nodes running: stepper_driver_node, limit_switch_node
 """
 
 import curses
+import math
+import sys
+import threading
 import time
 from typing import List, Optional
 
+import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
+from std_msgs.msg import Bool, Float32, String
+
 from ..base_test import HardwareTest, TestStep
-from ..pigpio_stepper import PigpioStepper
+
+
+class ManualGantryTestNode(Node):
+    """Lightweight ROS node for publishing velocity commands."""
+
+    def __init__(self):
+        super().__init__('manual_gantry_test')
+
+        # Publishers
+        self.vel_pub = self.create_publisher(Twist, '/stepper/velocity', 10)
+        self.max_vel_pub = self.create_publisher(
+            Float32, '/stepper/set_max_velocity', 10)
+        self.accel_pub = self.create_publisher(
+            Float32, '/stepper/set_acceleration', 10)
+
+        # Subscribers
+        self.status = 'UNKNOWN'
+        self.x_limit = False
+        self.y_limit = False
+
+        self.create_subscription(
+            String, '/stepper/status', self._status_cb, 10)
+        self.create_subscription(
+            Bool, '/limit_switch/x_min', self._x_limit_cb, 10)
+        self.create_subscription(
+            Bool, '/limit_switch/y_min', self._y_limit_cb, 10)
+
+    def _status_cb(self, msg):
+        self.status = msg.data
+
+    def _x_limit_cb(self, msg):
+        self.x_limit = msg.data
+
+    def _y_limit_cb(self, msg):
+        self.y_limit = msg.data
+
+    def publish_velocity(self, vx: float, vy: float):
+        """Publish Cartesian velocity (steps/sec)."""
+        msg = Twist()
+        msg.linear.x = vx
+        msg.linear.y = vy
+        self.vel_pub.publish(msg)
+
+    def publish_max_velocity(self, val: float):
+        self.max_vel_pub.publish(Float32(data=val))
+
+    def publish_acceleration(self, val: float):
+        self.accel_pub.publish(Float32(data=val))
+
+    def stop(self):
+        """Publish zero velocity."""
+        self.publish_velocity(0.0, 0.0)
 
 
 class ManualGantryTest(HardwareTest):
-    """Interactive manual gantry control using pigpio DMA."""
+    """
+    Interactive joystick gantry control via ROS velocity commands.
 
-    MOTOR_A_DIR_PIN = 27
-    MOTOR_A_STEP_PIN = 22
-    MOTOR_B_DIR_PIN = 6
-    MOTOR_B_STEP_PIN = 5
-    MOTOR_ENABLE_PIN = 17
-
-    LIMIT_X_PIN = 10
-    LIMIT_Y_PIN = 9
+    All motion goes through the stepper_driver_node — this test exercises
+    the real ROS system.
+    """
 
     @property
     def name(self) -> str:
-        return 'Manual Gantry'
+        return 'Manual Gantry (Joystick)'
 
     @property
     def description(self) -> str:
-        return 'Interactive gantry control with keyboard (pigpio DMA stepping, diagonal support)'
+        return 'Joystick control via ROS /stepper/velocity — smooth accel/decel, instant stop'
 
     def __init__(self, gpio_interface=None, display_interface=None):
         super().__init__(gpio_interface, display_interface)
-        self._stepper: Optional[PigpioStepper] = None
-        self._pos_x = 0
-        self._pos_y = 0
-        self._enabled = False
-        self._speed_percent = 40
+        self._ros_node: Optional[ManualGantryTestNode] = None
+        self._spin_thread: Optional[threading.Thread] = None
+        self._max_speed = 400.0       # steps/sec
+        self._acceleration = 2000.0   # steps/sec²
 
     def setup(self) -> bool:
-        """Initialize pigpio-based stepper controller."""
+        """Initialize ROS node for velocity publishing."""
         try:
-            self._stepper = PigpioStepper()
-            self._pos_x = 0
-            self._pos_y = 0
-            self._enabled = True
-            self._stepper.motor_enable()
+            if not rclpy.ok():
+                rclpy.init()
+            self._ros_node = ManualGantryTestNode()
+
+            # Start spinning in background thread
+            self._spin_thread = threading.Thread(
+                target=self._spin, daemon=True)
+            self._spin_thread.start()
+
+            # Give ROS a moment to discover topics
+            time.sleep(0.5)
+
+            # Push initial parameters to stepper driver
+            self._ros_node.publish_max_velocity(self._max_speed)
+            self._ros_node.publish_acceleration(self._acceleration)
+
             return True
         except Exception as exc:
             print(f'[ERROR] Setup failed: {exc}')
-            print('Make sure pigpiod is running: sudo pigpiod')
+            print('Make sure ROS nodes are running:')
+            print('  ros2 launch chess_hw_interface hw_interface_launch.py')
             return False
 
+    def _spin(self):
+        """Background ROS spin."""
+        try:
+            rclpy.spin(self._ros_node)
+        except Exception:
+            pass
+
     def teardown(self):
-        """Clean up pigpio resources."""
-        if self._stepper:
+        """Stop velocity and clean up ROS."""
+        if self._ros_node:
             try:
-                self._stepper.cleanup()
+                self._ros_node.stop()
             except Exception:
                 pass
-            self._stepper = None
-
-    def _motor_enable(self):
-        if self._stepper:
-            self._stepper.motor_enable()
-            self._enabled = True
-
-    def _motor_disable(self):
-        if self._stepper:
-            self._stepper.motor_disable()
-            self._enabled = False
-
-    def _read_x_limit(self) -> bool:
-        """Read X limit switch (active HIGH — pressed = 5V)."""
-        if self._stepper:
-            return self._stepper.read_x_limit()
-        return False
-
-    def _read_y_limit(self) -> bool:
-        """Read Y limit switch (active HIGH — pressed = 5V)."""
-        if self._stepper:
-            return self._stepper.read_y_limit()
-        return False
-
-    def _move_xy(self, dx: int, dy: int):
-        """Move along X and Y simultaneously using a single wave chain."""
-        if self._stepper:
-            self._stepper.move_xy(dx, dy, self._speed_percent)
-            self._pos_x += dx
-            self._pos_y += dy
-
-    def _move_x(self, steps: int):
-        """Move along X axis using pigpio DMA."""
-        self._move_xy(steps, 0)
-
-    def _move_y(self, steps: int):
-        """Move along Y axis using pigpio DMA."""
-        self._move_xy(0, steps)
+            try:
+                self._ros_node.destroy_node()
+            except Exception:
+                pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
     def get_steps(self) -> List[TestStep]:
         return [
             TestStep(
-                name='Manual Gantry Control',
-                display_text='GANTRY',
-                action=self._run_manual_control,
+                name='Joystick Gantry Control',
+                display_text='JYSTK',
+                action=self._run_joystick,
                 wait_for_input=False,
                 success_message='DONE',
                 failure_message='FAIL',
             )
         ]
 
-    def _run_manual_control(self) -> bool:
-        print('\nStarting manual gantry control in 2 seconds...')
-        print("Controls: arrows move, shift+arrows diagonal, +/- step size, [/] speed, 'e' toggle, 'q' quit")
-        time.sleep(2)
+    def _run_joystick(self) -> bool:
+        print('\nStarting joystick gantry control...')
+        print('Controls: arrows/WASD move, numpad diagonals, [/] speed, ,/. accel, q quit')
+        print('Requires ROS nodes: stepper_driver_node, limit_switch_node')
+        time.sleep(1.5)
 
         try:
             curses.wrapper(self._control_loop)
@@ -131,92 +188,120 @@ class ManualGantryTest(HardwareTest):
     def _control_loop(self, stdscr):
         curses.curs_set(0)
         stdscr.nodelay(True)
-        stdscr.timeout(50)
-
-        steps_per_tick = 25
-        min_steps = 5
-        max_steps = 100
+        stdscr.timeout(20)  # 50Hz update rate — matches stepper driver tick
 
         running = True
 
         while running:
-            stdscr.clear()
-            stdscr.addstr(0, 0, '=' * 62)
-            stdscr.addstr(1, 0, '  MANUAL GANTRY CONTROL (pigpio DMA, sync waves)')
-            stdscr.addstr(2, 0, '=' * 62)
-            stdscr.addstr(4, 0, f'Position: X={self._pos_x:6d}  Y={self._pos_y:6d} steps')
-            stdscr.addstr(5, 0, f'Step size: {steps_per_tick} steps/tick')
-            stdscr.addstr(6, 0, f'Speed: {self._speed_percent}%')
-            stdscr.addstr(7, 0, f'Motor enabled: {self._enabled}')
-            stdscr.addstr(8, 0, f'Limits: X={self._read_x_limit()}  Y={self._read_y_limit()}')
-
-            stdscr.addstr(10, 0, 'CoreXY direction map:')
-            stdscr.addstr(11, 0, '  Right(+X): A+, B-     Left(-X): A-, B+')
-            stdscr.addstr(12, 0, '  Up(+Y):    A+, B+     Down(-Y): A-, B-')
-            stdscr.addstr(13, 0, '  Diagonal:  single wave, both motors in lock-step')
-
-            stdscr.addstr(15, 0, 'Controls:')
-            stdscr.addstr(16, 2, 'Arrows: cardinal moves (single wave)')
-            stdscr.addstr(17, 2, 'w/a/s/d: cardinal moves (alt keys)')
-            stdscr.addstr(18, 2, 'Numpad 7/9/1/3: diagonal moves')
-            stdscr.addstr(19, 2, '+/-: adjust step size')
-            stdscr.addstr(20, 2, '[ / ]: decrease/increase speed')
-            stdscr.addstr(21, 2, 'e: toggle enable/disable motors')
-            stdscr.addstr(22, 2, 'q: quit')
-            stdscr.refresh()
-
+            # --- Read key ---
             key = stdscr.getch()
 
-            if key in (ord('q'), ord('Q')):
+            # --- Determine desired velocity direction ---
+            vx = 0.0
+            vy = 0.0
+
+            if key == curses.KEY_RIGHT or key in (ord('d'), ord('D')):
+                vx = self._max_speed
+            elif key == curses.KEY_LEFT or key in (ord('a'), ord('A')):
+                vx = -self._max_speed
+            elif key == curses.KEY_UP or key in (ord('w'), ord('W')):
+                vy = self._max_speed
+            elif key == curses.KEY_DOWN or key in (ord('s'), ord('S')):
+                vy = -self._max_speed
+            # Diagonals
+            elif key == ord('9'):
+                vx = self._max_speed
+                vy = self._max_speed
+            elif key == ord('7'):
+                vx = -self._max_speed
+                vy = self._max_speed
+            elif key == ord('3'):
+                vx = self._max_speed
+                vy = -self._max_speed
+            elif key == ord('1'):
+                vx = -self._max_speed
+                vy = -self._max_speed
+            # Speed/accel adjustment
+            elif key == ord(']'):
+                self._max_speed = min(1500.0, self._max_speed + 50.0)
+                self._ros_node.publish_max_velocity(self._max_speed)
+            elif key == ord('['):
+                self._max_speed = max(50.0, self._max_speed - 50.0)
+                self._ros_node.publish_max_velocity(self._max_speed)
+            elif key == ord('.'):
+                self._acceleration = min(8000.0, self._acceleration + 200.0)
+                self._ros_node.publish_acceleration(self._acceleration)
+            elif key == ord(','):
+                self._acceleration = max(200.0, self._acceleration - 200.0)
+                self._ros_node.publish_acceleration(self._acceleration)
+            elif key in (ord('q'), ord('Q')):
+                self._ros_node.stop()
                 running = False
                 continue
 
-            if key in (ord('e'), ord('E')):
-                if self._enabled:
-                    self._motor_disable()
-                else:
-                    self._motor_enable()
-                continue
+            # Normalize diagonals to same speed magnitude
+            if vx != 0.0 and vy != 0.0:
+                norm = math.sqrt(vx * vx + vy * vy)
+                scale = self._max_speed / norm
+                vx *= scale
+                vy *= scale
 
-            if key in (ord('+'), ord('=')):
-                steps_per_tick = min(max_steps, steps_per_tick + 5)
-            elif key in (ord('-'), ord('_')):
-                steps_per_tick = max(min_steps, steps_per_tick - 5)
-            elif key == ord('['):
-                self._speed_percent = max(10, self._speed_percent - 5)
-            elif key == ord(']'):
-                self._speed_percent = min(100, self._speed_percent + 5)
+            # Publish velocity (zero if no key pressed → smooth stop)
+            self._ros_node.publish_velocity(vx, vy)
 
-            # Cardinal moves
-            elif key == curses.KEY_RIGHT or key in (ord('d'), ord('D')):
-                self._move_x(steps_per_tick)
-            elif key == curses.KEY_LEFT or key in (ord('a'), ord('A')):
-                if not self._read_x_limit():
-                    self._move_x(-steps_per_tick)
-            elif key == curses.KEY_UP or key in (ord('w'), ord('W')):
-                self._move_y(steps_per_tick)
-            elif key == curses.KEY_DOWN or key in (ord('s'), ord('S')):
-                if not self._read_y_limit():
-                    self._move_y(-steps_per_tick)
+            # --- Draw UI ---
+            stdscr.clear()
+            stdscr.addstr(0, 0, '═' * 60)
+            stdscr.addstr(1, 0, '  JOYSTICK GANTRY CONTROL (via ROS /stepper/velocity)')
+            stdscr.addstr(2, 0, '═' * 60)
 
-            # Diagonal moves (numpad or number keys)
-            # 7 = up-left, 9 = up-right, 1 = down-left, 3 = down-right
-            elif key == ord('9'):
-                # Up-right diagonal
-                self._move_xy(steps_per_tick, steps_per_tick)
-            elif key == ord('7'):
-                # Up-left diagonal
-                if not self._read_x_limit():
-                    self._move_xy(-steps_per_tick, steps_per_tick)
-            elif key == ord('3'):
-                # Down-right diagonal
-                if not self._read_y_limit():
-                    self._move_xy(steps_per_tick, -steps_per_tick)
-            elif key == ord('1'):
-                # Down-left diagonal
-                if not self._read_x_limit() and not self._read_y_limit():
-                    self._move_xy(-steps_per_tick, -steps_per_tick)
+            stdscr.addstr(4, 0, f'Max Speed:    {self._max_speed:7.0f} steps/sec   [ / ] to adjust')
+            stdscr.addstr(5, 0, f'Acceleration: {self._acceleration:7.0f} steps/sec²  , / . to adjust')
+            stdscr.addstr(6, 0, f'Stepper:      {self._ros_node.status}')
 
-        stdscr.addstr(24, 0, 'Exiting manual control...')
+            limit_str = ''
+            if self._ros_node.x_limit:
+                limit_str += '  X-LIMIT!'
+            if self._ros_node.y_limit:
+                limit_str += '  Y-LIMIT!'
+            stdscr.addstr(7, 0, f'Limits:{limit_str if limit_str else "  clear"}')
+
+            dir_str = 'STOP'
+            if vx > 0 and vy > 0:
+                dir_str = '↗ NE'
+            elif vx < 0 and vy > 0:
+                dir_str = '↖ NW'
+            elif vx > 0 and vy < 0:
+                dir_str = '↘ SE'
+            elif vx < 0 and vy < 0:
+                dir_str = '↙ SW'
+            elif vx > 0:
+                dir_str = '→ E'
+            elif vx < 0:
+                dir_str = '← W'
+            elif vy > 0:
+                dir_str = '↑ N'
+            elif vy < 0:
+                dir_str = '↓ S'
+
+            stdscr.addstr(9, 0, f'Direction: {dir_str}')
+
+            stdscr.addstr(11, 0, 'Controls:')
+            stdscr.addstr(12, 2, '↑ ↓ ← → / WASD : cardinal movement')
+            stdscr.addstr(13, 2, '7 9 1 3          : diagonal movement')
+            stdscr.addstr(14, 2, '[ / ]            : decrease/increase speed')
+            stdscr.addstr(15, 2, ', / .            : decrease/increase acceleration')
+            stdscr.addstr(16, 2, 'q                : quit')
+
+            stdscr.addstr(18, 0, 'CoreXY mapping (from player perspective):')
+            stdscr.addstr(19, 2, 'Right(→): Motor A CCW, Motor B CW')
+            stdscr.addstr(20, 2, 'Left(←):  Motor A CW,  Motor B CCW')
+            stdscr.addstr(21, 2, 'Up(↑):    Motor A CCW, Motor B CCW')
+            stdscr.addstr(22, 2, 'Down(↓):  Motor A CW,  Motor B CW')
+
+            stdscr.addstr(24, 0, 'Release key → smooth stop. All motion via ROS.')
+            stdscr.refresh()
+
+        stdscr.addstr(26, 0, 'Exiting joystick control...')
         stdscr.refresh()
         time.sleep(0.5)
