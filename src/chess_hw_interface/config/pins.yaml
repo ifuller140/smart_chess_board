@@ -22,16 +22,22 @@ stepper_driver:
 servo_node:
   ros__parameters:
     servo_pin: 12                 # Z-Axis Servo (Hardware PWM)
-    engage_pwm: 2.5               # Duty cycle or pulse width for engaged (down)
-    release_pwm: 7.5              # Duty cycle or pulse width for released (up)
+    engage_pulse_us: 500          # Down position (microseconds)
+    release_pulse_us: 1500        # Up position (microseconds)
     movement_time: 0.5            # Seconds to wait for movement
 
 clock_servo_node:
   ros__parameters:
     clock_servo_pin: 18           # Clock servo (Hardware PWM)
-    rest_pwm: 2.5                 # Servo at rest
-    hit_pwm: 7.5                  # Servo pressing button
+    rest_pulse_us: 500            # Servo at rest (microseconds)
+    hit_pulse_us: 1500            # Servo pressing button (microseconds)
     hit_duration: 0.3             # Seconds to hold button
+
+clock_display_node:
+  ros__parameters:
+    display1_pins: [25, 8]        # CLK=GPIO25, DIO=GPIO8
+    display2_pins: [7, 26]        # CLK=GPIO7,  DIO=GPIO26 (moved from GPIO1 which is reserved)
+    brightness: 7                 # Initial brightness (0-7)
 
 limit_switch_node:
   ros__parameters:
@@ -41,9 +47,4 @@ limit_switch_node:
       clock_hit: 15  # GPIO15 - Physical Pin 10 (per pinout.md diagram)
     debounce_ms: 20
 
-clock_display:
-  # TM1637 4-Digit 7-Segment Displays (bit-banging protocol, NOT I2C)
-  # Per pinout.md ground truth diagram
-  ros__parameters:
-    display1_pins: [25, 8]  # [CLK, DIO] - GPIO25 (Physical 22), GPIO8 (Physical 24)
-    display2_pins: [7, 1]   # [CLK, DIO] - GPIO7 (Physical 26), GPIO1 (Physical 28)
+

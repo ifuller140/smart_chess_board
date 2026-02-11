@@ -14,7 +14,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String, Float32
 
-from chess_hw_interface.testing.test_display import TM1637Display
+from chess_hw_interface.testing.test_display import create_display
 
 
 class ClockDisplayNode(Node):
@@ -39,9 +39,10 @@ class ClockDisplayNode(Node):
 
         # Initialize displays
         try:
-            self.display1 = TM1637Display(
+            # Use factory to support pigpio (non-root) backend
+            self.display1 = create_display("tm1637",
                 clk_pin=d1_pins[0], dio_pin=d1_pins[1], brightness=brightness)
-            self.display2 = TM1637Display(
+            self.display2 = create_display("tm1637",
                 clk_pin=d2_pins[0], dio_pin=d2_pins[1], brightness=brightness)
             self.get_logger().info(
                 f'Clock displays initialized: D1(CLK={d1_pins[0]}, DIO={d1_pins[1]}), '

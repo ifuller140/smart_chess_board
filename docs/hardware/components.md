@@ -205,8 +205,8 @@ After the computer completes its move, the clock servo actuates to press the clo
 clock_servo_node:
   ros__parameters:
     clock_servo_pin: 18          # BCM pin (hardware PWM or software PWM)
-    rest_pwm: 2.5                # Duty cycle for rest position
-    hit_pwm: 7.5                 # Duty cycle for button press
+    rest_pulse_us: 500           # Pulse width for rest position (microseconds)
+    hit_pulse_us: 1500           # Pulse width for button press (microseconds)
     hit_duration: 0.3            # How long to hold hit position (seconds)
 ```
 
