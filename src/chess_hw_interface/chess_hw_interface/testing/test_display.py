@@ -348,23 +348,38 @@ def create_display(display_type: str = "tm1637", **kwargs) -> DisplayInterface:
         ValueError: If display_type is not recognized
     """
     if display_type == "tm1637":
+        if PIGPIO_AVAILABLE:
+            try:
+                return PigpioTM1637Display(
+                    clk_pin=kwargs.get("clk_pin", 25),
+                    dio_pin=kwargs.get("dio_pin", 8),
+                    brightness=kwargs.get("brightness", 7)
+                )
+            except (ImportError, RuntimeError):
+                pass # Fallback to RPi.GPIO
+
         return TM1637Display(
             clk_pin=kwargs.get("clk_pin", 25),  # Default from pinout.md
             dio_pin=kwargs.get("dio_pin", 8),
             brightness=kwargs.get("brightness", 7)
         )
     elif display_type == "dual_tm1637":
-        # Create two displays using pins from pinout.md
-        display1 = TM1637Display(
-            clk_pin=kwargs.get("clk1_pin", 25),
-            dio_pin=kwargs.get("dio1_pin", 8),
-            brightness=kwargs.get("brightness", 7)
-        )
-        display2 = TM1637Display(
-            clk_pin=kwargs.get("clk2_pin", 7),
-            dio_pin=kwargs.get("dio2_pin", 1),
-            brightness=kwargs.get("brightness", 7)
-        )
+        clk1 = kwargs.get("clk1_pin", 25)
+        dio1 = kwargs.get("dio1_pin", 8)
+        clk2 = kwargs.get("clk2_pin", 7)
+        dio2 = kwargs.get("dio2_pin", 1)
+        br = kwargs.get("brightness", 7)
+
+        if PIGPIO_AVAILABLE:
+            try:
+                d1 = PigpioTM1637Display(clk_pin=clk1, dio_pin=dio1, brightness=br)
+                d2 = PigpioTM1637Display(clk_pin=clk2, dio_pin=dio2, brightness=br)
+                return DualTM1637Display(d1, d2)
+            except (ImportError, RuntimeError):
+                pass
+        
+        display1 = TM1637Display(clk_pin=clk1, dio_pin=dio1, brightness=br)
+        display2 = TM1637Display(clk_pin=clk2, dio_pin=dio2, brightness=br)
         return DualTM1637Display(display1, display2)
     else:
         raise ValueError(f"Unknown display type: {display_type}. Use 'tm1637' or 'dual_tm1637'.")
@@ -413,3 +428,162 @@ if __name__ == "__main__":
         print("This must be run on a Raspberry Pi with GPIO.")
     except Exception as e:
         print(f"Error: {e}")
+
+
+try:
+    import pigpio
+    PIGPIO_AVAILABLE = True
+except ImportError:
+    PIGPIO_AVAILABLE = False
+
+
+class PigpioTM1637Display(DisplayInterface):
+    """
+    TM1637 Display Driver using pigpio (daemon-based).
+    Allows non-root access to GPIO.
+    """
+    
+    # Commands and Char Map match TM1637Display
+    CMD_DATA = 0x40
+    CMD_ADDR = 0xC0
+    CMD_CTRL = 0x80
+    CHAR_MAP = TM1637Display.CHAR_MAP
+    
+    # Bit timing (microseconds) — slightly relaxed for socket overhead
+    BIT_DELAY_US = 20
+    
+    def __init__(self, clk_pin: int, dio_pin: int, brightness: int = 7):
+        if not PIGPIO_AVAILABLE:
+            raise ImportError("pigpio module is required for PigpioTM1637Display")
+            
+        self.clk_pin = clk_pin
+        self.dio_pin = dio_pin
+        self._brightness = min(7, max(0, brightness))
+        self._display_on = True
+        self._colon = False
+        
+        self.pi = pigpio.pi()
+        if not self.pi.connected:
+            raise RuntimeError("Cannot connect to pigpiod daemon")
+            
+        # Init pins (High Impedance / Input with Pull Up is default, but we drive them)
+        # TM1637 uses open-drain-like signaling (Drive Low, Release High)
+        # But standard push-pull works if we are careful. 
+        # RPi.GPIO driver uses push-pull. We will match it.
+        self.pi.set_mode(self.clk_pin, pigpio.OUTPUT)
+        self.pi.set_mode(self.dio_pin, pigpio.OUTPUT)
+        
+        # Initial state HIGH
+        self.pi.write(self.clk_pin, 1)
+        self.pi.write(self.dio_pin, 1)
+        
+        self.clear()
+        self._update_brightness()
+
+    def _delay(self):
+        # Precise delay using pigpio is hard over socket for small values.
+        # time.sleep() in python is ~100us minimum usually.
+        # We'll rely on python overhead being enough or use explicit sleep.
+        time.sleep(self.BIT_DELAY_US / 1_000_000.0)
+
+    def _start(self):
+        self.pi.write(self.clk_pin, 1)
+        self.pi.write(self.dio_pin, 1)
+        self._delay()
+        self.pi.write(self.dio_pin, 0)
+        self._delay()
+        self.pi.write(self.clk_pin, 0)
+        self._delay()
+
+    def _stop(self):
+        self.pi.write(self.clk_pin, 0)
+        self.pi.write(self.dio_pin, 0)
+        self._delay()
+        self.pi.write(self.clk_pin, 1)
+        self._delay()
+        self.pi.write(self.dio_pin, 1)
+        self._delay()
+
+    def _write_byte(self, data: int) -> bool:
+        for i in range(8):
+            self.pi.write(self.clk_pin, 0)
+            self._delay()
+            
+            val = 1 if (data & (1 << i)) else 0
+            self.pi.write(self.dio_pin, val)
+            self._delay()
+            
+            self.pi.write(self.clk_pin, 1)
+            self._delay()
+            
+        # ACK check
+        self.pi.write(self.clk_pin, 0)
+        self.pi.write(self.dio_pin, 1) # Release DATA
+        self.pi.set_mode(self.dio_pin, pigpio.INPUT) # Switch to input
+        self._delay()
+        
+        self.pi.write(self.clk_pin, 1)
+        self._delay()
+        
+        ack = self.pi.read(self.dio_pin) == 0
+        
+        self.pi.write(self.clk_pin, 0)
+        self.pi.set_mode(self.dio_pin, pigpio.OUTPUT) # Back to output
+        self.pi.write(self.dio_pin, 0)
+        self._delay()
+        
+        return ack
+        
+    def _update_brightness(self):
+        self._start()
+        cmd = self.CMD_CTRL | (0x08 if self._display_on else 0) | self._brightness
+        self._write_byte(cmd)
+        self._stop()
+        
+    def show_digits(self, digits: list, colon: bool = False):
+        self._start()
+        self._write_byte(self.CMD_DATA)
+        self._stop()
+        
+        self._start()
+        self._write_byte(self.CMD_ADDR)
+        
+        for i, digit in enumerate(digits[:4]):
+            if i == 1 and colon:
+                digit |= 0x80
+            self._write_byte(digit)
+            
+        self._stop()
+        self._update_brightness()
+        
+    def show_text(self, text: str):
+        text = text.upper()[:4].ljust(4)
+        digits = [self.CHAR_MAP.get(c, 0x00) for c in text]
+        self.show_digits(digits, colon=self._colon)
+
+    def show_time(self, minutes: int, seconds: int, colon: bool = True):
+        minutes = max(0, min(99, minutes))
+        seconds = max(0, min(59, seconds))
+        self._colon = colon
+        text = f"{minutes:02d}{seconds:02d}"
+        self.show_text(text)
+        self._colon = False
+
+    def clear(self):
+        self.show_digits([0, 0, 0, 0])
+
+    def set_brightness(self, level: int):
+        self._brightness = min(7, max(0, level))
+        self._update_brightness()
+
+    def cleanup(self):
+        self.clear()
+        self.pi.stop()
+
+
+class PigpioDualTM1637Display(DualTM1637Display):
+    """Wrapper for Dual Display using Pigpio backend."""
+    pass # Inherits logic, just holds Pigpio instances
+
+
+

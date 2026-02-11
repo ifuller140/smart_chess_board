@@ -24,14 +24,16 @@ class ClockServoNode(Node):
         super().__init__('clock_servo_node')
 
         # Parameters
+        # Parameters
         self.declare_parameter('clock_servo_pin', 18)
-        self.declare_parameter('rest_pwm', 500)       # µs pulse width at rest
-        self.declare_parameter('hit_pwm', 1500)       # µs pulse width for hitting
+        self.declare_parameter('rest_pulse_us', 500)       # µs pulse width at rest
+        self.declare_parameter('hit_pulse_us', 1500)       # µs pulse width for hitting
         self.declare_parameter('hit_duration', 0.3)    # seconds to hold
 
         self.servo_pin = self.get_parameter('clock_servo_pin').value
-        self.rest_pw = self.get_parameter('rest_pwm').value
-        self.hit_pw = self.get_parameter('hit_pwm').value
+        # Handle potential float parsing if user forgets to update YAML (though we fixed it)
+        self.rest_pw = int(self.get_parameter('rest_pulse_us').value)
+        self.hit_pw = int(self.get_parameter('hit_pulse_us').value)
         self.hit_duration = self.get_parameter('hit_duration').value
 
         self.emergency_stop = False
