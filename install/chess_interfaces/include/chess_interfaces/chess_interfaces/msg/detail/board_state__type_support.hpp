@@ -1,0 +1,1 @@
+/home/ian/dev/smart_chess_board/build/chess_interfaces/rosidl_generator_cpp/chess_interfaces/msg/detail/board_state__type_support.hpp

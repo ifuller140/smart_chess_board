@@ -1,5 +1,1 @@
-string fen               # Current board state
----
-string best_move_uci     # e.g., "e2e4"
-float32 think_time
-bool success
+/home/ian/dev/smart_chess_board/build/chess_logic/srv/RequestMove.srv

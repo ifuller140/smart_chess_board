@@ -1,1 +1,1 @@
-action_msgs:chess_hw_interface:geometry_msgs:rclpy:rclpy_action:std_msgs
+action_msgs:chess_hw_interface:chess_interfaces:geometry_msgs:rclpy:rclpy_action:std_msgs

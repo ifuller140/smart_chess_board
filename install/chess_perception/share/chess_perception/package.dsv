@@ -1,12 +1,9 @@
-source;share/chess_perception/hook/path.ps1
-source;share/chess_perception/hook/path.dsv
-source;share/chess_perception/hook/path.sh
 source;share/chess_perception/hook/pythonpath.ps1
 source;share/chess_perception/hook/pythonpath.dsv
 source;share/chess_perception/hook/pythonpath.sh
-source;share/chess_perception/hook/pythonscriptspath.ps1
-source;share/chess_perception/hook/pythonscriptspath.dsv
-source;share/chess_perception/hook/pythonscriptspath.sh
 source;share/chess_perception/hook/ament_prefix_path.ps1
 source;share/chess_perception/hook/ament_prefix_path.dsv
 source;share/chess_perception/hook/ament_prefix_path.sh
+source;../../build/chess_perception/share/chess_perception/hook/pythonpath_develop.ps1
+source;../../build/chess_perception/share/chess_perception/hook/pythonpath_develop.dsv
+source;../../build/chess_perception/share/chess_perception/hook/pythonpath_develop.sh
