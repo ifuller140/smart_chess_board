@@ -3,8 +3,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
-from chess_perception.msg import BoardState
-from chess_logic.srv import RequestMove
+from chess_interfaces.msg import BoardState
+from chess_interfaces.srv import RequestMove
 # We will assume a service or action for motion planning exists
 # from gantry_control.srv import PickAndPlace (We will define this next)
 

@@ -1,0 +1,1 @@
+/home/ian/dev/smart_chess_board/build/chess_interfaces/rosidl_typesupport_fastrtps_c/chess_interfaces/msg/rosidl_typesupport_fastrtps_c__visibility_control.h

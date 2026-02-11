@@ -1,0 +1,1 @@
+/home/ian/dev/smart_chess_board/build/chess_interfaces/rosidl_generator_cpp/chess_interfaces/srv/detail/request_move__type_support.hpp

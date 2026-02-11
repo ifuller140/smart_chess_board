@@ -1,0 +1,1 @@
+/home/ian/dev/smart_chess_board/build/chess_interfaces/rosidl_generator_c/chess_interfaces/msg/rosidl_generator_c__visibility_control.h

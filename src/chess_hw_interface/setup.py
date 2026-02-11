@@ -27,6 +27,7 @@ setup(
             'stepper_driver_node = chess_hw_interface.nodes.stepper_driver_node:main',
             'servo_node = chess_hw_interface.nodes.servo_node:main',
             'limit_switch_node = chess_hw_interface.nodes.limit_switch_node:main',
+            'clock_servo_node = chess_hw_interface.nodes.clock_servo_node:main',
             'clock_display_node = chess_hw_interface.nodes.clock_display_node:main',
             'gpio_watchdog_node = chess_hw_interface.nodes.gpio_watchdog_node:main',
         ],

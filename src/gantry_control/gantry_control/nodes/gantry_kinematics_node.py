@@ -7,7 +7,7 @@ from geometry_msgs.msg import Point
 from rclpy.action import ActionServer
 from rclpy.node import Node
 
-from gantry_control.action import MoveGantry
+from chess_interfaces.action import MoveGantry
 
 
 class GantryKinematicsNode(Node):

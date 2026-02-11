@@ -2,7 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from gantry_control.action import MoveGantry
+from chess_interfaces.action import MoveGantry
 from std_srvs.srv import Trigger
 from std_msgs.msg import String
 

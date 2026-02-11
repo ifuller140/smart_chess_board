@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from chess_logic.srv import RequestMove
+from chess_interfaces.srv import RequestMove
 import chess
 import chess.engine
 import random
