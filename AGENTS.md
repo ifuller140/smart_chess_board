@@ -31,7 +31,8 @@ smart_chess_board/
 │   ├── chess_hw_interface/     # GPIO drivers
 │   ├── chess_perception/       # Computer vision
 │   ├── chess_logic/            # Game rules & engine
-│   └── gantry_control/         # Motion control
+│   ├── gantry_control/         # Motion control
+│   └── gantry_control_interfaces/ # ROS 2 action/srv definitions (CMake)
 ├── code/                        # Standalone test scripts
 ├── cad/                         # CAD files & exports
 ├── simulation/                  # Simulation environment

@@ -1,0 +1,10 @@
+# /etc/sudoers.d/smart-chess-hw-tests
+#
+# Allow user 'ian' to run Python hardware tests without password
+# This is needed because test_runner.py requires /dev/mem access
+#
+# SECURITY NOTE: This is scoped to a specific Python module path
+# to minimize security risk. Only the test_runner can be executed
+# with elevated privileges this way.
+
+ian ALL=(ALL) NOPASSWD: /usr/bin/python3 -m chess_hw_interface.testing.test_runner*
