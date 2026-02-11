@@ -13,6 +13,9 @@ Examples:
 import argparse
 import sys
 from typing import Dict, Optional, Type
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool
 
 from .base_test import HardwareTest, TestResult
 from .test_display import DisplayInterface, create_display
@@ -36,51 +39,6 @@ from .tests.test_gantry import (
 from .tests.test_magnet import MagnetTest
 from .tests.test_manual_gantry import ManualGantryTest
 from .tests.test_servo import ServoTest
-
-
-class GPIOInterface:
-    """GPIO wrapper around RPi.GPIO with active-low limit switch helpers."""
-
-    PIN_X_LIMIT = 10
-    PIN_Y_LIMIT = 9
-    PIN_CLOCK_BUTTON = 15
-
-    def __init__(self):
-        import RPi.GPIO as GPIO
-
-        self.GPIO = GPIO
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-
-        # Active HIGH switches with pull-downs (pressed = 3.3V = HIGH).
-        GPIO.setup(self.PIN_X_LIMIT, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-        GPIO.setup(self.PIN_Y_LIMIT, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-        GPIO.setup(self.PIN_CLOCK_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-
-    def setup_output(self, pin: int):
-        self.GPIO.setup(pin, self.GPIO.OUT)
-
-    def setup_input(self, pin: int, pull_up: bool = True):
-        pud = self.GPIO.PUD_UP if pull_up else self.GPIO.PUD_DOWN
-        self.GPIO.setup(pin, self.GPIO.IN, pull_up_down=pud)
-
-    def write(self, pin: int, value: bool):
-        self.GPIO.output(pin, self.GPIO.HIGH if value else self.GPIO.LOW)
-
-    def read(self, pin: int) -> bool:
-        return self.GPIO.input(pin) == self.GPIO.HIGH
-
-    def read_x_limit(self) -> bool:
-        return self.read(self.PIN_X_LIMIT)  # Active HIGH: 1 = pressed
-
-    def read_y_limit(self) -> bool:
-        return self.read(self.PIN_Y_LIMIT)  # Active HIGH: 1 = pressed
-
-    def read_clock_button(self) -> bool:
-        return self.read(self.PIN_CLOCK_BUTTON)  # Active HIGH: 1 = pressed
-
-    def cleanup(self):
-        self.GPIO.cleanup()
 
 
 class MockGPIOInterface:
@@ -110,6 +68,79 @@ class MockGPIOInterface:
 
     def cleanup(self):
         return None
+
+
+class RosMonitorNode(Node):
+    """Monitor hardware state via ROS topics."""
+    def __init__(self):
+        super().__init__('test_runner_monitor')
+        self.x_limit = False
+        self.y_limit = False
+        self.clock_button = False
+
+        # Subscriptions
+        self.create_subscription(Bool, '/limit_switch/x_min', self._x_cb, 10)
+        self.create_subscription(Bool, '/limit_switch/y_min', self._y_cb, 10)
+        self.create_subscription(Bool, '/limit_switch/clock_hit', self._clock_cb, 10)
+
+    def _x_cb(self, msg): self.x_limit = msg.data
+    def _y_cb(self, msg): self.y_limit = msg.data
+    def _clock_cb(self, msg): self.clock_button = msg.data
+
+
+class RosInterface:
+    """Hardware interface using ROS topics instead of direct GPIO."""
+    def __init__(self):
+        # Ensure ROS is running (monitor node spun in background thread in main)
+        self.monitor_node = None  # Set by main()
+        self.is_mock = False
+
+    def setup_output(self, pin: int):
+        print(f"[WARN] setup_output({pin}) ignored in ROS mode (requires direct GPIO)")
+
+    def setup_input(self, pin: int, pull_up: bool = True):
+        pass  # Inputs handled by limit_switch_node
+
+    def write(self, pin: int, value: bool):
+        print(f"[WARN] write({pin}, {value}) ignored in ROS mode")
+
+    def read(self, pin: int) -> bool:
+        print(f"[WARN] direct read({pin}) not supported in ROS mode")
+        return False
+
+    def read_x_limit(self) -> bool:
+        return self.monitor_node.x_limit if self.monitor_node else False
+
+    def read_y_limit(self) -> bool:
+        return self.monitor_node.y_limit if self.monitor_node else False
+
+    def read_clock_button(self) -> bool:
+        return self.monitor_node.clock_button if self.monitor_node else False
+
+    def cleanup(self):
+        pass
+
+
+class ConsoleDisplay(DisplayInterface):
+    """Log display text to console since hardware runs in background node."""
+    def show_text(self, text: str):
+        # Only log if it's a significant status change to avoid spam
+        if text in ['PASS', 'FAIL', 'SETUP', 'DONE']:
+            print(f"  [DISPLAY]: {text}")
+
+    def show_time(self, minutes: int, seconds: int, colon: bool = True):
+        # We generally don't want to spam console with time updates 2Hz
+        pass
+
+    def clear(self):
+        pass
+
+    def set_brightness(self, level: int):
+        pass
+    
+    def cleanup(self):
+        pass
+
 
 
 class NullDisplay(DisplayInterface):
@@ -309,8 +340,31 @@ def main() -> int:
         print('No action specified. Use --list, --all, --category, or --test.')
         return 1
 
-    gpio = MockGPIOInterface() if args.mock else GPIOInterface()
-    display = _build_display(args.display, args.mock)
+    # Initialize ROS globally for the test runner/monitor
+    if not rclpy.ok():
+        # Use SignalHandlerOptions.NO to avoid conflict with test logic signals if any
+        from rclpy.signals import SignalHandlerOptions
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+
+    monitor_node = RosMonitorNode()
+    
+    # Spin monitor in background
+    import threading
+    monitor_thread = threading.Thread(target=lambda: rclpy.spin(monitor_node), daemon=True)
+    monitor_thread.start()
+
+    if args.mock:
+        gpio = MockGPIOInterface()
+        display = NullDisplay()
+    else:
+        # Use RosInterface (replacing GPIOInterface)
+        gpio = RosInterface()
+        gpio.monitor_node = monitor_node
+        # Use ConsoleDisplay (replacing TM1637Display which requires direct GPIO)
+        display = ConsoleDisplay()
+
+    # display = _build_display(args.display, args.mock) # Old logic removed
+    
     verbose = not args.quiet
 
     try:
@@ -353,6 +407,9 @@ def main() -> int:
         return 0 if all(r == TestResult.PASSED for r in results.values()) else 1
     finally:
         gpio.cleanup()
+        monitor_node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

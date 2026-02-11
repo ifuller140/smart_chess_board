@@ -73,8 +73,8 @@ class ManualGantryTestNode(Node):
     def publish_velocity(self, vx: float, vy: float):
         """Publish Cartesian velocity (steps/sec)."""
         msg = Twist()
-        msg.linear.x = vx
-        msg.linear.y = vy
+        msg.linear.x = float(vx)
+        msg.linear.y = float(vy)
         self.vel_pub.publish(msg)
 
     def publish_max_velocity(self, val: float):

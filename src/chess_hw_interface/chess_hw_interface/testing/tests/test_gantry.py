@@ -21,6 +21,7 @@ from typing import List, Optional
 import rclpy
 from geometry_msgs.msg import Point, Twist
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool, Float32, String
 
 from ..base_test import HardwareTest, TestStep
@@ -71,21 +72,21 @@ class GantryTestNode(Node):
         msg = Point()
         msg.x = float(steps_a)
         msg.y = float(steps_b)
-        msg.z = speed_pct
+        msg.z = float(speed_pct)
         self.cmd_pub.publish(msg)
 
     def send_velocity(self, vx: float, vy: float):
         """Publish velocity command (Cartesian, steps/sec)."""
         msg = Twist()
-        msg.linear.x = vx
-        msg.linear.y = vy
+        msg.linear.x = float(vx)
+        msg.linear.y = float(vy)
         self.vel_pub.publish(msg)
 
     def wait_for_idle(self, timeout: float = 30.0) -> bool:
         """Wait for stepper to report IDLE."""
         start = time.time()
         while (time.time() - start) < timeout:
-            rclpy.spin_once(self, timeout_sec=0.05)
+            time.sleep(0.05)
             if self.status == 'IDLE':
                 return True
         return False
@@ -145,7 +146,7 @@ class GantryTestBase(HardwareTest):
         """Initialize ROS node for test communication."""
         try:
             if not rclpy.ok():
-                rclpy.init()
+                rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
             self._node = GantryTestNode()
             self._spin_thread = threading.Thread(
                 target=self._spin, daemon=True)
