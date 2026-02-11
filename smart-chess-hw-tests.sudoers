@@ -7,4 +7,4 @@
 # to minimize security risk. Only the test_runner can be executed
 # with elevated privileges this way.
 
-ian ALL=(ALL) NOPASSWD: /usr/bin/python3 -m chess_hw_interface.testing.test_runner*
+ian ALL=(ALL) SETENV: NOPASSWD: /usr/bin/python3 -m chess_hw_interface.testing.test_runner*
