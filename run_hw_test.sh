@@ -21,12 +21,13 @@ else
 fi
 
 echo "Running hardware tests with sudo (preserving environment)..."
-echo "Command: sudo -E python3 -m chess_hw_interface.testing.test_runner $@"
 echo ""
 
-# -E preserves environment variables (ROS paths, PYTHONPATH)
+# Pass both PYTHONPATH and LD_LIBRARY_PATH explicitly
+# sudo doesn't preserve these even with -E, so we set them explicitly
 # Must run as root for /dev/mem access
-sudo -E python3 -m chess_hw_interface.testing.test_runner "$@"
+sudo PYTHONPATH="$PYTHONPATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+    python3 -m chess_hw_interface.testing.test_runner "$@"
 
 exit_code=$?
 if [ $exit_code -eq 0 ]; then
