@@ -26,25 +26,26 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 
 
-# Pin defaults (BCM) — can be overridden via ROS parameters
+# Pin defaults (BCM) — overridden by pins.yaml ROS parameters
 DEFAULT_MOTOR_A_DIR_PIN = 27
 DEFAULT_MOTOR_A_STEP_PIN = 22
 DEFAULT_MOTOR_B_DIR_PIN = 6
 DEFAULT_MOTOR_B_STEP_PIN = 5
 DEFAULT_MOTOR_ENABLE_PIN = 17
 
-# Timing
-DIR_SETUP_US = 5
-STEP_PULSE_US = 10
+# Timing defaults — overridden by pins.yaml
+DEFAULT_DIR_SETUP_US = 5
+DEFAULT_STEP_PULSE_US = 10
 
-# Speed parameters (steps per second)
-MAX_SPEED = 1200
-MIN_SPEED = 100
+# Speed defaults — overridden by pins.yaml
+DEFAULT_MAX_SPEED = 800
+DEFAULT_MIN_SPEED = 150
+DEFAULT_ACCEL_RAMP_STEPS = 60
 
-# Velocity control
-DEFAULT_MAX_VELOCITY = 800      # steps/sec max for velocity mode
-DEFAULT_ACCELERATION = 2000     # steps/sec² ramp rate
-VELOCITY_TICK_MS = 20           # velocity loop period (50Hz)
+# Velocity control defaults — overridden by pins.yaml
+DEFAULT_MAX_VELOCITY = 600
+DEFAULT_ACCELERATION = 1500
+DEFAULT_VELOCITY_TICK_MS = 20
 
 # Wave chain limits
 MAX_UNIQUE_WAVES = 180
@@ -62,24 +63,49 @@ class StepperDriverNode(Node):
     def __init__(self):
         super().__init__('stepper_driver_node')
 
-        # ---- Parameters ----
+        # ---- Parameters (all read from pins.yaml via ROS params) ----
+        # Pin assignments
         self.declare_parameter('motorA_dir_pin', DEFAULT_MOTOR_A_DIR_PIN)
         self.declare_parameter('motorA_step_pin', DEFAULT_MOTOR_A_STEP_PIN)
         self.declare_parameter('motorB_dir_pin', DEFAULT_MOTOR_B_DIR_PIN)
         self.declare_parameter('motorB_step_pin', DEFAULT_MOTOR_B_STEP_PIN)
         self.declare_parameter('motor_enable_pin', DEFAULT_MOTOR_ENABLE_PIN)
-        self.declare_parameter('hold_torque_when_idle', True)
+
+        # Timing
+        self.declare_parameter('dir_setup_us', DEFAULT_DIR_SETUP_US)
+        self.declare_parameter('step_pulse_us', DEFAULT_STEP_PULSE_US)
+
+        # Speed
+        self.declare_parameter('max_speed', DEFAULT_MAX_SPEED)
+        self.declare_parameter('min_speed', DEFAULT_MIN_SPEED)
+        self.declare_parameter('accel_ramp_steps', DEFAULT_ACCEL_RAMP_STEPS)
+
+        # Velocity control
         self.declare_parameter('max_velocity', DEFAULT_MAX_VELOCITY)
         self.declare_parameter('acceleration', DEFAULT_ACCELERATION)
+        self.declare_parameter('velocity_tick_ms', DEFAULT_VELOCITY_TICK_MS)
 
+        # Behavior
+        self.declare_parameter('hold_torque_when_idle', True)
+
+        # Read all parameters
         self.motorA_dir = self.get_parameter('motorA_dir_pin').value
         self.motorA_step = self.get_parameter('motorA_step_pin').value
         self.motorB_dir = self.get_parameter('motorB_dir_pin').value
         self.motorB_step = self.get_parameter('motorB_step_pin').value
         self.motor_enable_pin = self.get_parameter('motor_enable_pin').value
-        self.hold_torque = self.get_parameter('hold_torque_when_idle').value
+
+        self.dir_setup_us = self.get_parameter('dir_setup_us').value
+        self.step_pulse_us = self.get_parameter('step_pulse_us').value
+        self.max_speed = self.get_parameter('max_speed').value
+        self.min_speed = self.get_parameter('min_speed').value
+        self.accel_ramp_steps = self.get_parameter('accel_ramp_steps').value
+
         self.max_velocity = float(self.get_parameter('max_velocity').value)
         self.acceleration = float(self.get_parameter('acceleration').value)
+        self.velocity_tick_ms = self.get_parameter('velocity_tick_ms').value
+
+        self.hold_torque = self.get_parameter('hold_torque_when_idle').value
 
         self.emergency_stop = False
 
@@ -102,7 +128,9 @@ class StepperDriverNode(Node):
         self.get_logger().info(
             f"pigpio initialized: A(DIR={self.motorA_dir}, STEP={self.motorA_step}), "
             f"B(DIR={self.motorB_dir}, STEP={self.motorB_step}), "
-            f"EN={self.motor_enable_pin}"
+            f"EN={self.motor_enable_pin}, "
+            f"dir_setup={self.dir_setup_us}µs, step_pulse={self.step_pulse_us}µs, "
+            f"speed=[{self.min_speed}..{self.max_speed}], accel_ramp={self.accel_ramp_steps}"
         )
 
         # ---- Velocity state ----
@@ -114,6 +142,7 @@ class StepperDriverNode(Node):
         self._motors_enabled = False
         self._moving = False
         self._idle_since = time.time()
+        self._tick_running = False      # re-entrancy guard for velocity tick
 
         # ---- ROS interfaces ----
 
@@ -138,12 +167,13 @@ class StepperDriverNode(Node):
         self.accel_sub = self.create_subscription(
             Float32, '/stepper/set_acceleration', self._set_acceleration_cb, 10)
 
-        # Velocity control timer (50Hz)
+        # Velocity control timer
         self._vel_timer = self.create_timer(
-            VELOCITY_TICK_MS / 1000.0, self._velocity_tick)
+            self.velocity_tick_ms / 1000.0, self._velocity_tick)
 
         self.get_logger().info(
-            f"Stepper driver ready. max_vel={self.max_velocity}, accel={self.acceleration}")
+            f"Stepper driver ready. max_vel={self.max_velocity}, accel={self.acceleration}, "
+            f"tick={self.velocity_tick_ms}ms")
 
     # ------------------------------------------------------------------
     # Parameter update callbacks
@@ -218,7 +248,7 @@ class StepperDriverNode(Node):
 
     def _velocity_tick(self):
         """
-        Timer callback (50Hz) — smoothly ramp velocity and generate steps.
+        Timer callback — smoothly ramp velocity and generate steps.
 
         This is the core joystick loop:
         1. Ramp current velocity toward desired velocity (smooth accel/decel)
@@ -228,7 +258,19 @@ class StepperDriverNode(Node):
         if self.emergency_stop:
             return
 
-        dt = VELOCITY_TICK_MS / 1000.0
+        # Re-entrancy guard: if the previous tick is still running, skip
+        if self._tick_running:
+            return
+        self._tick_running = True
+
+        try:
+            self._velocity_tick_inner()
+        finally:
+            self._tick_running = False
+
+    def _velocity_tick_inner(self):
+        """Inner velocity tick logic (guarded by _tick_running flag)."""
+        dt = self.velocity_tick_ms / 1000.0
 
         with self._vel_lock:
             desired_x = self._desired_vel_x
@@ -284,7 +326,7 @@ class StepperDriverNode(Node):
         # (positive step count → DIR pin LOW for this hardware layout)
         self.pi.write(self.motorA_dir, 0 if steps_a >= 0 else 1)
         self.pi.write(self.motorB_dir, 0 if steps_b >= 0 else 1)
-        time.sleep(DIR_SETUP_US / 1_000_000)
+        time.sleep(self.dir_setup_us / 1_000_000)
 
         abs_a = abs(steps_a)
         abs_b = abs(steps_b)
@@ -323,7 +365,7 @@ class StepperDriverNode(Node):
         if not step_plan:
             return
 
-        wait_us = max(1, delay_us - STEP_PULSE_US)
+        wait_us = max(1, delay_us - self.step_pulse_us)
 
         # Build a single wave for all steps in this tick
         # (they all share the same delay, so one wave + loop)
@@ -332,6 +374,13 @@ class StepperDriverNode(Node):
         wave_ids = []
 
         try:
+            # Wait for any in-progress wave to finish before clearing
+            timeout = time.time() + 0.05  # 50ms safety timeout
+            while self.pi.wave_tx_busy():
+                if time.time() > timeout:
+                    self.pi.wave_tx_stop()
+                    break
+                time.sleep(0.0002)
             self.pi.wave_clear()
 
             pattern_to_wid = {}
@@ -346,7 +395,7 @@ class StepperDriverNode(Node):
                     clear_mask |= (1 << self.motorB_step)
 
                 self.pi.wave_add_generic([
-                    pigpio.pulse(set_mask, 0, STEP_PULSE_US),
+                    pigpio.pulse(set_mask, 0, self.step_pulse_us),
                     pigpio.pulse(0, clear_mask, wait_us),
                 ])
                 wid = self.pi.wave_create()
@@ -427,7 +476,7 @@ class StepperDriverNode(Node):
 
     def _speed_to_steps_per_sec(self, speed_percent: float) -> int:
         speed = max(0.0, min(100.0, speed_percent))
-        return int(MIN_SPEED + (speed / 100.0) * (MAX_SPEED - MIN_SPEED))
+        return int(self.min_speed + (speed / 100.0) * (self.max_speed - self.min_speed))
 
     def _calculate_speed_profile(self, total_steps, speed_percent):
         """Calculate trapezoidal speed profile for point-to-point moves."""
@@ -435,10 +484,10 @@ class StepperDriverNode(Node):
             return []
 
         target_speed = self._speed_to_steps_per_sec(speed_percent)
-        accel_steps = min(100, total_steps // 3)
+        accel_steps = min(self.accel_ramp_steps, total_steps // 3)
 
         if total_steps <= accel_steps * 2:
-            delay_us = int(1_000_000 / MIN_SPEED)
+            delay_us = int(1_000_000 / self.min_speed)
             return [(total_steps, delay_us)]
 
         decel_steps = accel_steps
@@ -447,7 +496,7 @@ class StepperDriverNode(Node):
         profile = []
         for i in range(accel_steps):
             t = (i + 1) / accel_steps
-            speed = MIN_SPEED + t * (target_speed - MIN_SPEED)
+            speed = self.min_speed + t * (target_speed - self.min_speed)
             profile.append((1, int(1_000_000 / speed)))
 
         if cruise_steps > 0:
@@ -455,7 +504,7 @@ class StepperDriverNode(Node):
 
         for i in range(decel_steps):
             t = (i + 1) / decel_steps
-            speed = target_speed - t * (target_speed - MIN_SPEED)
+            speed = target_speed - t * (target_speed - self.min_speed)
             profile.append((1, int(1_000_000 / speed)))
 
         return profile
@@ -468,7 +517,7 @@ class StepperDriverNode(Node):
         # INVERTED DIR pins per user's hardware
         self.pi.write(self.motorA_dir, 0 if steps_a >= 0 else 1)
         self.pi.write(self.motorB_dir, 0 if steps_b >= 0 else 1)
-        time.sleep(DIR_SETUP_US / 1_000_000)
+        time.sleep(self.dir_setup_us / 1_000_000)
 
         abs_a = abs(steps_a)
         abs_b = abs(steps_b)
@@ -535,7 +584,7 @@ class StepperDriverNode(Node):
                 if pattern in p2w:
                     continue
                 do_a, do_b, delay_us = pattern
-                wait_us = max(1, delay_us - STEP_PULSE_US)
+                wait_us = max(1, delay_us - self.step_pulse_us)
                 set_mask = 0
                 clear_mask = 0
                 if do_a:
@@ -546,7 +595,7 @@ class StepperDriverNode(Node):
                     clear_mask |= (1 << self.motorB_step)
 
                 self.pi.wave_add_generic([
-                    pigpio.pulse(set_mask, 0, STEP_PULSE_US),
+                    pigpio.pulse(set_mask, 0, self.step_pulse_us),
                     pigpio.pulse(0, clear_mask, wait_us),
                 ])
                 wid = self.pi.wave_create()

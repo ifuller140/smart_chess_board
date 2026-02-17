@@ -10,12 +10,20 @@ stepper_driver:
     motorB_step_pin: 5            # Step pin for Motor B (GPIO5, Physical 29)
     motor_enable_pin: 17          # Shared ENABLE pin (active LOW)
 
-    # Timing Parameters (full-step mode)
-    dir_setup_us: 50              # DIR setup time in microseconds (conservative for Linux userspace timing)
-    step_pulse_us: 100            # STEP pulse width in microseconds
-    min_step_delay_ms: 5.0        # Minimum delay between steps (max speed, torque-safe baseline)
-    max_step_delay_ms: 50.0       # Maximum delay between steps (min speed)
-    accel_ramp_steps: 40          # Linear acceleration/deceleration ramp steps
+    # Timing Parameters (full-step mode, A4988 minimums: DIR=200ns, STEP=1µs)
+    dir_setup_us: 5               # DIR setup time in microseconds (25x A4988 minimum)
+    step_pulse_us: 10             # STEP pulse width in microseconds (10x A4988 minimum)
+
+    # Speed Parameters (steps per second, full-step mode)
+    max_speed: 800                # Maximum step rate (steps/sec) — cruise speed
+    min_speed: 150                # Starting speed for acceleration ramps (steps/sec)
+    accel_ramp_steps: 60          # Steps for linear acceleration/deceleration ramp
+
+    # Velocity Control (joystick mode)
+    max_velocity: 600             # Max velocity for joystick control (steps/sec)
+    acceleration: 1500            # Velocity ramp rate (steps/sec²)
+    velocity_tick_ms: 20          # Velocity loop period in ms (50Hz)
+
     hold_torque_when_idle: true   # Keep drivers enabled between moves
 
 

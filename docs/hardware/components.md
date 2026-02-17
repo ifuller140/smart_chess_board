@@ -102,19 +102,38 @@
 | VMOT | Motor power | 12V supply |
 | 1A, 1B | Motor coil 1 | Motor wires |
 | 2A, 2B | Motor coil 2 | Motor wires |
-| MS1, MS2, MS3 | Microstepping | Not connected (full-step) |
-| ENABLE | Enable (active low) | GND or GPIO |
-| SLEEP | Sleep (active low) | Tied to RESET |
-| RESET | Reset (active low) | Tied to SLEEP |
+| MS1, MS2, MS3 | Microstepping | Not connected (full-step mode) |
+| ENABLE | Enable (active low) | GPIO 17 — software-controlled |
+| SLEEP | Sleep (active low) | Bridged to RESET |
+| RESET | Reset (active low) | Bridged to SLEEP |
 
 ### Control Method
 ```
 To step the motor:
-1. Set DIR pin HIGH (forward) or LOW (reverse)
+1. Set DIR pin LOW (forward) or HIGH (reverse)
+   NOTE: DIR polarity is INVERTED for this CoreXY layout
+   (LOW = positive/forward direction)
 2. Pulse STEP pin: LOW → HIGH → LOW
 3. Each rising edge = 1 step
 4. Delay between pulses controls speed
 ```
+
+### Current Limiting (Vref)
+
+The A4988 potentiometer must be adjusted to limit motor current.
+
+Formula: `Vref = I_max × 8 × R_sense`
+
+For NEMA 11 (11HS13-0404S, 0.4A per phase) with typical R_sense = 0.1Ω:
+```
+Vref = 0.4 × 8 × 0.1 = 0.32V
+```
+
+Measure Vref between the potentiometer wiper and GND with a multimeter.
+
+> [!CAUTION]
+> **Vref too high** → overcurrent → motor/driver overheats
+> **Vref too low** → insufficient torque → motor vibrates but doesn't step
 
 ### Microstepping Configuration
 | MS1 | MS2 | MS3 | Resolution |
@@ -295,15 +314,15 @@ Side View:
 | Configuration | NO (Normally Open) + NC (Normally Closed) |
 | Actuation Force | ~50g |
 
-### Wiring (Using Normally Open)
+### Wiring (Using Normally Open — Active HIGH)
 ```
 Switch          Pi GPIO
-  COM ─────────── GND
-  NO  ─────────── GPIO pin (with internal pull-up enabled)
+  COM ─────────── 5V
+  NO  ─────────── GPIO pin (with internal pull-down enabled)
 ```
 
-When switch is pressed: GPIO reads LOW
-When switch is released: GPIO reads HIGH (pulled up)
+When switch is pressed: GPIO reads HIGH (5V through switch)
+When switch is released: GPIO reads LOW (pulled down)
 
 ### Positions
 | Switch | Location | Purpose |

@@ -11,38 +11,66 @@ Requirements:
 - pigpio daemon running: sudo pigpiod
 """
 
+import os
 import time
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
 import pigpio
+import yaml
 
 
 # ==========================
-# PIN DEFINITIONS (BCM)
+# DEFAULT PIN DEFINITIONS (BCM) — overridden by pins.yaml
 # ==========================
-MOTOR_A_DIR_PIN = 27
-MOTOR_A_STEP_PIN = 22
-MOTOR_B_DIR_PIN = 6
-MOTOR_B_STEP_PIN = 5
-MOTOR_ENABLE_PIN = 17  # A4988 ENABLE, active LOW
+DEFAULT_MOTOR_A_DIR_PIN = 27
+DEFAULT_MOTOR_A_STEP_PIN = 22
+DEFAULT_MOTOR_B_DIR_PIN = 6
+DEFAULT_MOTOR_B_STEP_PIN = 5
+DEFAULT_MOTOR_ENABLE_PIN = 17  # A4988 ENABLE, active LOW
 
-LIMIT_X_PIN = 10
-LIMIT_Y_PIN = 9
+DEFAULT_LIMIT_X_PIN = 10
+DEFAULT_LIMIT_Y_PIN = 9
 
 # ==========================
-# TIMING PARAMETERS
+# DEFAULT TIMING — overridden by pins.yaml
 # ==========================
-DIR_SETUP_US = 5        # Microseconds to wait after setting DIR
-STEP_PULSE_US = 10      # Step pulse width in microseconds
+DEFAULT_DIR_SETUP_US = 5
+DEFAULT_STEP_PULSE_US = 10
 
-# Speed parameters (steps per second)
-MAX_SPEED = 1200        # Maximum step rate
-MIN_SPEED = 250         # Starting speed for acceleration
-ACCEL_STEPS = 100       # Steps for acceleration/deceleration ramp
+# Default speed parameters (steps per second)
+DEFAULT_MAX_SPEED = 800
+DEFAULT_MIN_SPEED = 150
+DEFAULT_ACCEL_STEPS = 60
 
 # Wave chain limits — pigpio allows ~250 waves simultaneously.
-# We keep headroom for safety.
 MAX_UNIQUE_WAVES = 180
+
+
+def load_pins_config() -> Dict:
+    """Load stepper config from pins.yaml, falling back to defaults."""
+    # Search common locations for pins.yaml
+    search_paths = [
+        os.path.join(os.path.dirname(__file__), '..', 'config', 'pins.yaml'),
+        os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'pins.yaml'),
+    ]
+    # Also search via ROS workspace install paths
+    for base in ['/opt/ros', os.path.expanduser('~/dev/smart_chess_board')]:
+        search_paths.append(
+            os.path.join(base, 'src', 'chess_hw_interface', 'config', 'pins.yaml'))
+
+    for path in search_paths:
+        abs_path = os.path.abspath(path)
+        if os.path.isfile(abs_path):
+            try:
+                with open(abs_path) as f:
+                    data = yaml.safe_load(f)
+                params = data.get('stepper_driver', {}).get('ros__parameters', {})
+                if params:
+                    return params
+            except Exception:
+                pass
+
+    return {}  # Use defaults
 
 
 class PigpioStepper:
@@ -55,12 +83,13 @@ class PigpioStepper:
     executes in hardware — Python is not in the loop during motion.
     """
 
-    def __init__(self, pi: Optional[pigpio.pi] = None):
+    def __init__(self, pi: Optional[pigpio.pi] = None, config: Optional[Dict] = None):
         """
         Initialize stepper controller.
 
         Args:
             pi: Existing pigpio.pi instance, or None to create new connection.
+            config: Optional config dict (from pins.yaml). Loaded automatically if None.
         """
         self._owns_pi = pi is None
         self.pi = pi if pi else pigpio.pi()
@@ -71,6 +100,27 @@ class PigpioStepper:
                 "Start it with: sudo pigpiod"
             )
 
+        # Load config from pins.yaml (or use defaults)
+        cfg = config if config is not None else load_pins_config()
+
+        # Pin assignments
+        self.motor_a_dir_pin = cfg.get('motorA_dir_pin', DEFAULT_MOTOR_A_DIR_PIN)
+        self.motor_a_step_pin = cfg.get('motorA_step_pin', DEFAULT_MOTOR_A_STEP_PIN)
+        self.motor_b_dir_pin = cfg.get('motorB_dir_pin', DEFAULT_MOTOR_B_DIR_PIN)
+        self.motor_b_step_pin = cfg.get('motorB_step_pin', DEFAULT_MOTOR_B_STEP_PIN)
+        self.motor_enable_pin = cfg.get('motor_enable_pin', DEFAULT_MOTOR_ENABLE_PIN)
+        self.limit_x_pin = cfg.get('limit_x_pin', DEFAULT_LIMIT_X_PIN)
+        self.limit_y_pin = cfg.get('limit_y_pin', DEFAULT_LIMIT_Y_PIN)
+
+        # Timing
+        self.dir_setup_us = cfg.get('dir_setup_us', DEFAULT_DIR_SETUP_US)
+        self.step_pulse_us = cfg.get('step_pulse_us', DEFAULT_STEP_PULSE_US)
+
+        # Speed
+        self.max_speed = cfg.get('max_speed', DEFAULT_MAX_SPEED)
+        self.min_speed = cfg.get('min_speed', DEFAULT_MIN_SPEED)
+        self.accel_steps = cfg.get('accel_ramp_steps', DEFAULT_ACCEL_STEPS)
+
         self._motors_enabled = False
         self._pos_x = 0
         self._pos_y = 0
@@ -80,8 +130,9 @@ class PigpioStepper:
 
     def _setup_pins(self):
         """Configure GPIO pins for motor control."""
-        for pin in [MOTOR_A_DIR_PIN, MOTOR_A_STEP_PIN,
-                    MOTOR_B_DIR_PIN, MOTOR_B_STEP_PIN, MOTOR_ENABLE_PIN]:
+        for pin in [self.motor_a_dir_pin, self.motor_a_step_pin,
+                    self.motor_b_dir_pin, self.motor_b_step_pin,
+                    self.motor_enable_pin]:
             self.pi.set_mode(pin, pigpio.OUTPUT)
             self.pi.write(pin, 0)
 
@@ -90,28 +141,28 @@ class PigpioStepper:
 
         # Limit switches: active HIGH with pull-down
         # (when pressed, 5V flows to GPIO → reads HIGH)
-        for pin in [LIMIT_X_PIN, LIMIT_Y_PIN]:
+        for pin in [self.limit_x_pin, self.limit_y_pin]:
             self.pi.set_mode(pin, pigpio.INPUT)
             self.pi.set_pull_up_down(pin, pigpio.PUD_DOWN)
 
     def motor_enable(self):
         """Enable A4988 drivers (active LOW)."""
-        self.pi.write(MOTOR_ENABLE_PIN, 0)
+        self.pi.write(self.motor_enable_pin, 0)
         self._motors_enabled = True
         time.sleep(0.001)
 
     def motor_disable(self):
         """Disable A4988 drivers."""
-        self.pi.write(MOTOR_ENABLE_PIN, 1)
+        self.pi.write(self.motor_enable_pin, 1)
         self._motors_enabled = False
 
     def read_x_limit(self) -> bool:
         """Read X limit switch (active HIGH — pressed = 5V = True)."""
-        return self.pi.read(LIMIT_X_PIN) == 1
+        return self.pi.read(self.limit_x_pin) == 1
 
     def read_y_limit(self) -> bool:
         """Read Y limit switch (active HIGH — pressed = 5V = True)."""
-        return self.pi.read(LIMIT_Y_PIN) == 1
+        return self.pi.read(self.limit_y_pin) == 1
 
     def set_speed(self, speed_percent: int):
         """Set motor speed (0-100%)."""
@@ -120,7 +171,7 @@ class PigpioStepper:
     def _speed_to_steps_per_sec(self, speed_percent: int) -> int:
         """Convert speed percentage to steps per second."""
         speed = max(0, min(100, speed_percent))
-        return int(MIN_SPEED + (speed / 100.0) * (MAX_SPEED - MIN_SPEED))
+        return int(self.min_speed + (speed / 100.0) * (self.max_speed - self.min_speed))
 
     def _calculate_speed_profile(self, total_steps: int, speed_percent: int) -> List[Tuple[int, int]]:
         """
@@ -135,11 +186,11 @@ class PigpioStepper:
         target_speed = self._speed_to_steps_per_sec(speed_percent)
 
         # Short moves: constant slow speed
-        if total_steps <= ACCEL_STEPS * 2:
-            delay_us = int(1_000_000 / MIN_SPEED)
+        if total_steps <= self.accel_steps * 2:
+            delay_us = int(1_000_000 / self.min_speed)
             return [(total_steps, delay_us)]
 
-        accel_steps = min(ACCEL_STEPS, total_steps // 3)
+        accel_steps = min(self.accel_steps, total_steps // 3)
         decel_steps = accel_steps
         cruise_steps = total_steps - accel_steps - decel_steps
 
@@ -148,7 +199,7 @@ class PigpioStepper:
         # Acceleration
         for i in range(accel_steps):
             t = (i + 1) / accel_steps
-            speed = MIN_SPEED + t * (target_speed - MIN_SPEED)
+            speed = self.min_speed + t * (target_speed - self.min_speed)
             delay_us = int(1_000_000 / speed)
             profile.append((1, delay_us))
 
@@ -160,7 +211,7 @@ class PigpioStepper:
         # Deceleration
         for i in range(decel_steps):
             t = (i + 1) / decel_steps
-            speed = target_speed - t * (target_speed - MIN_SPEED)
+            speed = target_speed - t * (target_speed - self.min_speed)
             delay_us = int(1_000_000 / speed)
             profile.append((1, delay_us))
 
@@ -249,20 +300,20 @@ class PigpioStepper:
                     continue
 
                 do_a, do_b, delay_us = pattern
-                wait_us = max(1, delay_us - STEP_PULSE_US)
+                wait_us = max(1, delay_us - self.step_pulse_us)
 
                 set_mask = 0
                 clear_mask = 0
 
                 if do_a:
-                    set_mask |= (1 << MOTOR_A_STEP_PIN)
-                    clear_mask |= (1 << MOTOR_A_STEP_PIN)
+                    set_mask |= (1 << self.motor_a_step_pin)
+                    clear_mask |= (1 << self.motor_a_step_pin)
                 if do_b:
-                    set_mask |= (1 << MOTOR_B_STEP_PIN)
-                    clear_mask |= (1 << MOTOR_B_STEP_PIN)
+                    set_mask |= (1 << self.motor_b_step_pin)
+                    clear_mask |= (1 << self.motor_b_step_pin)
 
                 pulses = [
-                    pigpio.pulse(set_mask, 0, STEP_PULSE_US),
+                    pigpio.pulse(set_mask, 0, self.step_pulse_us),
                     pigpio.pulse(0, clear_mask, wait_us),
                 ]
                 self.pi.wave_add_generic(pulses)
@@ -325,9 +376,9 @@ class PigpioStepper:
             return
 
         # INVERTED DIR pins — positive steps → DIR LOW for this hardware
-        self.pi.write(MOTOR_A_DIR_PIN, 0 if steps_a >= 0 else 1)
-        self.pi.write(MOTOR_B_DIR_PIN, 0 if steps_b >= 0 else 1)
-        time.sleep(DIR_SETUP_US / 1_000_000)
+        self.pi.write(self.motor_a_dir_pin, 0 if steps_a >= 0 else 1)
+        self.pi.write(self.motor_b_dir_pin, 0 if steps_b >= 0 else 1)
+        time.sleep(self.dir_setup_us / 1_000_000)
 
         abs_a = abs(steps_a)
         abs_b = abs(steps_b)
@@ -458,8 +509,8 @@ class PigpioStepper:
             self.pi.wave_tx_stop()
         except Exception:
             pass
-        self.pi.write(MOTOR_A_STEP_PIN, 0)
-        self.pi.write(MOTOR_B_STEP_PIN, 0)
+        self.pi.write(self.motor_a_step_pin, 0)
+        self.pi.write(self.motor_b_step_pin, 0)
         self.motor_disable()
 
     def cleanup(self):

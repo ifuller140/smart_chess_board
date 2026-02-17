@@ -73,7 +73,7 @@ stepper_driver:
 
 | Function | BCM | Physical | Direction | Notes |
 |----------|-----|----------|-----------|-------|
-| DIR | 27 | 13 | OUTPUT | HIGH = Forward, LOW = Reverse |
+| DIR | 27 | 13 | OUTPUT | LOW = Forward, HIGH = Reverse (inverted for CoreXY) |
 | STEP | 22 | 15 | OUTPUT | Rising edge = 1 step |
 
 ### Stepper Motor B (A4988 Driver + NEMA 11)
@@ -86,7 +86,7 @@ stepper_driver:
 
 | Function | BCM | Physical | Direction | Notes |
 |----------|-----|----------|-----------|-------|
-| DIR | 6 | 31 | OUTPUT | HIGH = Forward, LOW = Reverse |
+| DIR | 6 | 31 | OUTPUT | LOW = Forward, HIGH = Reverse (inverted for CoreXY) |
 | STEP | 5 | 29 | OUTPUT | Rising edge = 1 step |
 
 ### Servo Motor
@@ -130,9 +130,9 @@ limit_switch_node:
 
 | Switch | BCM | Pull | Active State |
 |--------|-----|------|--------------|
-| X-MIN | 10 | PULL_UP | LOW when pressed |
-| Y-MIN | 9 | PULL_UP | LOW when pressed |
-| Clock | 15 | PULL_UP | LOW when pressed |
+| X-MIN | 10 | PUD_DOWN | HIGH when pressed (5V through switch) |
+| Y-MIN | 9 | PUD_DOWN | HIGH when pressed (5V through switch) |
+| Clock | 15 | PUD_DOWN | HIGH when pressed (5V through switch) |
 
 ### Clock Display (7-Segment)
 ```yaml

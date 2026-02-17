@@ -111,10 +111,10 @@ The A4988 only requires 2 GPIO pins per motor (STEP and DIR):
 | DIR | GPIO (27 or 6) | Direction |
 | 1A, 1B | Motor coil 1 | NEMA 11 wires |
 | 2A, 2B | Motor coil 2 | NEMA 11 wires |
-| ENABLE | Not connected (or GND) | Low = enabled |
+| ENABLE | GPIO 17 (active LOW) | Software-controlled enable/disable |
 | MS1/MS2/MS3 | See microstepping | Optional |
-| SLEEP | Connect to RESET | Keep awake |
-| RESET | Connect to SLEEP | Keep awake |
+| SLEEP | Sleep (active low) | Tied to RESET (bridged) |
+| RESET | Reset (active low) | Tied to SLEEP (bridged) |
 
 ### NEMA 11 Motor Wire Colors (typical)
 
@@ -185,22 +185,22 @@ If using a logic-level MOSFET (e.g., IRLZ44N):
 
 ## Limit Switch Wiring
 
-Using internal pull-up resistors (no external resistors needed):
+Limit switches are wired as **active HIGH** — when pressed, 5V flows through the switch to the GPIO pin.
 
 ```
     RASPBERRY PI              LIMIT SWITCH
     ┌──────────┐              ┌──────┐
-    │          │              │ COM ─┼──── GND
+    │          │              │ COM ─┼──── 5V
     │  GPIO 10 ─┼──────────────┼─ NO  │
     │          │              │ NC   │ (not used)
     │   GND ───┼──────────────┼──────┘
     │          │              
     └──────────┘              
 
-    Configuration: GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    Configuration: pull-down resistor (internal PUD_DOWN)
     
-    Switch open:  GPIO reads HIGH (1)
-    Switch closed: GPIO reads LOW (0)
+    Switch open:   GPIO reads LOW  (0) — pulled down
+    Switch closed: GPIO reads HIGH (1) — 5V through switch
 ```
 
 Repeat for all three limit switches (X-MIN, Y-MIN, CLOCK).

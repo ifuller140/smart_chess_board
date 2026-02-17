@@ -38,7 +38,9 @@ from .tests.test_gantry import (
 )
 from .tests.test_magnet import MagnetTest
 from .tests.test_manual_gantry import ManualGantryTest
+from .tests.test_raw_motor import RawMotorTest
 from .tests.test_servo import ServoTest
+from .tests.test_timing_sweep import TimingSweepTest
 
 
 class MockGPIOInterface:
@@ -170,6 +172,8 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
         'lockstep': GantryLockstepTest,
         'diagonal_sync': GantryDiagonalSyncTest,
         'square_return': GantrySquareReturnTest,
+        'raw_motor': RawMotorTest,
+        'timing_sweep': TimingSweepTest,
     },
     'servo': {
         'full': ServoTest,

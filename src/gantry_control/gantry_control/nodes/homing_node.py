@@ -61,16 +61,7 @@ class HomingNode(Node):
     SERVO_ENGAGE_DUTY = 2.5    # Lowered position (engaged)
     SERVO_FREQ = 50            # 50Hz for servo
 
-    # Timing
-    DIR_SETUP_US = 5
-    STEP_PULSE_US = 10
-
-    # Speed parameters (steps per second)
-    MAX_SPEED = 1200
-    MIN_SPEED = 250
-    ACCEL_STEPS = 50
-
-    # Homing speed percentages
+    # Homing speed percentages (not configurable, homing-specific)
     SPEED_FAST = 70            # Fast approach
     SPEED_SLOW = 30            # Back off
     SPEED_PRECISION = 15       # Final approach
@@ -94,6 +85,13 @@ class HomingNode(Node):
         self.declare_parameter('servo_pin', self.SERVO_PIN)
         self.declare_parameter('backoff_steps', self.BACKOFF_STEPS)
 
+        # Timing/speed parameters (shared with stepper_driver via pins.yaml)
+        self.declare_parameter('dir_setup_us', 5)
+        self.declare_parameter('step_pulse_us', 10)
+        self.declare_parameter('max_speed', 800)
+        self.declare_parameter('min_speed', 150)
+        self.declare_parameter('accel_ramp_steps', 60)
+
         # Get parameters
         self.motorA_dir = self.get_parameter('motorA_dir_pin').get_parameter_value().integer_value
         self.motorA_step = self.get_parameter('motorA_step_pin').get_parameter_value().integer_value
@@ -104,6 +102,13 @@ class HomingNode(Node):
         self.y_limit_pin = self.get_parameter('y_limit_pin').get_parameter_value().integer_value
         self.servo_pin = self.get_parameter('servo_pin').get_parameter_value().integer_value
         self.backoff_steps = self.get_parameter('backoff_steps').get_parameter_value().integer_value
+
+        # Timing/speed
+        self.dir_setup_us = self.get_parameter('dir_setup_us').get_parameter_value().integer_value
+        self.step_pulse_us = self.get_parameter('step_pulse_us').get_parameter_value().integer_value
+        self.max_speed = self.get_parameter('max_speed').get_parameter_value().integer_value
+        self.min_speed = self.get_parameter('min_speed').get_parameter_value().integer_value
+        self.accel_ramp_steps = self.get_parameter('accel_ramp_steps').get_parameter_value().integer_value
 
         # State
         self.is_homed = False
@@ -217,11 +222,11 @@ class HomingNode(Node):
         if total_steps <= 0:
             return []
 
-        target_speed = int(self.MIN_SPEED + (speed_percent / 100.0) * (self.MAX_SPEED - self.MIN_SPEED))
+        target_speed = int(self.min_speed + (speed_percent / 100.0) * (self.max_speed - self.min_speed))
 
-        accel = min(self.ACCEL_STEPS, total_steps // 3)
+        accel = min(self.accel_ramp_steps, total_steps // 3)
         if total_steps <= accel * 2:
-            delay_us = int(1_000_000 / self.MIN_SPEED)
+            delay_us = int(1_000_000 / self.min_speed)
             return [(total_steps, delay_us)]
 
         decel = accel
@@ -230,13 +235,13 @@ class HomingNode(Node):
         profile = []
         for i in range(accel):
             t = (i + 1) / accel
-            speed = self.MIN_SPEED + t * (target_speed - self.MIN_SPEED)
+            speed = self.min_speed + t * (target_speed - self.min_speed)
             profile.append((1, int(1_000_000 / speed)))
         if cruise_steps > 0:
             profile.append((cruise_steps, int(1_000_000 / target_speed)))
         for i in range(decel):
             t = (i + 1) / decel
-            speed = target_speed - t * (target_speed - self.MIN_SPEED)
+            speed = target_speed - t * (target_speed - self.min_speed)
             profile.append((1, int(1_000_000 / speed)))
 
         return profile
@@ -253,7 +258,7 @@ class HomingNode(Node):
         # INVERTED DIR pins — positive steps → DIR LOW for this hardware
         self.pi.write(self.motorA_dir, 0 if steps_a >= 0 else 1)
         self.pi.write(self.motorB_dir, 0 if steps_b >= 0 else 1)
-        time.sleep(self.DIR_SETUP_US / 1_000_000)
+        time.sleep(self.dir_setup_us / 1_000_000)
 
         abs_a = abs(steps_a)
         abs_b = abs(steps_b)
@@ -314,7 +319,7 @@ class HomingNode(Node):
                 if pattern in p2w:
                     continue
                 do_a, do_b, delay_us = pattern
-                wait_us = max(1, delay_us - self.STEP_PULSE_US)
+                wait_us = max(1, delay_us - self.step_pulse_us)
 
                 set_m = 0
                 clr_m = 0
@@ -326,7 +331,7 @@ class HomingNode(Node):
                     clr_m |= (1 << self.motorB_step)
 
                 self.pi.wave_add_generic([
-                    pigpio.pulse(set_m, 0, self.STEP_PULSE_US),
+                    pigpio.pulse(set_m, 0, self.step_pulse_us),
                     pigpio.pulse(0, clr_m, wait_us),
                 ])
                 wid = self.pi.wave_create()
