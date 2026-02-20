@@ -184,3 +184,8 @@ cython_debug/
 *.slddrw.swar
 *.sldprt.swar
 *.sldasm.swar
+
+# Build and log files
+install/
+build/
+log/
