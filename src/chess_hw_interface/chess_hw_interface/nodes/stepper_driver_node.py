@@ -144,6 +144,21 @@ class StepperDriverNode(Node):
         self._idle_since = time.time()
         self._tick_running = False      # re-entrancy guard for velocity tick
 
+        # ---- Position tracking (step counting) ----
+        # Steps are accumulated each velocity tick and converted to mm.
+        # Reset to zero on homing; updated continuously during motion.
+        self._pos_steps_a = 0          # signed motor A step accumulator
+        self._pos_steps_b = 0          # signed motor B step accumulator
+        # CoreXY: pos_x_steps = (A - B) / 2,  pos_y_steps = (A + B) / 2
+        # steps_per_mm calibration — overridden by pins.yaml if present
+        self.declare_parameter('steps_per_mm', 5.0)
+        self._steps_per_mm = float(self.get_parameter('steps_per_mm').value)
+        self._last_pose_publish = 0.0  # throttle pose publishes to ~10Hz
+
+        # Wave ID tracking — used by velocity tick to delete old waves
+        # without calling wave_clear() (which would abort in-progress DMA)
+        self._prev_tick_wave_ids: list = []
+
         # ---- ROS interfaces ----
 
         # Point-to-point mode
@@ -161,11 +176,18 @@ class StepperDriverNode(Node):
         # Status publisher
         self.status_pub = self.create_publisher(String, '/stepper/status', 10)
 
+        # Pose publisher — step-counted X/Y position in mm
+        self.pose_pub = self.create_publisher(Point, '/gantry/pose', 10)
+
         # Speed/accel parameter update subscribers
         self.speed_sub = self.create_subscription(
             Float32, '/stepper/set_max_velocity', self._set_max_velocity_cb, 10)
         self.accel_sub = self.create_subscription(
             Float32, '/stepper/set_acceleration', self._set_acceleration_cb, 10)
+
+        # Reset-position service subscriber
+        self.reset_pos_sub = self.create_subscription(
+            Bool, '/stepper/reset_position', self._reset_position_cb, 10)
 
         # Velocity control timer
         self._vel_timer = self.create_timer(
@@ -186,6 +208,29 @@ class StepperDriverNode(Node):
     def _set_acceleration_cb(self, msg: Float32):
         self.acceleration = max(100.0, min(10000.0, msg.data))
         self.get_logger().info(f"Acceleration set to {self.acceleration}")
+
+    def _reset_position_cb(self, msg: Bool):
+        """Reset step counters to zero (call after homing)."""
+        if msg.data:
+            self._pos_steps_a = 0
+            self._pos_steps_b = 0
+            self.get_logger().info("Position reset to (0, 0)")
+            self._publish_pose()
+
+    def _publish_pose(self):
+        """Publish current X/Y position in mm from step counters."""
+        # CoreXY forward kinematics:
+        #   pos_x = (steps_a - steps_b) / 2 / steps_per_mm
+        #   pos_y = (steps_a + steps_b) / 2 / steps_per_mm
+        if self._steps_per_mm <= 0:
+            return
+        pos_x_mm = (self._pos_steps_a - self._pos_steps_b) / 2.0 / self._steps_per_mm
+        pos_y_mm = (self._pos_steps_a + self._pos_steps_b) / 2.0 / self._steps_per_mm
+        msg = Point()
+        msg.x = pos_x_mm
+        msg.y = pos_y_mm
+        msg.z = 0.0
+        self.pose_pub.publish(msg)
 
     # ------------------------------------------------------------------
     # Motor control helpers
@@ -331,6 +376,16 @@ class StepperDriverNode(Node):
         abs_a = abs(steps_a)
         abs_b = abs(steps_b)
 
+        # Accumulate signed steps for position tracking
+        self._pos_steps_a += steps_a
+        self._pos_steps_b += steps_b
+
+        # Publish pose at ~10Hz (every ~5 ticks at 50ms)
+        now = time.time()
+        if now - self._last_pose_publish >= 0.1:
+            self._publish_pose()
+            self._last_pose_publish = now
+
         # For velocity ticks, steps are small enough to use a simple wave
         # (no acceleration needed within a single tick)
         self._send_tick_wave(abs_a, abs_b, speed)
@@ -367,22 +422,15 @@ class StepperDriverNode(Node):
 
         wait_us = max(1, delay_us - self.step_pulse_us)
 
-        # Build a single wave for all steps in this tick
-        # (they all share the same delay, so one wave + loop)
-        # Determine unique step patterns
+        # Build a single wave for all steps in this tick.
+        # IMPORTANT: We do NOT call wave_clear() here because that would
+        # abort any in-progress DMA wave from the previous tick.
+        # Instead we track the previous tick's wave IDs and delete them
+        # individually AFTER the new wave is queued.
         patterns = set(step_plan)
-        wave_ids = []
+        new_wave_ids = []
 
         try:
-            # Wait for any in-progress wave to finish before clearing
-            timeout = time.time() + 0.05  # 50ms safety timeout
-            while self.pi.wave_tx_busy():
-                if time.time() > timeout:
-                    self.pi.wave_tx_stop()
-                    break
-                time.sleep(0.0002)
-            self.pi.wave_clear()
-
             pattern_to_wid = {}
             for do_a, do_b in patterns:
                 set_mask = 0
@@ -402,7 +450,7 @@ class StepperDriverNode(Node):
                 if wid < 0:
                     return  # Silently fail on resource exhaustion
                 pattern_to_wid[(do_a, do_b)] = wid
-                wave_ids.append(wid)
+                new_wave_ids.append(wid)
 
             # Group consecutive identical patterns
             groups = []
@@ -427,12 +475,25 @@ class StepperDriverNode(Node):
 
             self.pi.wave_chain(chain)
 
-            # Wait for this tick's wave (should be very short)
-            while self.pi.wave_tx_busy():
-                time.sleep(0.0005)
+            # Delete the PREVIOUS tick's waves now that the new chain
+            # is queued in DMA. We do NOT wait for the previous wave to
+            # finish — the new chain seamlessly follows it in DMA.
+            # The previous waves are now safe to delete (they're already
+            # being executed from DMA memory, not from the wave pool).
+            for old_wid in self._prev_tick_wave_ids:
+                try:
+                    self.pi.wave_delete(old_wid)
+                except Exception:
+                    pass
+            self._prev_tick_wave_ids = new_wave_ids
 
-        finally:
-            for wid in wave_ids:
+            # Do NOT wait here — we return immediately so the tick
+            # handler isn't blocked for the full wave duration.
+            # The next tick's wave_add_generic will queue behind this one.
+
+        except Exception:
+            # On any error, clean up the waves we just created
+            for wid in new_wave_ids:
                 try:
                     self.pi.wave_delete(wid)
                 except Exception:

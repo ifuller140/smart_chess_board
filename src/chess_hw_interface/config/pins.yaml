@@ -22,7 +22,10 @@ stepper_driver:
     # Velocity Control (joystick mode)
     max_velocity: 600             # Max velocity for joystick control (steps/sec)
     acceleration: 1500            # Velocity ramp rate (steps/sec²)
-    velocity_tick_ms: 20          # Velocity loop period in ms (50Hz)
+    velocity_tick_ms: 50          # Velocity loop period in ms (20Hz) — gives waves room to complete
+
+    # Position tracking
+    steps_per_mm: 5.0             # Steps per mm of gantry travel (full-step, 20T pulley)
 
     hold_torque_when_idle: true   # Keep drivers enabled between moves
 
