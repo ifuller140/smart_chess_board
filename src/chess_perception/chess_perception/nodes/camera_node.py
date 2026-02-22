@@ -97,12 +97,36 @@ class CameraNode(Node):
     # ─────────────────────────────────────────────────────────────────────
 
     def _init_camera(self):
-        """Open cv2.VideoCapture with V4L2 backend."""
-        # Clean up any existing capture objects
+        """Initialize camera. Try Picamera2 first if requested, else fallback to OpenCV."""
+        if self._picam is not None:
+            self._picam.stop()
+            self._picam = None
         if self._cap is not None:
             self._cap.release()
             self._cap = None
 
+        if self._use_picam:
+            try:
+                # Local import because we only install picamera2 on the Pi
+                from picamera2 import Picamera2
+
+                picam = Picamera2()
+                # Create a simple video configuration rather than still (often more stable)
+                config = picam.create_video_configuration(main={"size": (self._width, self._height)})
+                picam.configure(config)
+                picam.start()
+                
+                # Allow auto-exposure to settle for 1 second
+                time.sleep(1.0)
+                
+                self._picam = picam
+                self.get_logger().info(f'Camera picamera2 backend ready: {self._width}x{self._height}')
+                return
+            except Exception as e:
+                self.get_logger().error(f'Failed to initialize picamera2: {e}')
+                self.get_logger().warn('Falling back to OpenCV native device...')
+
+        # Fallback to OpenCV
         device_id = 0 if self._camera_id < 0 else self._camera_id
         self.get_logger().info(f'Opening /dev/video{device_id} via OpenCV V4L2...')
 
@@ -111,14 +135,11 @@ class CameraNode(Node):
             self.get_logger().error(f'Failed to open /dev/video{device_id}. Is the camera connected?')
             return
 
-        # Request standard resolutions (will be handled by V4L2 driver)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
         cap.set(cv2.CAP_PROP_FPS, self._fps)
 
-        # Allow auto-exposure to settle
         time.sleep(1.0)
-        
         self._cap = cap
         self.get_logger().info(f'Camera OpenCV backend ready: {self._width}x{self._height} @ {self._fps}fps')
 
@@ -153,11 +174,19 @@ class CameraNode(Node):
 
     def _read_frame(self) -> Optional[np.ndarray]:
         """Read one frame from the active camera backend. Returns BGR ndarray or None."""
-        if self._cap is not None:
+        if self._picam is not None:
+            try:
+                frame = self._picam.capture_array('main')
+                return frame
+            except Exception as e:
+                self.get_logger().error(f'picamera2 capture error: {e}')
+                return None
+        elif self._cap is not None:
             ret, frame = self._cap.read()
             if ret and frame is not None:
                 return frame
-        self.get_logger().warn('OpenCV capture read failed')
+            else:
+                self.get_logger().warn('OpenCV capture read failed')
         return None
 
     def _undistort(self, frame: np.ndarray) -> np.ndarray:
