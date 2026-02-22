@@ -41,20 +41,6 @@ try:
 except ImportError:
     PICAMERA2_AVAILABLE = False
 
-# Check whether GStreamer with libcamerasrc is usable (Pi Camera on Ubuntu 24.04)
-def _check_gstreamer_libcam() -> bool:
-    try:
-        test = cv2.VideoCapture(
-            'libcamerasrc ! video/x-raw,width=32,height=32,framerate=1/1 ! '
-            'videoconvert ! appsink', cv2.CAP_GSTREAMER)
-        ok = test.isOpened()
-        test.release()
-        return ok
-    except Exception:
-        return False
-
-GSTREAMER_LIBCAM_AVAILABLE = _check_gstreamer_libcam()
-
 
 class CameraNode(Node):
 
@@ -131,9 +117,8 @@ class CameraNode(Node):
                 self._picam = None
 
         # GStreamer libcamerasrc — correct backend for Pi CSI camera on Ubuntu 24.04
-        # when picamera2 is not installed.  libcamera-ipa must be installed:
-        #   sudo apt install libcamera-ipa
-        if GSTREAMER_LIBCAM_AVAILABLE and (self._use_picam or self._camera_id < 0):
+        # when picamera2 is not installed.  libcamera-ipa must be installed.
+        if self._use_picam or self._camera_id < 0:
             gst = (
                 f'libcamerasrc ! '
                 f'video/x-raw,width={self._width},height={self._height},'
@@ -142,12 +127,16 @@ class CameraNode(Node):
             )
             cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
             if cap.isOpened():
-                time.sleep(1.5)  # allow AWB to settle
-                self._cap = cap
-                self.get_logger().info(
-                    f'GStreamer libcamerasrc backend started '
-                    f'{self._width}x{self._height} @ {self._fps}fps')
-                return
+                # Test read to ensure pipeline is actually flowing
+                ret, _ = cap.read()
+                if ret:
+                    time.sleep(1.0)  # allow AWB to settle
+                    self._cap = cap
+                    self.get_logger().info(
+                        f'GStreamer libcamerasrc backend started '
+                        f'{self._width}x{self._height} @ {self._fps}fps')
+                    return
+                cap.release()
             self.get_logger().warn('libcamerasrc GStreamer pipeline failed, trying V4L2...')
 
         # OpenCV fallback — scan for a working video device.
