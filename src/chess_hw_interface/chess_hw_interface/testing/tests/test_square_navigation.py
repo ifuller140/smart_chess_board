@@ -160,8 +160,11 @@ class SquareNavNode(Node):
             return False
 
         goal = MoveGantry.Goal()
-        goal.target_x = float(x_mm)
-        goal.target_y = float(y_mm)
+        goal.target_x_mm = float(x_mm)
+        goal.target_y_mm = float(y_mm)
+        goal.speed_mm_s = 50.0
+        goal.engage_magnet = False
+
 
         goal_future = self._move_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, goal_future, timeout_sec=10.0)
