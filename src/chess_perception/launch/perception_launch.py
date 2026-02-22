@@ -71,5 +71,15 @@ def generate_launch_description():
             output='screen',
         ),
 
-        LogInfo(msg='Perception stack ready. Run vision tests with: --test vision_corners / vision_board / vision_pieces / vision_squares / vision_fen'),
+        Node(
+            package='web_video_server',
+            executable='web_video_server',
+            name='web_video_server',
+            arguments=['--ros-args', '-p', 'port:=8080'],
+            output='screen',
+        ),
+
+        LogInfo(msg='Perception stack ready. Web dashboard: http://smart-chess-pi:8080'),
+        LogInfo(msg='Run vision tests with: --test vision_corners / vision_board / vision_pieces / vision_squares / vision_fen'),
     ])
+
