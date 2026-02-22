@@ -120,6 +120,8 @@ class GameManagerNode(Node):
         self._state_pub = self.create_publisher(String, '/game_manager/state', 10)
         self._turn_pub  = self.create_publisher(String, '/game_manager/turn',  10)
         self._motion_pub = self.create_publisher(String, '/motion/command', 10)
+        # Authoritative FEN for piece_detector_node (game-state-assisted piece typing)
+        self._fen_pub   = self.create_publisher(String, '/game_manager/board_fen', 10)
 
         # ── Subscriptions ─────────────────────────────────────────────────
         self.create_subscription(

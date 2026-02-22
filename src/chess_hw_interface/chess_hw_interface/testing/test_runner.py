@@ -42,6 +42,8 @@ from .tests.test_raw_motor import RawMotorTest
 from .tests.test_servo import ServoTest
 from .tests.test_square_navigation import GantrySquareNavigationTest
 from .tests.test_timing_sweep import TimingSweepTest
+from .tests.test_vision import VisionPipelineTest
+from .tests.test_clock_integration import ClockIntegrationTest
 
 
 class MockGPIOInterface:
@@ -188,6 +190,10 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
     },
     'clock': {
         'full': ClockTest,
+        'integration': ClockIntegrationTest,
+    },
+    'vision': {
+        'full': VisionPipelineTest,
     },
 }
 
@@ -200,6 +206,8 @@ LEGACY_TEST_ALIASES = {
     'camera': ('camera', 'full'),
     'magnet': ('magnet', 'full'),
     'clock': ('clock', 'full'),
+    'clock_integration': ('clock', 'integration'),
+    'vision': ('vision', 'full'),
 }
 
 
