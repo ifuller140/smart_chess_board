@@ -1,0 +1,1 @@
+/home/ian/dev/smart_chess_board/build/chess_interfaces/ament_cmake_export_dependencies/ament_cmake_export_dependencies-extras.cmake
