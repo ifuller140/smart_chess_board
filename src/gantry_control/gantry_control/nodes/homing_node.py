@@ -172,21 +172,30 @@ class HomingNode(Node):
 
     def _cleanup(self):
         """Clean up GPIO on shutdown."""
+        if getattr(self, 'pi', None) is None:
+            return
+            
         try:
-            self.pi.wave_tx_stop()
-        except Exception:
-            pass
-        self.pi.write(self.motor_enable, 1)
-        self.pi.write(self.motorA_step, 0)
-        self.pi.write(self.motorB_step, 0)
-        # Stop servo PWM
-        self.pi.set_servo_pulsewidth(self.servo_pin, 0)
-        try:
-            self.pi.wave_clear()
-        except Exception:
-            pass
-        if self.pi.connected:
-            self.pi.stop()
+            try:
+                self.pi.wave_tx_stop()
+            except Exception:
+                pass
+            
+            self.pi.write(self.motor_enable, 1)
+            self.pi.write(self.motorA_step, 0)
+            self.pi.write(self.motorB_step, 0)
+            # Stop servo PWM
+            self.pi.set_servo_pulsewidth(self.servo_pin, 0)
+            
+            try:
+                self.pi.wave_clear()
+            except Exception:
+                pass
+                
+            if self.pi.connected:
+                self.pi.stop()
+        except Exception as e:
+            self.get_logger().debug(f'Ignored exception during pi cleanup: {e}')
 
     def _disengage_magnet(self):
         """Raise the magnet (disengage) before homing using pigpio hardware servo."""
@@ -555,7 +564,8 @@ def main(args=None):
     finally:
         node._cleanup()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
