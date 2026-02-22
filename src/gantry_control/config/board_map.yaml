@@ -1,0 +1,74 @@
+# Board Map Configuration
+#
+# Coordinate System (IMPORTANT):
+#   - Origin (0,0): Bottom-RIGHT corner of the gantry (where X and Y limit switches are)
+#   - +X direction: LEFT (toward the left side of the board from the back)
+#   - +Y direction: UP (toward the back/black's side of the board)
+#
+# Physical Reality:
+#   - X limit switch is at the far RIGHT of the X rail
+#   - Y limit switch is at the BOTTOM of the Y rail (closest to player)
+#   - After homing, the gantry is at (0,0) = bottom-right corner
+#
+# Chess Board Mapping:
+#   - Square a1 (white's left corner, nearest to white player) is approximately
+#     200mm to the LEFT (+X) and 20mm UP (+Y) from the homed origin.
+#   - Square h1 is near the origin (far right, row 1) 
+#   - Square a8 is far left AND far up (near black player)
+#
+# NOTE: All values marked "CALIBRATED" were estimated from user measurements
+#       and MUST be verified by physical testing. Run the square_navigation
+#       hardware test to confirm gantry lands on correct squares.
+
+motion_planner_node:
+  ros__parameters:
+
+    # ---- Board origin (center of square a1, in mm from home) ----
+    # a1 is ~200mm left and ~20mm up from the homing position (bottom-right corner)
+    board_origin_x_mm: 200.0     # [CALIBRATED - verify with square_navigation test]
+    board_origin_y_mm: 20.0      # [CALIBRATED - verify with square_navigation test]
+
+    # ---- Square geometry ----
+    # Physical size of each chess square (center-to-center distance in mm)
+    # Formula: steps_per_mm * square_size_mm = steps per square
+    square_size_mm: 25.0         # [CALIBRATED - measure actual board square size]
+
+    # ---- Move speed ----
+    move_speed_mm_s: 50.0        # Speed during game moves (mm/s)
+
+    # ---- Graveyard positions ----
+    # Graveyard is behind Black's pieces (high Y side, past rank 8)
+    # Pieces route horizontally to the nearest board edge first, then move
+    # up past rank 8 into the graveyard zone.
+    #
+    # Layout (viewed from white's perspective):
+    #   Rank 8 (back of board): y ≈ board_origin_y_mm + 7 * square_size_mm = 195mm
+    #   Graveyard starts:       y ≈ 215mm (20mm past rank 8)
+    #   Graveyard columns:      Spread across x positions outside board area
+    #
+    # Graveyard slots (generated at runtime from these origins + slot_spacing)
+    graveyard_origin_x_mm: 210.0    # [CALIBRATED] X of first graveyard column
+    graveyard_origin_y_mm: 215.0    # [CALIBRATED] Y of graveyard row (above rank 8)
+    graveyard_slot_spacing_mm: 22.0 # Spacing between captured piece slots
+    graveyard_cols: 8               # Number of columns in graveyard (supports 16 captured pieces)
+
+    # ---- Board edge routing for graveyard moves ----
+    # When routing a captured piece to the graveyard, the gantry first moves
+    # horizontally to one of these X edge positions (to clear all pieces),
+    # then moves up to the graveyard Y position.
+    board_edge_left_x_mm: 205.0    # [CALIBRATED] Just past the left edge of board
+    board_edge_right_x_mm: 5.0     # [CALIBRATED] Just past the right edge of board
+
+gantry_kinematics_node:
+  ros__parameters:
+    # Physical gantry travel limits
+    x_max_mm: 250.0              # Maximum X travel from origin
+    y_max_mm: 250.0              # Maximum Y travel from origin
+    position_tolerance_mm: 1.5   # Arrival tolerance in mm
+    steps_per_mm: 5.0            # CoreXY: 200 steps/rev ÷ 40mm/rev = 5 steps/mm
+    max_speed_mm_s: 60.0
+    acceleration_mm_s2: 80.0
+
+stepper_driver_node:
+  ros__parameters:
+    steps_per_mm: 5.0

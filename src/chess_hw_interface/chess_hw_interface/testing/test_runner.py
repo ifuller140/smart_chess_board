@@ -40,6 +40,7 @@ from .tests.test_magnet import MagnetTest
 from .tests.test_manual_gantry import ManualGantryTest
 from .tests.test_raw_motor import RawMotorTest
 from .tests.test_servo import ServoTest
+from .tests.test_square_navigation import GantrySquareNavigationTest
 from .tests.test_timing_sweep import TimingSweepTest
 
 
@@ -174,6 +175,7 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
         'square_return': GantrySquareReturnTest,
         'raw_motor': RawMotorTest,
         'timing_sweep': TimingSweepTest,
+        'square_nav': GantrySquareNavigationTest,
     },
     'servo': {
         'full': ServoTest,
@@ -193,6 +195,7 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
 LEGACY_TEST_ALIASES = {
     'gantry': ('gantry', 'full'),
     'manual_gantry': ('gantry', 'manual'),
+    'square_nav': ('gantry', 'square_nav'),
     'servo': ('servo', 'full'),
     'camera': ('camera', 'full'),
     'magnet': ('magnet', 'full'),
@@ -247,6 +250,8 @@ def list_tests():
     print(' 11) gantry/repeatability   Run loop stress test')
     print(' 12) gantry/enable_hold     Validate holding torque behavior')
     print(' 13) gantry/manual          Fine-tune by keyboard control')
+    print('  14) gantry/square_nav     Navigate to chess squares by name (e.g. e4)')
+
 
     print('\nLegacy aliases (still supported):')
     print('-' * 60)

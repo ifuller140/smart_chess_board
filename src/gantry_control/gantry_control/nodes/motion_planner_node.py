@@ -36,10 +36,12 @@ class MotionPlannerNode(Node):
     def __init__(self):
         super().__init__('motion_planner_node')
 
-        # Board geometry parameters
-        self.declare_parameter('square_size_mm', 35.0)
-        self.declare_parameter('board_origin_x_mm', 20.0)
-        self.declare_parameter('board_origin_y_mm', 20.0)
+        # Board geometry parameters — defaults match board_map.yaml
+        # Coordinate system: origin at bottom-right (homing position)
+        # +X = LEFT (toward a-file), +Y = UP (toward rank 8 / black's side)
+        self.declare_parameter('square_size_mm', 25.0)
+        self.declare_parameter('board_origin_x_mm', 200.0)   # X of center of a1
+        self.declare_parameter('board_origin_y_mm', 20.0)    # Y of center of a1
         self.declare_parameter('move_speed_mm_s', 50.0)
 
         self.sq_size = self.get_parameter('square_size_mm').value
@@ -70,14 +72,26 @@ class MotionPlannerNode(Node):
         """
         Convert a chess square (e.g. "e2") to gantry coordinates in mm.
 
+        Coordinate system:
+          Origin (0,0) = bottom-right corner (homing position)
+          +X = LEFT toward a-file   → a-file has the highest X
+          +Y = UP toward rank 8     → rank 8 has the highest Y
+
+        Formula:
+          col_index: a=0, b=1, ..., h=7
+          x = origin_x (a1 center) - col_index * square_size_mm
+          y = origin_y (a1 center) + (rank - 1) * square_size_mm
+
         Returns (x_mm, y_mm) at the CENTER of the square.
         """
         col = COL_MAP.get(square[0].lower())
         row = int(square[1]) - 1   # 0-indexed, rank 1 = row 0
         if col is None or not (0 <= row <= 7):
             raise ValueError(f'Invalid square: {square!r}')
-        x = self.origin_x + col * self.sq_size + self.sq_size / 2.0
-        y = self.origin_y + row * self.sq_size + self.sq_size / 2.0
+        # +X is LEFT, so a-file (col=0) is at origin_x, h-file (col=7) is further right (lower X)
+        x = self.origin_x - col * self.sq_size
+        # +Y is UP, so rank 1 (row=0) is at origin_y, rank 8 (row=7) is further back (higher Y)
+        y = self.origin_y + row * self.sq_size
         return x, y
 
     # ------------------------------------------------------------------
