@@ -44,6 +44,13 @@ from .tests.test_square_navigation import GantrySquareNavigationTest
 from .tests.test_timing_sweep import TimingSweepTest
 from .tests.test_vision import VisionPipelineTest
 from .tests.test_clock_integration import ClockIntegrationTest
+from .tests.test_vision_detailed import (
+    CameraCornerDetectionTest,
+    BoardDetectionTest,
+    ColorPieceDetectionTest,
+    SquareMappingTest,
+    FENBoardDisplayTest,
+)
 
 
 class MockGPIOInterface:
@@ -193,7 +200,12 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
         'integration': ClockIntegrationTest,
     },
     'vision': {
-        'full': VisionPipelineTest,
+        'full':    VisionPipelineTest,
+        'corners': CameraCornerDetectionTest,
+        'board':   BoardDetectionTest,
+        'pieces':  ColorPieceDetectionTest,
+        'squares': SquareMappingTest,
+        'fen':     FENBoardDisplayTest,
     },
 }
 
@@ -208,6 +220,11 @@ LEGACY_TEST_ALIASES = {
     'clock': ('clock', 'full'),
     'clock_integration': ('clock', 'integration'),
     'vision': ('vision', 'full'),
+    'vision_corners': ('vision', 'corners'),
+    'vision_board':   ('vision', 'board'),
+    'vision_pieces':  ('vision', 'pieces'),
+    'vision_squares': ('vision', 'squares'),
+    'vision_fen':     ('vision', 'fen'),
 }
 
 
