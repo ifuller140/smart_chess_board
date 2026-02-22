@@ -6,7 +6,7 @@ from geometry_msgs.msg import Point
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
-from chess_perception.msg import BoardState
+from chess_interfaces.msg import BoardState
 
 class BoardDetectorNode(Node):
     def __init__(self):

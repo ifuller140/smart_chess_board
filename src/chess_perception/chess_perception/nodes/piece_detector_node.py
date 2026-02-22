@@ -111,8 +111,8 @@ class PieceDetectorNode(Node):
                             self._srv_capture_reference)
 
         self.get_logger().info(
-            'Piece Detector ready (occ_threshold=%d, white_thresh=%.2f)',
-            self._occ_threshold, self._white_threshold
+            f'Piece Detector ready (occ_threshold={self._occ_threshold}, '
+            f'white_thresh={self._white_threshold:.2f})'
         )
 
     # ─────────────────────────────────────────────────────────────────────
