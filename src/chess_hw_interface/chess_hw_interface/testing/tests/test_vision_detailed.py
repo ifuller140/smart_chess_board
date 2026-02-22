@@ -252,12 +252,11 @@ def _draw_grid(img: np.ndarray, color=GRID_COLOR, thickness=1):
 
 
 def _print_remote_viewing_hint(test_name: str):
-    """Print SSH remote viewing instructions."""
+    """Print local viewing instructions."""
     print()
-    print('  ─── Remote Viewing ───────────────────────────────────────')
-    print(f'  rqt topic: /chess_vision/{test_name}/debug')
-    print(f'    Via X11:  ssh -X pi@<IP> && ros2 run rqt_image_view rqt_image_view')
-    print(f'    Via scp:  scp pi@<IP>:/tmp/chess_vision/latest_{test_name}.jpg .')
+    print('  ─── Local Viewing ────────────────────────────────────────')
+    print(f'  Displaying live on connected monitor: [{test_name}]')
+    print(f'  Press Ctrl+C or answer the prompt to advance.')
     print('  ──────────────────────────────────────────────────────────')
     print()
 
@@ -279,10 +278,13 @@ class VisionDetailBase(HardwareTest):
         try:
             if not rclpy.ok():
                 rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
-            self._node   = VisionDetailNode()
-            self._saver  = ImageSaver(self._test_key)
+            self._node = VisionDetailNode()
+            self._saver = ImageSaver(self._test_key)
+            self._executor = rclpy.executors.SingleThreadedExecutor()
+            self._executor.add_node(self._node)
+
             self._thread = threading.Thread(
-                target=lambda: rclpy.spin(self._node), daemon=True)
+                target=self._executor.spin, daemon=True)
             self._thread.start()
             time.sleep(1.5)   # Allow subscriptions to settle
             return True
@@ -291,6 +293,16 @@ class VisionDetailBase(HardwareTest):
             return False
 
     def teardown(self):
+        try:
+            cv2.destroyAllWindows()
+            cv2.waitKey(1)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_executor') and self._executor is not None:
+                self._executor.shutdown()
+        except Exception:
+            pass
         try:
             if self._node:
                 self._node.destroy_node()
@@ -321,7 +333,9 @@ class VisionDetailBase(HardwareTest):
         return self._node.board_received
 
     def _publish_and_save(self, channel: str, image: np.ndarray) -> str:
-        self._node.publish_debug(channel, image)
+        # Display directly on full-screen monitor using OpenCV highgui
+        cv2.imshow(f'Vision Debug: {channel}', image)
+        cv2.waitKey(200)  # Render frame and process UI events
         return self._saver.save(image)
 
 

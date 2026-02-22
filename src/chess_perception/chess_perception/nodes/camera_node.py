@@ -97,82 +97,30 @@ class CameraNode(Node):
     # ─────────────────────────────────────────────────────────────────────
 
     def _init_camera(self):
-        """Initialize the camera backend (picamera2 preferred on Pi)."""
-        if self._use_picam and PICAMERA2_AVAILABLE:
-            try:
-                self._picam = Picamera2()
-                config = self._picam.create_still_configuration(
-                    main={'size': (self._width, self._height),
-                          'format': 'BGR888'},
-                    buffer_count=2,
-                )
-                self._picam.configure(config)
-                self._picam.start()
-                time.sleep(1.0)  # Allow sensor to warm up / adjust exposure
-                self.get_logger().info('picamera2 backend started')
-                return
-            except Exception as e:
-                self.get_logger().warn(
-                    f'picamera2 init failed ({e}), falling back to OpenCV')
-                self._picam = None
+        """Open cv2.VideoCapture with V4L2 backend."""
+        # Clean up any existing capture objects
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
 
-        # GStreamer libcamerasrc — correct backend for Pi CSI camera on Ubuntu 24.04
-        # when picamera2 is not installed.  libcamera-ipa must be installed.
-        if self._use_picam or self._camera_id < 0:
-            gst = (
-                f'libcamerasrc ! '
-                f'video/x-raw,width={self._width},height={self._height},'
-                f'framerate={max(1, int(self._fps))}/1 ! '
-                f'videoconvert ! video/x-raw,format=BGR ! appsink drop=true'
-            )
-            cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
-            if cap.isOpened():
-                # Test read to ensure pipeline is actually flowing
-                ret, _ = cap.read()
-                if ret:
-                    time.sleep(1.0)  # allow AWB to settle
-                    self._cap = cap
-                    self.get_logger().info(
-                        f'GStreamer libcamerasrc backend started '
-                        f'{self._width}x{self._height} @ {self._fps}fps')
-                    return
-                cap.release()
-            self.get_logger().warn('libcamerasrc GStreamer pipeline failed, trying V4L2...')
+        device_id = 0 if self._camera_id < 0 else self._camera_id
+        self.get_logger().info(f'Opening /dev/video{device_id} via OpenCV V4L2...')
 
-        # OpenCV fallback — scan for a working video device.
-        # On Pi, /dev/video0 is often a metadata device; the real capture
-        # device is found by trying each node and checking mean brightness.
-        candidate_ids = (
-            [self._camera_id]
-            if self._camera_id >= 0
-            else list(range(32))
-        )
+        cap = cv2.VideoCapture(device_id, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            self.get_logger().error(f'Failed to open /dev/video{device_id}. Is the camera connected?')
+            return
 
-        for dev_id in candidate_ids:
-            try:
-                cap = cv2.VideoCapture(dev_id)
-                if not cap.isOpened():
-                    cap.release()
-                    continue
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._width)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
-                # Flush stale frames and check the device actually gives pixels
-                for _ in range(3):
-                    cap.read()
-                ret, probe = cap.read()
-                if ret and probe is not None:
-                    self._cap = cap
-                    self.get_logger().info(
-                        f'OpenCV backend: /dev/video{dev_id} '
-                        f'{self._width}x{self._height}')
-                    return
-                cap.release()
-            except Exception:
-                pass
+        # Request standard resolutions (will be handled by V4L2 driver)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+        cap.set(cv2.CAP_PROP_FPS, self._fps)
 
-        self.get_logger().error(
-            'Could not find any working OpenCV camera device. '
-            'Check that the camera is connected and not in use.')
+        # Allow auto-exposure to settle
+        time.sleep(1.0)
+        
+        self._cap = cap
+        self.get_logger().info(f'Camera OpenCV backend ready: {self._width}x{self._height} @ {self._fps}fps')
 
     def _load_calibration(self, cal_file: str):
         """
@@ -205,18 +153,11 @@ class CameraNode(Node):
 
     def _read_frame(self) -> Optional[np.ndarray]:
         """Read one frame from the active camera backend. Returns BGR ndarray or None."""
-        if self._picam is not None:
-            try:
-                return self._picam.capture_array('main')   # Already BGR888
-            except Exception as e:
-                self.get_logger().error(f'picamera2 capture failed: {e}')
-                return None
-
-        if self._cap is not None and self._cap.isOpened():
+        if self._cap is not None:
             ret, frame = self._cap.read()
-            if ret:
+            if ret and frame is not None:
                 return frame
-            self.get_logger().warn('OpenCV capture read failed')
+        self.get_logger().warn('OpenCV capture read failed')
         return None
 
     def _undistort(self, frame: np.ndarray) -> np.ndarray:
