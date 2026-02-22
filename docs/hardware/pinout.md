@@ -89,17 +89,17 @@ stepper_driver:
 | DIR | 6 | 31 | OUTPUT | LOW = Forward, HIGH = Reverse (inverted for CoreXY) |
 | STEP | 5 | 29 | OUTPUT | Rising edge = 1 step |
 
-### Servo Motor
+### Z-Axis Servo (Permanent Magnet)
+The servo raises and lowers a **permanent neodymium magnet** through the underside of the chess board.
+
 ```yaml
 servo_node:
   ros__parameters:
     servo_pin: 12           # Hardware PWM capable
-    engage_pulse_us: 500    # Down position (microseconds)
-    release_pulse_us: 1500  # Up position (microseconds)
-    movement_time: 0.5      # Seconds to wait
+    engage_pulse_us: 500    # Down position — magnet approaches board (microseconds)
+    release_pulse_us: 1500  # Up position — magnet clear of board (microseconds)
+    movement_time: 0.5      # Seconds to wait for servo to reach position
 ```
-
-<!-- USER_ATTENTION: Calibrate engage_pulse_us and release_pulse_us for your Z-axis mechanism -->
 
 > [!NOTE]
 > GPIO 12, 13, 18, 19 support hardware PWM. Using GPIO 12 for Z-axis servo.
@@ -165,10 +165,10 @@ All grounds must be connected together:
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│ Pi GND       │─────│ Motor PSU   │─────│ Servo/Mag   │
-│ (Pin 6,9,14, │     │ GND         │     │ PSU GND     │
-│  20,25,30,   │     │             │     │             │
-│  34,39)      │     │             │     │             │
+│ Pi GND       │─────│ Motor PSU   │─────│ Servo        │
+│ (Pin 6,9,14, │     │ GND         │     │ PSU GND      │
+│  20,25,30,   │     │             │     │              │
+│  34,39)      │     │             │     │              │
 └──────────────┘     └──────────────┘     └──────────────┘
 ```
 

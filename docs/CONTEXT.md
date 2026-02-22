@@ -45,39 +45,43 @@ Build an automated chess board that can:
 
 ## Physical Layout
 
-<!-- USER_ATTENTION: Update these dimensions with actual measurements -->
-
 ```
 ┌─────────────────────────────────────────────────┐
-│                 GANTRY FRAME                     │
+│                  GANTRY FRAME                    │
 │  ┌───────────────────────────────────────────┐  │
-│  │             Y-axis travel                 │  │
+│  │                                           │  │
+│  │  [GRAVEYARD ZONE - behind black pieces]   │  │
+│  │                                           │  │
 │  │  ┌─────────────────────────────────────┐  │  │
 │  │  │                                     │  │  │
 │  │  │         8×8 CHESS BOARD             │  │  │
-│  │  │                                     │  │ X│
-│  │  │      ┌───┐                          │  │ -│
-│  │  │      │MAG│ ← Electromagnet head     │  │ a│
-│  │  │      └───┘                          │  │ x│
-│  │  │                                     │  │ i│
-│  │  └─────────────────────────────────────┘  │ s│
-│  │                                           │  │
-│  │  [GRAVEYARD WHITE]    [GRAVEYARD BLACK]   │  │
+│  │  │    rank 8 (Black) ←────────         │  │  │
+│  │  │        ┌───┐                        │  │  │
+│  │  │        │MAG│ ← Permanent magnet     │  │  │
+│  │  │        └───┘   on servo arm         │  │  │
+│  │  │    rank 1 (White) ←────────         │  │  │
+│  │  └─────────────────────────────────────┘  │  │
 │  │                                           │  │
 │  └───────────────────────────────────────────┘  │
 │                                                  │
-│  [X-MIN]                           [Y-MIN]      │
-│   limit                             limit       │
+│  [Y-MIN limit]                     [X-MIN limit] │
+│   (bottom of rail)                 (right side)  │
 └─────────────────────────────────────────────────┘
      ↑ Camera mounted above (looking down)
+     ↑ Chess clock nearby with clock-hit limit switch
 ```
 
 ### Coordinate System
 
-- **Origin (0,0)**: Bottom-left corner after homing (X-MIN, Y-MIN)
-- **X-axis**: Left to right (files a-h)
-- **Y-axis**: Bottom to top (ranks 1-8)
-- **Z-axis**: Servo up/down for magnet engage/release
+- **Origin (0,0)**: Bottom-**right** corner after homing — this is where BOTH limit switches are triggered (X-MIN at far right, Y-MIN at bottom of rail)
+- **+X direction**: LEFT (toward a-file / rank column a). The gantry moves LEFT when X increases.
+- **+Y direction**: UP / BACKWARD (toward Black's side, rank 8). The gantry moves toward the back of the board when Y increases.
+- **Z-axis**: Servo arm raises and lowers the **permanent magnet** below the board
+
+> [!IMPORTANT]
+> The X-MIN limit switch is at the FAR RIGHT (motor A side). This means after homing, the
+> gantry is in the corner at (0,0) and must move POSITIVE X to reach square h1, then more
+> positive X to reach a1. Square a1 is approximately **(200mm, 20mm)** from homed origin.
 
 ## Game Flow State Machine
 
@@ -125,15 +129,21 @@ Each chess square maps to physical X/Y coordinates:
 
 | Square | X (mm) | Y (mm) | Notes |
 |--------|--------|--------|-------|
-| a1 | 25 | 25 | Origin corner |
-| h1 | 200 | 25 | |
-| a8 | 25 | 200 | |
-| h8 | 200 | 200 | Far corner |
-| Square size | 25mm | 25mm | Assumed |
+| a1 | 200 | 20 | Closest to white's left; 200mm from origin |
+| h1 | 25 | 20 | Near origin (right side); first rank |
+| a8 | 200 | 195 | Far left, far back (Black's queen side) |
+| h8 | 25 | 195 | Near X-origin, far back (Black's king side) |
+| Square size | 25mm | 25mm | **Must verify with physical measurement** |
 
-**Graveyard positions**:
-- White captured: X=230-280, Y=25-100
-- Black captured: X=230-280, Y=125-200
+> [!NOTE]
+> These values are based on user-measured estimates (a1 ≈ 200mm X, 20mm Y from origin).
+> Run the hardware `gantry/square_navigation` test to verify each square.
+> Formula: `square_x = 200 - (col_index * 25)`, `square_y = 20 + (rank_index * 25)`
+> where col a=0, b=1...h=7 and rank 1=0, 2=1...8=7.
+
+**Graveyard positions** (behind black's pieces, rank 8 side):
+- All captured pieces (white and black): behind rank 8, Y ≈ 215mm
+- Routing: piece moves horizontally to board edge first, then up to graveyard Y
 
 ## FEN Encoding
 
@@ -158,7 +168,13 @@ Piece encoding used internally:
 | -2 | Black Knight |
 | ... | ... |
 
-## Dependencies
+## Magnet System
+
+The magnet system uses a **permanent magnet** (no electromagnet) attached to the end of the Z-axis servo arm. The servo raises and lowers the magnet through the underside of the chess board to attract and release chess pieces.
+
+- **Servo engaged (down)**: Magnet is lowered to board surface — pieces are attracted
+- **Servo released (up)**: Magnet is raised away from board — pieces are free
+- **No GPIO power control needed** — the servo position alone controls pickup
 
 ### System Dependencies
 ```bash

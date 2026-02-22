@@ -1,168 +1,243 @@
 #!/usr/bin/env python3
 """
-Electromagnet Test Suite.
+Magnet Servo Test Suite.
 
-Tests:
-1. Magnet engage (on)
-2. Magnet release (off)
-3. Timed hold test
+Tests the Z-axis servo that raises/lowers the permanent magnet
+through the underside of the chess board.
+
+NOTE: There is NO electromagnet in this project.
+The servo carries a permanent magnet on its arm. Engaging = lowering
+magnet to board. Releasing = raising magnet clear of board.
+
+Tests call the /servo/engage and /servo/release ROS services.
+
+Requires:
+  ROS nodes running: servo_node
+  Start with: ros2 launch chess_hw_interface hw_interface_launch.py
 """
 
+import threading
 import time
-from typing import List
+from typing import List, Optional
+
+import rclpy
+from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from ..base_test import HardwareTest, TestStep
 
 
+class MagnetServoNode(Node):
+    """ROS node for calling servo engage/release services."""
+
+    def __init__(self):
+        super().__init__('magnet_servo_test_node')
+        self.servo_state = 'UNKNOWN'
+
+        self.engage_client = self.create_client(Trigger, '/servo/engage')
+        self.release_client = self.create_client(Trigger, '/servo/release')
+        self.create_subscription(
+            String, '/servo/state', self._state_cb, 10)
+
+    def _state_cb(self, msg):
+        self.servo_state = msg.data
+
+    def call_engage(self, timeout_s: float = 5.0) -> bool:
+        """Call /servo/engage and return True on success."""
+        if not self.engage_client.wait_for_service(timeout_sec=timeout_s):
+            self.get_logger().error('  /servo/engage service not available')
+            return False
+        req = Trigger.Request()
+        future = self.engage_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_s)
+        if future.result() is not None:
+            return future.result().success
+        return False
+
+    def call_release(self, timeout_s: float = 5.0) -> bool:
+        """Call /servo/release and return True on success."""
+        if not self.release_client.wait_for_service(timeout_sec=timeout_s):
+            self.get_logger().error('  /servo/release service not available')
+            return False
+        req = Trigger.Request()
+        future = self.release_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_s)
+        if future.result() is not None:
+            return future.result().success
+        return False
+
+
 class MagnetTest(HardwareTest):
     """
-    Test electromagnet functionality.
+    Test the Z-axis servo that carries the permanent magnet.
+
+    Calls /servo/engage (magnet down) and /servo/release (magnet up)
+    via ROS services. All servo control is handled by servo_node.
     """
-    
-    # Magnet control pin (BCM)
-    # USER_ATTENTION: Set this to your actual electromagnet control pin
-    MAGNET_PIN = 26  # Placeholder - update in pinout.md and here
-    
+
     @property
     def name(self) -> str:
-        return "Magnet"
-    
+        return 'Magnet Servo'
+
     @property
     def description(self) -> str:
-        return "Test electromagnet engage and release"
-    
+        return 'Test servo engage (magnet down) and release (magnet up) via ROS'
+
+    def __init__(self, gpio_interface=None, display_interface=None):
+        super().__init__(gpio_interface, display_interface)
+        self._node: Optional[MagnetServoNode] = None
+        self._spin_thread: Optional[threading.Thread] = None
+
     def setup(self) -> bool:
-        """Setup magnet control pin."""
-        if self.gpio is None:
-            raise RuntimeError("GPIO interface required - hardware must be connected")
-        
+        """Initialize ROS node for servo control."""
         try:
-            self.gpio.setup_output(self.MAGNET_PIN)
-            self.gpio.write(self.MAGNET_PIN, False)  # Start with magnet off
+            if not rclpy.ok():
+                rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+            self._node = MagnetServoNode()
+            self._spin_thread = threading.Thread(
+                target=self._spin, daemon=True)
+            self._spin_thread.start()
+            time.sleep(0.5)  # Service discovery time
             return True
         except Exception as e:
-            print(f"[ERROR] Magnet setup failed: {e}")
+            print(f'[ERROR] Setup failed: {e}')
+            print('Make sure servo_node is running:')
+            print('  ros2 launch chess_hw_interface hw_interface_launch.py')
             return False
-    
+
+    def _spin(self):
+        try:
+            rclpy.spin(self._node)
+        except Exception:
+            pass
+
     def teardown(self):
-        """Ensure magnet is off."""
-        if self.gpio:
-            self.gpio.write(self.MAGNET_PIN, False)
-    
+        """Ensure magnet is released (servo raised) on cleanup."""
+        if self._node:
+            print('  Releasing magnet (safety cleanup)...')
+            self._node.call_release()
+            try:
+                self._node.destroy_node()
+            except Exception:
+                pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
     def get_steps(self) -> List[TestStep]:
         """Define test steps."""
         return [
-            # Warning
+            # Safety reminder
             TestStep(
-                name="Safety Check",
-                display_text="MAG SAFE",
+                name='Safety Check',
+                display_text='SAFE CHK',
                 action=self._safety_warning,
                 wait_for_input=True,
-                input_type="clock",
+                input_type='clock',
                 timeout_seconds=30.0,
-                success_message="READY",
-                failure_message="ABORT"
+                success_message='READY',
+                failure_message='ABORT',
             ),
-            
-            # Engage test
+
+            # Engage test — servo lowers magnet
             TestStep(
-                name="Magnet Engage",
-                display_text="MAG ON",
+                name='Magnet Engage (servo down)',
+                display_text='MAG DOWN',
                 action=self._test_engage,
                 wait_for_input=True,
-                input_type="clock",
+                input_type='clock',
                 timeout_seconds=30.0,
-                success_message="ON OK?",
-                failure_message="ON FAIL"
+                success_message='DOWN OK?',
+                failure_message='DOWN FAIL',
             ),
-            
+
             # Confirm engage
             TestStep(
-                name="Confirm Engage",
-                display_text="ON OK?",
+                name='Confirm Engage',
+                display_text='DN OK?',
                 action=lambda: True,
                 wait_for_input=True,
-                input_type="clock",
+                input_type='clock',
                 timeout_seconds=30.0,
-                success_message="ON CONF",
-                failure_message="ON BAD"
+                success_message='DN CONF',
+                failure_message='DN BAD',
             ),
-            
-            # Release test
+
+            # Release test — servo raises magnet
             TestStep(
-                name="Magnet Release",
-                display_text="MAG OFF",
+                name='Magnet Release (servo up)',
+                display_text='MAG UP',
                 action=self._test_release,
                 wait_for_input=False,
-                success_message="OFF OK",
-                failure_message="OFF FAIL"
+                success_message='UP OK',
+                failure_message='UP FAIL',
             ),
-            
-            # Hold strength test
+
+            # Hold strength test (servo down for 5s)
             TestStep(
-                name="Hold Strength Test",
-                display_text="HOLD TST",
+                name='Hold Strength Test',
+                display_text='HOLD TST',
                 action=self._test_hold_strength,
                 wait_for_input=True,
-                input_type="clock",
+                input_type='clock',
                 timeout_seconds=60.0,
-                success_message="HOLD OK",
-                failure_message="WEAK"
+                success_message='HOLD OK',
+                failure_message='HOLD BAD',
             ),
         ]
-    
+
     def _safety_warning(self) -> bool:
         """Display safety warning."""
-        print("\n  ⚠️  ELECTROMAGNET TEST")
-        print("  ----------------------")
-        print("  - Keep hands clear of magnet")
-        print("  - Remove sensitive electronics from area")
-        print("  - Have a steel object ready to test attraction")
-        print("\n  Press clock button when ready...\n")
+        print('\n  PERMANENT MAGNET SERVO TEST')
+        print('  ----------------------------')
+        print('  - Servo will lower magnet toward board surface')
+        print('  - Keep steel tools away from magnet area')
+        print('  - Have a chess piece ready to test attraction')
+        print('  - This uses /servo/engage and /servo/release (ROS services)')
+        print('\n  Press clock button when ready...\n')
         return True
-    
-    def _set_magnet(self, state: bool):
-        """Set magnet state."""
-        if self.gpio is None:
-            raise RuntimeError("GPIO interface required - hardware must be connected")
-        
-        self.gpio.write(self.MAGNET_PIN, state)
-    
+
     def _test_engage(self) -> bool:
-        """Test magnet engagement."""
-        print("  Engaging electromagnet...")
-        self._set_magnet(True)
-        time.sleep(0.5)
-        print("  Magnet is ON - try placing steel object near it")
-        return True
-    
+        """Test magnet engagement (servo lowers)."""
+        print('  Calling /servo/engage (lowering magnet)...')
+        ok = self._node.call_engage()
+        if ok:
+            print('  Servo engaged — magnet lowered to board.')
+            print('  Place a chess piece on the board above the magnet.')
+        else:
+            print('  [ERROR] /servo/engage failed.')
+        return ok
+
     def _test_release(self) -> bool:
-        """Test magnet release."""
-        print("  Releasing electromagnet...")
-        self._set_magnet(False)
-        time.sleep(0.3)
-        print("  Magnet is OFF")
-        return True
-    
+        """Test magnet release (servo raises)."""
+        print('  Calling /servo/release (raising magnet)...')
+        ok = self._node.call_release()
+        if ok:
+            print('  Servo released — magnet raised clear of board.')
+        else:
+            print('  [ERROR] /servo/release failed.')
+        return ok
+
     def _test_hold_strength(self) -> bool:
-        """Test magnet holding strength."""
-        print("\n  HOLD STRENGTH TEST")
-        print("  ------------------")
-        print("  1. Place a chess piece with steel base on the magnet")
-        print("  2. Magnet will engage for 5 seconds")
-        print("  3. Verify piece stays attached when lifted")
-        print("\n  Press clock button to start test...\n")
-        
-        # Wait handled by test framework
-        
-        print("  Engaging magnet for 5 seconds...")
-        self._set_magnet(True)
-        
+        """Test that the servo can hold magnet for 5 seconds."""
+        print('\n  HOLD STRENGTH TEST')
+        print('  ------------------')
+        print('  1. Move gantry above a square with a chess piece')
+        print('  2. Servo will engage (lower magnet) for 5 seconds')
+        print('  3. Lift the gantry arm slightly — piece should follow')
+        print('\n  Press clock button to start test...\n')
+
+        print('  Calling /servo/engage...')
+        if not self._node.call_engage():
+            return False
+
         for i in range(5, 0, -1):
-            self.show_display(f"HOLD  {i}")
-            time.sleep(1)
-        
-        print("  Releasing magnet...")
-        self._set_magnet(False)
-        
+            self.show_display(f'HOLD  {i}')
+            time.sleep(1.0)
+
+        print('  Calling /servo/release...')
+        self._node.call_release()
         return True

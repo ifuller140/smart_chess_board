@@ -11,9 +11,9 @@
 | Raspberry Pi 4B (4GB) | 1 | $55 | Various | RPI4-MODBP-4GB | ✅ |
 | NEMA 11 Stepper Motor | 2 | $15 ea | StepperOnline | 11HS13-0404S | ✅ |
 | A4988 Stepper Driver | 2 | $3 ea | Amazon/AliExpress | A4988 | ✅ |
-| SG90 Micro Servo (Z-axis) | 1 | $3 | Amazon/AliExpress | SG90 | ⬜ |
+| SG90 Micro Servo (Z-axis/magnet) | 1 | $3 | Amazon/AliExpress | SG90 | ⬜ |
 | SG90 Micro Servo (Clock) | 1 | $3 | Amazon/AliExpress | SG90 | ⬜ |
-| Electromagnet 5V | 1 | $8 | Amazon | P20/15 | ⬜ |
+| Permanent Magnet (on servo) | 1 | ~$5 | Specialty | Neodymium disc | ⬜ |
 | RPi Camera Module v2 | 1 | $25 | Various | RPI-CAM-V2 | ⬜ |
 | Micro Limit Switch | 3 | $1 ea | Amazon | KW12-3 | ⬜ |
 | GT2 Timing Belt | 2m | $5 | Amazon | GT2-6mm | ⬜ |
@@ -231,26 +231,29 @@ clock_servo_node:
 
 ---
 
-## Electromagnet
+## Permanent Magnet (Z-Axis Servo)
 
-### Specifications (Typical P20/15 5V)
-<!-- USER_ATTENTION: Update with actual electromagnet specifications -->
+> **Design**: A permanent neodymium magnet is mounted to the tip of the Z-axis servo arm.
+> The servo raises and lowers the magnet through the underside of the board.
+> **There is no electromagnet in this project.**
 
-| Parameter | Value |
-|-----------|-------|
-| Model | P20/15 (or similar) |
-| Voltage | 5V DC |
-| Current Draw | ~400mA |
-| Holding Force | 2.5 kg |
-| Diameter | 20mm |
-| Height | 15mm |
+### How It Works
+- **Servo engaged (arm lowered)**: Magnet contacts or approaches the underside of the chess board → magnetic force attracts steel-core chess pieces through the board surface
+- **Servo released (arm raised)**: Magnet lifts away from board → magnetic force too weak to hold pieces → piece is free
 
-### Control
-- Use a transistor/MOSFET to switch (GPIO cannot source 400mA)
-- Or integrate with servo power circuit
+### Configuration
+```yaml
+servo_node:
+  ros__parameters:
+    servo_pin: 12             # BCM pin (hardware PWM)
+    engage_pulse_us: 500      # Down position — magnet close to board
+    release_pulse_us: 1500    # Up position — magnet away from board
+    movement_time: 0.5        # Seconds to wait for servo to reach position
+```
 
-> [!CAUTION]
-> Electromagnet draws significant current. Ensure power supply can handle it!
+> [!NOTE]
+> Calibrate `engage_pulse_us` so the magnet is close enough to the board
+> surface to attract a chess piece through the board material.
 
 ---
 
@@ -327,9 +330,9 @@ When switch is released: GPIO reads LOW (pulled down)
 ### Positions
 | Switch | Location | Purpose |
 |--------|----------|---------|
-| X-MIN | Left edge of X travel | X-axis home position |
-| Y-MIN | Front edge of Y travel | Y-axis home position |
-| CLOCK | Near chess clock | Detect player move complete |
+| X-MIN | **Far right** of X rail | X-axis home (origin is at right, +X goes left) |
+| Y-MIN | **Bottom** of Y rail (nearest player) | Y-axis home (origin is at bottom, +Y goes backward toward black) |
+| CLOCK | Near chess clock | Detect player has completed move |
 
 ---
 

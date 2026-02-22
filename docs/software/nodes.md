@@ -26,6 +26,8 @@
 | Topic | Type | Description |
 |-------|------|-------------|
 | `/stepper/status` | `std_msgs/String` | Current motor status |
+| `/limit_switch/x_min` | `std_msgs/Bool` | X-axis limit switch state |
+| `/limit_switch/y_min` | `std_msgs/Bool` | Y-axis limit switch state |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
@@ -35,12 +37,6 @@
 | `motorB_dir_pin` | int | 6 | BCM pin for Motor B direction |
 | `motorB_step_pin` | int | 5 | BCM pin for Motor B step |
 | `motor_enable_pin` | int | 17 | Shared A4988 enable pin (active LOW) |
-| `dir_setup_us` | int | 50 | DIR setup time in microseconds |
-| `step_pulse_us` | int | 100 | STEP pulse width in microseconds |
-| `min_step_delay_ms` | float | 5.0 | Min delay (max speed, conservative) |
-| `max_step_delay_ms` | float | 50.0 | Max delay (min speed, ~0%) |
-| `accel_ramp_steps` | int | 40 | Ramp steps for acceleration/deceleration |
-| `hold_torque_when_idle` | bool | true | Keep motors enabled after moves |
 
 ---
 
@@ -144,7 +140,43 @@
 
 ---
 
-## chess_perception Package
+### chess_clock_node
+
+**Purpose**: Dual chess timer — tracks remaining time for each player and fires flag-fall events.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_hw_interface` |
+| Executable | `chess_clock_node` |
+| File | `nodes/chess_clock_node.py` |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/clock/white_time` | `std_msgs/Float32` | White remaining seconds (1Hz) |
+| `/clock/black_time` | `std_msgs/Float32` | Black remaining seconds (1Hz) |
+| `/game_manager/clock_event` | `std_msgs/String` | `FLAG_WHITE` or `FLAG_BLACK` on timeout |
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/game_manager/state` | `std_msgs/String` | GAME_OVER pauses; PROMOTION_WAIT pauses; PROMOTION_DONE resumes |
+| `/game_manager/turn` | `std_msgs/String` | `WHITE` or `BLACK` to switch active clock |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/clock/reset` | `Trigger` | Reset both clocks to full time |
+| `/clock/pause` | `Trigger` | Pause active clock |
+| `/clock/resume` | `Trigger` | Resume paused clock |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `time_per_player_s` | float | 600.0 | Initial time per player in seconds |
+
+---
+
 
 ### camera_node
 
@@ -205,7 +237,7 @@
 
 ### piece_detector_node
 
-**Purpose**: Identify pieces on each square.
+**Purpose**: Detect chess pieces via occupancy + color classification and publish FEN. Uses game-state-assisted piece typing (subscribes to `/game_manager/board_fen` for authoritative board state).
 
 | Property | Value |
 |----------|-------|
@@ -216,19 +248,31 @@
 **Subscriptions**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/camera/image_raw` | `sensor_msgs/Image` | Input image |
-| `/perception/board_geometry` | `BoardGeometry` | Board transform |
+| `/camera/image_raw` | `sensor_msgs/Image` | Live camera feed |
+| `/perception/board_geometry` | `BoardState` | Board corners (from board_detector) |
+| `/game_manager/board_fen` | `std_msgs/String` | Authoritative FEN for piece typing |
 
 **Publications**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/perception/board_state` | `BoardState` | FEN and piece array |
+| `/perception/board_state` | `BoardState` | Detected FEN + 64-element piece array |
+| `/perception/piece_debug` | `sensor_msgs/Image` | Annotated warped board (W/B overlays) |
+| `/perception/reference_status` | `std_msgs/String` | Reference baseline capture progress |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/perception/capture_reference` | `Trigger` | Capture empty-board baseline (call before game) |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `detection_method` | string | "histogram" | Detection algorithm |
-| `empty_threshold` | float | 0.3 | Threshold for empty squares |
+| `occupancy_diff_threshold` | int | 25 | Pixel diff threshold for piece detection |
+| `white_piece_brightness` | float | 0.65 | Brightness percentile for white piece classification |
+| `reference_capture_count` | int | 5 | Frames to average for baseline |
+| `warp_size` | int | 400 | Warped board size in pixels |
+
+> **Pre-game setup**: Call `/perception/capture_reference` 5+ times with empty board before starting a game.
 
 ---
 
@@ -236,7 +280,7 @@
 
 ### game_manager_node
 
-**Purpose**: Main state machine coordinating the game loop.
+**Purpose**: Full 10-state game manager — orchestrates homing, player move detection, engine calls, gantry execution, and clock management.
 
 | Property | Value |
 |----------|-------|
@@ -244,34 +288,45 @@
 | Executable | `game_manager_node` |
 | File | `nodes/game_manager_node.py` |
 
+**States**: `STARTUP` → `HOMING` → `IDLE` → `WAITING_PLAYER_MOVE` → `CAPTURING_BOARD` → `VALIDATING_MOVE` → `CALCULATING_RESPONSE` → `EXECUTING_MOVE` → `HITTING_CLOCK` → `GAME_OVER` (+ `PROMOTION_WAIT`)
+
 **Subscriptions**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/perception/board_state` | `BoardState` | Detected board state |
-| `/limit_switch/state` | `LimitSwitchState` | Clock hit detection |
+| `/limit_switch/clock_hit` | `Bool` | Human pressed chess clock |
+| `/perception/board_state` | `BoardState` | Post-move detected FEN |
+| `/game_manager/clock_event` | `String` | FLAG_WHITE or FLAG_BLACK from chess_clock_node |
+| `/motion/done` | `Bool` | Motion planner move complete |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/game_manager/state` | `String` | Current state name (10 states) |
+| `/game_manager/turn` | `String` | `WHITE` or `BLACK` for clock_node |
+| `/game_manager/board_fen` | `String` | Authoritative FEN for piece_detector |
+| `/motion/command` | `String` | `"UCI FEN"` to motion_planner |
 
 **Services Called**:
 | Service | Type | Description |
 |---------|------|-------------|
-| `/camera/capture` | `Trigger` | Trigger image capture |
-| `/chess_engine/request_move` | `RequestMove` | Get engine move |
-
-**Actions Called**:
-| Action | Type | Description |
-|--------|------|-------------|
-| `/gantry/move` | `MoveGantry` | Execute piece movement |
+| `/gantry/home` | `Trigger` | Home gantry on startup |
+| `/camera/capture` | `Trigger` | Trigger human move capture |
+| `/chess_engine/request_move` | `RequestMove` | Get engine response |
+| `/clock/hit` | `Trigger` | Servo presses clock button |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `time_control` | int | 600 | Time per player (seconds) |
-| `engine_think_time` | float | 1.0 | Engine calculation time |
+| `engine_think_time_s` | float | 2.0 | Engine think time |
+| `board_capture_timeout_s` | float | 5.0 | Camera capture timeout |
+| `motion_timeout_s` | float | 120.0 | Gantry move timeout |
+| `homing_timeout_s` | float | 90.0 | Homing timeout |
 
 ---
 
 ### chess_engine_node
 
-**Purpose**: Interface with python-chess and Stockfish.
+**Purpose**: Interface with Stockfish chess engine.
 
 | Property | Value |
 |----------|-------|
@@ -282,14 +337,13 @@
 **Services**:
 | Service | Type | Description |
 |---------|------|-------------|
-| `/chess_engine/request_move` | `RequestMove` | Calculate best move |
+| `/chess_engine/request_move` | `RequestMove` | Returns best move UCI for given FEN |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `stockfish_path` | string | "/usr/bin/stockfish" | Path to Stockfish binary |
-| `skill_level` | int | 10 | Engine skill (0-20) |
-| `depth` | int | 15 | Search depth |
+| `engine_path` | string | `/usr/games/stockfish` | Path to Stockfish binary |
+| `think_time` | float | 2.0 | Engine think time in seconds |
 
 ---
 
@@ -297,7 +351,7 @@
 
 ### gantry_kinematics_node
 
-**Purpose**: CoreXY kinematics and low-level motion control.
+**Purpose**: CoreXY kinematics — converts (x_mm, y_mm) goals into stepper motor step sequences via trapezoidal velocity profiles.
 
 | Property | Value |
 |----------|-------|
@@ -308,34 +362,26 @@
 **Actions**:
 | Action | Type | Description |
 |--------|------|-------------|
-| `/gantry/move` | `MoveGantry` | Move to X/Y position |
+| `/gantry/move` | `MoveGantry` | Move to (target_x_mm, target_y_mm) |
 
 **Publications**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/stepper/command` | `geometry_msgs/Point` | Motor A/B step commands and speed |
-| `/gantry/pose` | `geometry_msgs/Point` | Current X/Y position |
-
-**Subscriptions**:
-| Topic | Type | Description |
-|-------|------|-------------|
-| `/stepper/status` | `std_msgs/String` | Motor status |
-| `/limit_switch/state` | `LimitSwitchState` | Limit switch state |
+| `/stepper/command` | `geometry_msgs/Point` | Motor A/B step commands |
+| `/gantry/pose` | `geometry_msgs/Point` | Current X/Y position in mm |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `steps_per_mm` | float | 5.0 | Calibrated steps/mm (full-step baseline) |
-| `max_speed_mm_s` | float | 10.0 | Maximum speed |
-| `acceleration_mm_s2` | float | 50.0 | Acceleration |
-
-<!-- USER_ATTENTION: Calibrate steps_per_mm with actual hardware -->
+| `steps_per_mm` | float | 5.0 | Steps per mm (calibrate with hardware) |
+| `max_speed_mm_s` | float | 100.0 | Maximum speed |
+| `acceleration_mm_s2` | float | 200.0 | Acceleration |
 
 ---
 
 ### motion_planner_node
 
-**Purpose**: High-level pick-and-place motion sequences.
+**Purpose**: High-level move sequencer — supports captures, castling, en passant, promotion with safe graveyard routing.
 
 | Property | Value |
 |----------|-------|
@@ -343,28 +389,43 @@
 | Executable | `motion_planner_node` |
 | File | `nodes/motion_planner_node.py` |
 
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/motion/command` | `String` | `"UCI FEN"` move command |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/motion/done` | `Bool` | True on success, False on failure |
+| `/game_manager/state` | `String` | `PROMOTION_WAIT` when pawn promotes |
+
 **Actions Called**:
 | Action | Type | Description |
 |--------|------|-------------|
-| `/gantry/move` | `MoveGantry` | Execute individual moves |
+| `/gantry/move` | `MoveGantry` | Move to absolute XY position |
 
 **Services Called**:
 | Service | Type | Description |
 |---------|------|-------------|
-| `/servo/engage` | `Trigger` | Engage magnet |
-| `/servo/release` | `Trigger` | Release magnet |
+| `/servo/engage` | `Trigger` | Lower permanent magnet arm |
+| `/servo/release` | `Trigger` | Raise permanent magnet arm |
 
-**Parameters**:
+**Parameters** (from `board_map.yaml`):
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `z_safe_height` | float | 20.0 | Safe travel height (mm) |
-| `approach_speed` | float | 5.0 | Slow approach speed |
+| `square_size_mm` | float | 25.0 | Board square width in mm |
+| `board_origin_x_mm` | float | 200.0 | X of a1 square center (mm) |
+| `board_origin_y_mm` | float | 20.0 | Y of a1 square center (mm) |
+| `graveyard_origin_x_mm` | float | 210.0 | Graveyard zone X origin |
+| `graveyard_origin_y_mm` | float | 215.0 | Graveyard zone Y origin |
+| `graveyard_slot_spacing_mm` | float | 22.0 | Spacing between graveyard slots |
 
 ---
 
 ### homing_node
 
-**Purpose**: Home the gantry to known position.
+**Purpose**: Home the gantry to the bottom-right origin (X-min + Y-min limit switches).
 
 | Property | Value |
 |----------|-------|
@@ -375,14 +436,29 @@
 **Services**:
 | Service | Type | Description |
 |---------|------|-------------|
-| `/gantry/home` | `Trigger` | Start homing sequence |
+| `/gantry/home` | `Trigger` | Execute full homing sequence |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `homing_speed` | float | 5.0 | Speed during homing |
-| `backoff_distance` | float | 5.0 | Distance to back off (mm) |
+| `homing_speed_mm_s` | float | 30.0 | Homing travel speed |
+| `backoff_distance_mm` | float | 5.0 | Backoff distance after limit hit |
 
 ---
 
 *See [interfaces.md](interfaces.md) for message definitions.*
+```
+
+## Test Commands Reference
+
+```bash
+# Hardware tests
+python3 -m chess_hw_interface.testing.test_runner --test square_nav      # Square navigation
+python3 -m chess_hw_interface.testing.test_runner --test vision           # Vision pipeline
+python3 -m chess_hw_interface.testing.test_runner --test clock_integration # Clock timer
+python3 -m chess_hw_interface.testing.test_runner --test magnet           # Magnet servo
+
+# Full system
+ros2 launch smart_chess_board full_system_launch.py
+ros2 launch smart_chess_board full_system_launch.py use_picamera2:=False think_time:=1.0
+```
