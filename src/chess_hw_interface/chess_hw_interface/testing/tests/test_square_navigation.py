@@ -239,7 +239,8 @@ class GantrySquareNavigationTest(HardwareTest):
             except Exception:
                 pass
         try:
-            rclpy.shutdown()
+            if rclpy.ok():
+                rclpy.shutdown()
         except Exception:
             pass
 
