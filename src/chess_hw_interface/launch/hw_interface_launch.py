@@ -54,6 +54,12 @@ def generate_launch_description():
             name='clock_display_node',
             parameters=[pins_config]
         ),
+        Node(
+            package='chess_hw_interface',
+            executable='chess_clock_node',
+            name='chess_clock_node',
+            output='screen',
+        ),
 
         # ── Gantry Kinematics ──────────────────────────────
         Node(
