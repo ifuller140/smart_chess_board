@@ -44,8 +44,8 @@ def generate_launch_description():
                               description='Engine think time in seconds'),
         DeclareLaunchArgument('time_per_player_s', default_value='600.0',
                               description='Clock time per player (seconds)'),
-        DeclareLaunchArgument('use_picamera2', default_value='True',
-                              description='True = Pi Camera v2 (CSI), False = USB'),
+        DeclareLaunchArgument('use_picamera2', default_value='False',
+                              description='True = Pi Camera v2 (CSI), False = OpenCV V4L2 (default: V4L2 due to libcamera 0.2.0 IPA bug)'),
         DeclareLaunchArgument('calibration_file', default_value='',
                               description='Path to camera_calibration.yaml'),
     ]

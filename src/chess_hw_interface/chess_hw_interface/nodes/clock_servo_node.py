@@ -27,7 +27,7 @@ class ClockServoNode(Node):
         # Parameters
         self.declare_parameter('clock_servo_pin', 18)
         self.declare_parameter('rest_pulse_us', 500)       # µs pulse width at rest
-        self.declare_parameter('hit_pulse_us', 1500)       # µs pulse width for hitting
+        self.declare_parameter('hit_pulse_us', 1000)       # µs pulse width for hitting
         self.declare_parameter('hit_duration', 0.3)    # seconds to hold
 
         self.servo_pin = self.get_parameter('clock_servo_pin').value

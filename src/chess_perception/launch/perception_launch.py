@@ -26,8 +26,8 @@ from launch_ros.actions import Node
 def generate_launch_description():
 
     args = [
-        DeclareLaunchArgument('use_picamera2', default_value='True',
-                              description='True=Pi Camera CSI, False=USB webcam'),
+        DeclareLaunchArgument('use_picamera2', default_value='False',
+                              description='True=Pi Camera CSI, False=OpenCV V4L2 (default: V4L2 due to libcamera 0.2.0 IPA bug)'),
         DeclareLaunchArgument('calibration_file', default_value='',
                               description='Path to camera_calibration.yaml'),
     ]
