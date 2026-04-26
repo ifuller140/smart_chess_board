@@ -1,6 +1,6 @@
 # Smart Chess Board - ROS 2 Software Architecture
 
-This document outlines the software architecture for the Smart Chess Board project. The system is built on ROS 2 (Jazzy) and uses Python (`rclpy`) for all nodes.
+This document outlines the software architecture for the Smart Chess Board project. The system is built on ROS 2 (humble) and uses Python (`rclpy`) for all nodes.
 
 ## High-Level Overview
 

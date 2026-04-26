@@ -12,7 +12,7 @@ Steps for deploying the Smart Chess Board software to a Raspberry Pi.
 
 - [ ] Raspberry Pi 4B with Ubuntu 24.04 (or Raspberry Pi OS)
 - [ ] Network connectivity (SSH access via `ssh smart-chess-pi`)
-- [ ] ROS 2 Jazzy installed on Pi
+- [ ] ROS 2 humble installed on Pi
 - [ ] pigpiod daemon running
 - [ ] All physical hardware components connected (steppers, servos, limit switches, camera)
 
@@ -24,11 +24,11 @@ The Pi is configured in `~/.ssh/config` as `smart-chess-pi` (192.168.1.150):
 ssh smart-chess-pi
 ```
 
-## 1. Install ROS 2 Jazzy
+## 1. Install ROS 2 humble
 
 ```bash
 # On Raspberry Pi
-# Follow official docs: https://docs.ros.org/en/jazzy/Installation.html
+# Follow official docs: https://docs.ros.org/en/humble/Installation.html
 
 # Quick version:
 sudo apt update && sudo apt install -y software-properties-common
@@ -37,7 +37,7 @@ sudo apt update && sudo apt install -y curl
 sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
 sudo apt update
-sudo apt install -y ros-jazzy-ros-base python3-colcon-common-extensions
+sudo apt install -y ros-humble-ros-base python3-colcon-common-extensions
 ```
 
 ## 2. Install System Dependencies
@@ -78,7 +78,7 @@ git clone https://github.com/ifuller140/smart_chess_board.git
 
 ```bash
 cd ~/dev/smart_chess_board
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
 ```
@@ -92,7 +92,7 @@ source install/setup.bash
 ```bash
 cd ~/dev/smart_chess_board
 rm -rf build/ install/ log/
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
 ```
@@ -130,7 +130,7 @@ Update pin numbers to match your wiring.
 ```bash
 # Source ROS first
 cd ~/dev/smart_chess_board
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 source install/setup.bash
 
 # Launch hardware interface nodes (required for gantry tests)
@@ -138,7 +138,7 @@ ros2 launch chess_hw_interface hw_interface_launch.py
 
 # In another terminal — run tests
 cd ~/dev/smart_chess_board
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 source install/setup.bash
 python3 -m chess_hw_interface.testing.test_runner --list
 python3 -m chess_hw_interface.testing.test_runner --category gantry --subtest manual
@@ -148,7 +148,7 @@ python3 -m chess_hw_interface.testing.test_runner --category gantry --subtest ma
 
 ```bash
 cd ~/dev/smart_chess_board
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 source install/setup.bash
 
 # Hardware interface only:
@@ -176,7 +176,7 @@ Requires=pigpiod.service
 Type=simple
 User=ian
 WorkingDirectory=/home/ian/dev/smart_chess_board
-ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch chess_hw_interface hw_interface_launch.py"
+ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch chess_hw_interface hw_interface_launch.py"
 Restart=on-failure
 
 [Install]
@@ -194,7 +194,7 @@ sudo systemctl start smart-chess.service
 ```bash
 cd ~/dev/smart_chess_board
 git pull
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
 # Restart service or re-launch

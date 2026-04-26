@@ -4,7 +4,7 @@
 
 ## Overview
 
-The system is built on ROS 2 Jazzy, using Python (`rclpy`) for all nodes. The architecture follows a modular design with separate packages for hardware interface, perception, logic, and motion control.
+The system is built on ROS 2 humble, using Python (`rclpy`) for all nodes. The architecture follows a modular design with separate packages for hardware interface, perception, logic, and motion control.
 
 ## Quick Links
 
@@ -38,7 +38,7 @@ src/
 | Layer | Technology |
 |-------|------------|
 | OS | Ubuntu 22.04 (Jammy) |
-| Middleware | ROS 2 Jazzy |
+| Middleware | ROS 2 humble |
 | Language | Python 3.10+ |
 | Vision | OpenCV 4.x |
 | Chess Engine | python-chess + Stockfish |

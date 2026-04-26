@@ -9,8 +9,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "Sourcing ROS 2 Jazzy underlay..."
-source /opt/ros/jazzy/setup.bash
+echo "Sourcing ROS 2 humble underlay..."
+source /opt/ros/humble/setup.bash
 
 if [ -f install/setup.bash ]; then
     echo "Sourcing workspace overlay..."

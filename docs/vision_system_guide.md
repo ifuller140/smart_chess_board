@@ -10,7 +10,7 @@ The main entry point for the perception sub-system is `perception_launch.py`. It
 
 ```bash
 cd ~/dev/smart_chess_board
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 source install/setup.bash
 
 # Run default stack (V4L2 by default)
@@ -35,7 +35,7 @@ To run the vision tests, utilize the test runner with the respective alias:
 
 ```bash
 cd ~/dev/smart_chess_board
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 
 # General vision test
 python3 -m chess_hw_interface.testing.test_runner --test vision_<alias>
