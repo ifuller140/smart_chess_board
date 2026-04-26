@@ -3,7 +3,6 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point
-from cv_bridge import CvBridge
 import cv2
 import numpy as np
 from chess_interfaces.msg import BoardState
@@ -11,8 +10,6 @@ from chess_interfaces.msg import BoardState
 class BoardDetectorNode(Node):
     def __init__(self):
         super().__init__('board_detector_node')
-        
-        self.bridge = CvBridge()
         
         # Subscribers
         self.image_sub = self.create_subscription(
@@ -29,9 +26,10 @@ class BoardDetectorNode(Node):
 
     def image_callback(self, msg):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            # Replaces imgmsg_to_cv2(msg, "bgr8")
+            cv_image = np.array(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3))
         except Exception as e:
-            self.get_logger().error(f"CV Bridge error: {e}")
+            self.get_logger().error(f"Image decode error: {e}")
             return
 
         # 1. Preprocessing
@@ -84,7 +82,14 @@ class BoardDetectorNode(Node):
             self.geometry_pub.publish(board_msg)
             
         # Publish Debug Image
-        debug_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
+        debug_msg = Image()
+        debug_msg.header = msg.header
+        debug_msg.height = cv_image.shape[0]
+        debug_msg.width = cv_image.shape[1]
+        debug_msg.encoding = 'bgr8'
+        debug_msg.is_bigendian = 0
+        debug_msg.step = cv_image.shape[1] * 3
+        debug_msg.data = cv_image.tobytes()
         self.debug_pub.publish(debug_msg)
 
 def main(args=None):

@@ -38,7 +38,6 @@ import chess
 import cv2
 import numpy as np
 import rclpy
-from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image
@@ -124,7 +123,6 @@ class VisionDetailNode(Node):
 
     def __init__(self):
         super().__init__('vision_detail_test_node')
-        self._bridge = CvBridge()
         self._lock   = threading.Lock()
 
         # Latest data
@@ -160,10 +158,10 @@ class VisionDetailNode(Node):
     def _on_raw(self, msg: Image):
         with self._lock:
             try:
-                self.latest_raw = self._bridge.imgmsg_to_cv2(msg, 'bgr8')
+                self.latest_raw = np.array(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3))
                 self.raw_received = True
             except Exception as e:
-                self.get_logger().error(f'CV bridge: {e}')
+                self.get_logger().error(f'Image decode error: {e}')
 
     def _on_geometry(self, msg: BoardState):
         if len(msg.corners) == 4:
@@ -179,23 +177,37 @@ class VisionDetailNode(Node):
             self.board_received = True
 
     def publish_debug(self, channel: str, image: np.ndarray):
-        msg = self._bridge.cv2_to_imgmsg(image, 'bgr8')
+        msg = Image()
         msg.header.stamp = self.get_clock().now().to_msg()
+        msg.height = image.shape[0]
+        msg.width = image.shape[1]
+        msg.encoding = 'bgr8'
+        msg.is_bigendian = 0
+        msg.step = image.shape[1] * 3
+        msg.data = image.tobytes()
         self._pubs[channel].publish(msg)
 
     def capture(self) -> bool:
         if not self._cap_client.wait_for_service(timeout_sec=4.0):
             return False
         future = self._cap_client.call_async(Trigger.Request())
-        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-        return bool(future.result() and future.result().success)
+        deadline = time.time() + 5.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.1)
+        if future.done() and future.result():
+            return bool(future.result().success)
+        return False
 
     def capture_reference(self) -> bool:
         if not self._ref_client.wait_for_service(timeout_sec=4.0):
             return False
         future = self._ref_client.call_async(Trigger.Request())
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        return bool(future.result() and future.result().success)
+        deadline = time.time() + 10.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.1)
+        if future.done() and future.result():
+            return bool(future.result().success)
+        return False
 
     def get_snapshot(self):
         """Return a thread-safe snapshot of all latest data."""

@@ -29,7 +29,6 @@ from typing import Optional
 import cv2
 import numpy as np
 import rclpy
-from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
@@ -66,9 +65,6 @@ class CameraNode(Node):
         self._camera_matrix: Optional[np.ndarray] = None
         self._dist_coeffs:   Optional[np.ndarray] = None
         self._load_calibration(self._cal_file)
-
-        # ── Bridge ─────────────────────────────────────────────────────────
-        self._bridge = CvBridge()
 
         # ── Camera backend ─────────────────────────────────────────────────
         self._picam: Optional['Picamera2'] = None
@@ -198,9 +194,15 @@ class CameraNode(Node):
     def _publish_frame(self, frame: np.ndarray):
         """Apply undistortion and publish to /camera/image_raw."""
         corrected = self._undistort(frame)
-        msg = self._bridge.cv2_to_imgmsg(corrected, encoding='bgr8')
+        msg = Image()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'camera_frame'
+        msg.height = corrected.shape[0]
+        msg.width = corrected.shape[1]
+        msg.encoding = 'bgr8'
+        msg.is_bigendian = 0
+        msg.step = corrected.shape[1] * 3
+        msg.data = corrected.tobytes()
         self._image_pub.publish(msg)
 
     # ─────────────────────────────────────────────────────────────────────

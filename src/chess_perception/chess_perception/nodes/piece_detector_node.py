@@ -41,7 +41,6 @@ import chess
 import cv2
 import numpy as np
 import rclpy
-from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -81,7 +80,6 @@ class PieceDetectorNode(Node):
         self._warp_size       = self.get_parameter('warp_size').value
 
         # ── State ────────────────────────────────────────────────────────
-        self._bridge = CvBridge()
         self._latest_image:     Optional[np.ndarray] = None
         self._board_corners:    Optional[np.ndarray] = None
         self._reference_warped: Optional[np.ndarray] = None  # Empty-board baseline
@@ -122,9 +120,9 @@ class PieceDetectorNode(Node):
     def _on_image(self, msg: Image):
         """Store latest raw frame and process if corners are available."""
         try:
-            frame = self._bridge.imgmsg_to_cv2(msg, 'bgr8')
+            frame = np.array(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3))
         except Exception as e:
-            self.get_logger().error(f'CV bridge error: {e}')
+            self.get_logger().error(f'Image decode error: {e}')
             return
 
         with self._lock:
@@ -218,7 +216,16 @@ class PieceDetectorNode(Node):
 
         # 5. Publish debug image
         debug = self._draw_debug(warped, occupancy, colors)
-        self._debug_pub.publish(self._bridge.cv2_to_imgmsg(debug, 'bgr8'))
+        debug_msg = Image()
+        debug_msg.header.stamp = self.get_clock().now().to_msg()
+        # use the same frame_id as however it's configured, or leave empty
+        debug_msg.height = debug.shape[0]
+        debug_msg.width = debug.shape[1]
+        debug_msg.encoding = 'bgr8'
+        debug_msg.is_bigendian = 0
+        debug_msg.step = debug.shape[1] * 3
+        debug_msg.data = debug.tobytes()
+        self._debug_pub.publish(debug_msg)
 
     # ─────────────────────────────────────────────────────────────────────
     # Perspective Warp

@@ -78,15 +78,23 @@ class VisionTestNode(Node):
         if not self._capture_client.wait_for_service(timeout_sec=5.0):
             return False
         future = self._capture_client.call_async(Trigger.Request())
-        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-        return bool(future.result() and future.result().success)
+        deadline = time.time() + 5.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.1)
+        if future.done() and future.result():
+            return bool(future.result().success)
+        return False
 
     def call_capture_reference(self) -> bool:
         if not self._ref_client.wait_for_service(timeout_sec=5.0):
             return False
         future = self._ref_client.call_async(Trigger.Request())
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        return bool(future.result() and future.result().success)
+        deadline = time.time() + 10.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.1)
+        if future.done() and future.result():
+            return bool(future.result().success)
+        return False
 
 
 class VisionPipelineTest(HardwareTest):
@@ -115,8 +123,11 @@ class VisionPipelineTest(HardwareTest):
             if not rclpy.ok():
                 rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
             self._node = VisionTestNode()
+            from rclpy.executors import MultiThreadedExecutor
+            self._executor = MultiThreadedExecutor()
+            self._executor.add_node(self._node)
             self._spin_thread = threading.Thread(
-                target=self._spin, daemon=True)
+                target=self._executor.spin, daemon=True)
             self._spin_thread.start()
             time.sleep(1.0)
             return True
@@ -124,15 +135,15 @@ class VisionPipelineTest(HardwareTest):
             print(f'[ERROR] Setup failed: {e}')
             return False
 
-    def _spin(self):
-        try:
-            rclpy.spin(self._node)
-        except Exception:
-            pass
-
     def teardown(self):
+        if hasattr(self, '_executor') and self._executor:
+            try:
+                self._executor.shutdown()
+            except Exception:
+                pass
         if self._node:
             try:
+                # remove from executor before destroying
                 self._node.destroy_node()
             except Exception:
                 pass
