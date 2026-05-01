@@ -57,6 +57,7 @@ _state = {
     "error":         "",
     "raw_frame":     None,   # latest BGR ndarray from camera
     "corners":       None,   # 4x2 float32 or None
+    "cam_info":      "–",    # "WxH encoding" from last received image msg
 }
 
 # All tunable detection parameters with defaults
@@ -505,14 +506,61 @@ class FenNode(Node):
 
     def _on_img(self, msg):
         try:
-            frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                (msg.height, msg.width, 3))
-            if msg.encoding == "rgb8":
+            enc  = msg.encoding.lower()
+            h, w = msg.height, msg.width
+            step = msg.step  # actual bytes per row (may include padding)
+            data = np.frombuffer(msg.data, dtype=np.uint8)
+
+            if enc in ('bgr8', 'bgr888'):
+                frame = data.reshape((h, step))[:, :w * 3].reshape(h, w, 3)
+
+            elif enc in ('rgb8', 'rgb888'):
+                frame = data.reshape((h, step))[:, :w * 3].reshape(h, w, 3)
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+            elif enc in ('yuv422', 'yuyv', 'yuyv422'):
+                # YUYV interleaved: 2 bytes per pixel, 4 bytes per 2 pixels
+                yuyv = data.reshape((h, step))[:, :w * 2].reshape(h, w, 2)
+                frame = cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUYV)
+
+            elif enc in ('uyvy', 'uyvy422'):
+                uyvy = data.reshape((h, step))[:, :w * 2].reshape(h, w, 2)
+                frame = cv2.cvtColor(uyvy, cv2.COLOR_YUV2BGR_UYVY)
+
+            elif enc in ('mono8', '8uc1'):
+                mono = data.reshape((h, step))[:, :w].reshape(h, w)
+                frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
+
+            elif enc in ('16uc1', 'mono16'):
+                d16 = np.frombuffer(msg.data, dtype=np.uint16).reshape((h, step // 2))[:, :w]
+                mono = (d16 >> 8).astype(np.uint8)
+                frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
+
+            else:
+                # Last-ditch: try as 3-channel and let OpenCV figure it out
+                bpp = len(msg.data) // (h * w) if h * w > 0 else 3
+                if bpp == 3:
+                    frame = data.reshape((h, w, 3)).copy()
+                elif bpp == 4:
+                    frame = cv2.cvtColor(
+                        data.reshape((h, w, 4)), cv2.COLOR_BGRA2BGR)
+                else:
+                    raise ValueError(f"unhandled encoding '{msg.encoding}' "
+                                     f"bpp={bpp}")
+
             with _lock:
-                _state["raw_frame"] = frame.copy()
-        except Exception:
-            pass
+                _state["raw_frame"] = frame
+                # Record what we received so the UI can display it
+                _state["cam_info"] = f"{w}×{h} {msg.encoding}"
+                _state["error"] = ""
+
+        except Exception as e:
+            with _lock:
+                _state["error"] = (
+                    f"Image decode failed: {e} | "
+                    f"enc={msg.encoding} {msg.width}×{msg.height} "
+                    f"step={msg.step} data={len(msg.data)}b"
+                )
 
 
 def _ros_thread_fn(node):
@@ -622,6 +670,7 @@ h1{color:#58a6ff;font-size:1.05em;padding:10px 16px;border-bottom:1px solid #212
       <h2>Status</h2>
       <div class="card-body">
         <div class="stat-row"><span class="lbl">Feed</span><span class="val" id="conn-stat">–</span></div>
+        <div class="stat-row"><span class="lbl">Camera res</span><span class="val" id="cam-info">–</span></div>
         <div class="stat-row"><span class="lbl">Frames processed</span><span class="val" id="fc">0</span></div>
         <div class="stat-row"><span class="lbl">FEN age</span><span class="val"><span id="fen-age">–</span>s</span></div>
         <div class="stat-row"><span class="lbl">Error</span><span class="val err" id="err-msg" style="font-size:.66em;word-break:break-all">–</span></div>
@@ -851,6 +900,7 @@ function pollFen(){
     else if(age<30){dot.className='';cs.textContent='Stale';cs.className='val warn';}
     else{dot.className='dead';cs.textContent='No data';cs.className='val err';}
     document.getElementById('err-msg').textContent=d.error||'–';
+    if(d.cam_info)document.getElementById('cam-info').textContent=d.cam_info;
     showDiff(refFen,d.fen);
   }).catch(function(){document.getElementById('status-dot').className='dead';});
 }
@@ -877,6 +927,7 @@ def api_fen():
             "frame_count":  _state["frame_count"],
             "last_updated": _state["last_updated"],
             "error":        _state["error"],
+            "cam_info":     _state.get("cam_info", "–"),
         })
 
 
