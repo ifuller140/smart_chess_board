@@ -558,8 +558,12 @@ class PieceDetectorNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = PieceDetectorNode()
+    executor = rclpy.executors.SingleThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            # timeout_sec>0 avoids rclpy's default busy-loop spin behavior
+            executor.spin_once(timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:

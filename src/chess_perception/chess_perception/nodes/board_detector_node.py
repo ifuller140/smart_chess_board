@@ -131,8 +131,12 @@ class BoardDetectorNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = BoardDetectorNode()
+    executor = rclpy.executors.SingleThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            # timeout_sec>0 makes the executor sleep if idle instead of busy-looping
+            executor.spin_once(timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:
