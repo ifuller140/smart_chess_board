@@ -139,11 +139,10 @@ def main(args=None):
     executor.add_node(node)
     try:
         while rclpy.ok():
-            # spin_once(timeout_sec=0.1) does NOT reliably sleep on CycloneDDS/arm.
-            # Use timeout_sec=0 + explicit sleep: process any ready callback then
-            # sleep 5ms. Detection timer at 5Hz is handled within 5ms of being due.
-            executor.spin_once(timeout_sec=0)
-            time.sleep(0.02)  # 20ms: ~50 checks/sec, callbacks caught within 20ms of due
+            # timeout_sec=None blocks until the next callback is ready (subscription
+            # or timer fires). This eliminates sleep overhead entirely. On CycloneDDS/
+            # ARM, this uses epoll internally and gives ~0% CPU when idle.
+            executor.spin_once(timeout_sec=None)
     except KeyboardInterrupt:
         pass
     finally:

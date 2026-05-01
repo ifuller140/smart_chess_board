@@ -563,8 +563,7 @@ def main(args=None):
     executor.add_node(node)
     try:
         while rclpy.ok():
-            executor.spin_once(timeout_sec=0)
-            time.sleep(0.02)  # 20ms idle sleep; 2Hz timer caught within 20ms
+            executor.spin_once(timeout_sec=None)
     except KeyboardInterrupt:
         pass
     finally:
