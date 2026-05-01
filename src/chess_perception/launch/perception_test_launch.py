@@ -87,8 +87,8 @@ def generate_launch_description():
             executable='camera_node',
             name='camera_node',
             parameters=[{
-                'width':  1280,
-                'height': 720,
+                'width':  640,
+                'height': 480,
                 'format': 'BGR888',
             }],
             remappings=[

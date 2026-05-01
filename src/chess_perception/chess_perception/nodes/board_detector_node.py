@@ -33,8 +33,8 @@ class BoardDetectorNode(Node):
     def __init__(self):
         super().__init__('board_detector_node')
 
-        self.declare_parameter('detection_scale', 0.25)
-        self.declare_parameter('detection_interval_ms', 200)
+        self.declare_parameter('detection_scale', 0.5)   # 320x240 at 640x480 input
+        self.declare_parameter('detection_interval_ms', 150)  # ~6fps max detection
         self._det_scale    = float(self.get_parameter('detection_scale').value)
         self._det_interval = self.get_parameter('detection_interval_ms').value / 1000.0
 

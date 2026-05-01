@@ -37,10 +37,10 @@ def generate_launch_description():
             'calibration_file', default_value='',
             description='Path to calibration.yaml (only used by chess_perception camera_node)'),
         DeclareLaunchArgument(
-            'width', default_value='1280',
+            'width', default_value='640',
             description='Camera capture width in pixels'),
         DeclareLaunchArgument(
-            'height', default_value='720',
+            'height', default_value='480',
             description='Camera capture height in pixels'),
         DeclareLaunchArgument(
             'fps', default_value='5.0',
