@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from geometry_msgs.msg import Point
 
 from chess_interfaces.msg import BoardState
@@ -40,11 +40,13 @@ class BoardDetectorNode(Node):
         self._detector     = BoardDetector()
         self._last_corners = None
 
-        # Store latest raw message — no decode until timer fires
+        # Store latest compressed message — JPEG is ~30x smaller than raw,
+        # avoiding 11MB/s DDS deserialization overhead per subscriber.
         self._latest_msg = None
 
         self.image_sub = self.create_subscription(
-            Image, '/camera/image_raw', self._on_image, 10)
+            CompressedImage, '/camera/image_raw/compressed',
+            self._on_image, 10)
 
         self.debug_pub = self.create_publisher(
             Image, '/perception/board_debug', 10)
@@ -75,10 +77,13 @@ class BoardDetectorNode(Node):
         if msg is None:
             return
 
-        # Decode frame using frombuffer (no-copy view, fast)
+        # Decode JPEG — CompressedImage.data is already JPEG bytes
         try:
-            cv_image = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(
-                (msg.height, msg.width, 3)).copy()
+            buf = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+            cv_image = cv2.imdecode(buf, cv2.IMREAD_COLOR)  # Returns BGR
+            if cv_image is None:
+                self.get_logger().error('JPEG decode returned None')
+                return
         except Exception as e:
             self.get_logger().error(f'Image decode error: {e}')
             return

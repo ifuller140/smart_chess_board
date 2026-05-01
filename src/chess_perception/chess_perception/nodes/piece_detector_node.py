@@ -42,7 +42,7 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -95,9 +95,10 @@ class PieceDetectorNode(Node):
         self._auto_ref_done = False
 
         # ── Subscribers ─────────────────────────────────────────────────
-        # Store raw message (no decode on every frame — timer decodes at 3fps)
+        # Subscribe to JPEG compressed topic — ~30x less DDS overhead than raw
         self.create_subscription(
-            Image, '/camera/image_raw', self._on_image_raw, 10)
+            CompressedImage, '/camera/image_raw/compressed',
+            self._on_image_raw, 10)
         self.create_subscription(
             BoardState, '/perception/board_geometry', self._on_geometry, 10)
         self.create_subscription(
@@ -137,13 +138,16 @@ class PieceDetectorNode(Node):
         self._latest_msg = msg
 
     def _detect_tick(self):
-        """Timer callback: decode latest frame and run piece detection."""
+        """Timer callback: decode latest JPEG frame and run piece detection."""
         msg = self._latest_msg
         if msg is None:
             return
         try:
-            frame = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(
-                (msg.height, msg.width, 3)).copy()
+            buf   = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+            frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)  # Returns BGR
+            if frame is None:
+                self.get_logger().error('JPEG decode returned None')
+                return
         except Exception as e:
             self.get_logger().error(f'Image decode error: {e}')
             return

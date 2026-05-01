@@ -71,8 +71,9 @@ def generate_launch_description():
                 'format': 'BGR888',
             }],
             remappings=[
-                ('/camera_node/image_raw',   '/camera/image_raw'),
-                ('/camera_node/camera_info', '/camera/camera_info'),
+                ('/camera_node/image_raw',            '/camera/image_raw'),
+                ('/camera_node/image_raw/compressed', '/camera/image_raw/compressed'),
+                ('/camera_node/camera_info',          '/camera/camera_info'),
             ],
             condition=IfCondition(use_camera_ros),
             output='screen',
