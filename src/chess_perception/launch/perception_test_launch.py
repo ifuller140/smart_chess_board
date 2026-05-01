@@ -117,10 +117,30 @@ def generate_launch_description():
             output='screen',
         ),
 
+        # Throttle compressed images from ~28fps to 5fps before detector nodes.
+        # This drastically reduces DDS background thread CPU load on Pi 4.
+        # Requires: sudo apt install ros-humble-topic-tools
+        Node(
+            package='topic_tools',
+            executable='throttle',
+            name='camera_throttle',
+            arguments=[
+                'messages',
+                '/camera/image_raw/compressed',
+                '5.0',
+                '/camera/image_slow/compressed',
+            ],
+            condition=IfCondition(use_camera_ros),
+            output='screen',
+        ),
+
         Node(
             package='chess_perception',
             executable='board_detector_node',
             name='board_detector_node',
+            remappings=[
+                ('/camera/image_raw/compressed', '/camera/image_slow/compressed'),
+            ],
             output='screen',
         ),
 
@@ -128,6 +148,9 @@ def generate_launch_description():
             package='chess_perception',
             executable='piece_detector_node',
             name='piece_detector_node',
+            remappings=[
+                ('/camera/image_raw/compressed', '/camera/image_slow/compressed'),
+            ],
             parameters=[{
                 'occupancy_diff_threshold': occ_thresh,
                 'white_piece_brightness':   white_thresh,
