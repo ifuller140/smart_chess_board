@@ -42,11 +42,13 @@ _lock = threading.Lock()
 
 # Corners: [TL, TR, BR, BL] in pixel coords of the raw camera frame.
 # Default spread assumes ~640×480 frame with board roughly filling it.
+# Corners stored as normalized fractions [0..1] of frame width/height.
+# [TL, TR, BR, BL]. Converted to pixels in _corners_to_px().
 _DEFAULT_CORNERS = [
-    [80.0,  60.0],   # TL
-    [560.0, 60.0],   # TR
-    [560.0, 420.0],  # BR
-    [80.0,  420.0],  # BL
+    [0.10, 0.10],   # TL
+    [0.90, 0.10],   # TR
+    [0.90, 0.90],   # BR
+    [0.10, 0.90],   # BL
 ]
 
 _state = {
@@ -56,7 +58,7 @@ _state = {
     "error":        "",
     "raw_frame":    None,       # latest BGR ndarray
     "cam_info":     "–",
-    # 4-point corners [[x,y]×4] in raw-frame pixels; user sets via UI
+    # 4-point corners [[fx,fy]×4] as normalized fractions [0..1] of frame dims
     "corners":      [list(c) for c in _DEFAULT_CORNERS],
     # Per-square piece map: 64-elem list of '' | 'W' | 'B'
     "pieces64":     [""] * 64,
@@ -129,9 +131,15 @@ def _undistort_frame(frame: np.ndarray, p: dict) -> np.ndarray:
 
 
 # ─── Perspective warp ─────────────────────────────────────────────────────────
-def _get_warp_matrix(corners, warp_size):
-    """Return M (raw→warp) and M_inv (warp→raw) from 4 corner points."""
-    src = np.float32(corners)          # [TL, TR, BR, BL]
+def _corners_to_px(corners_norm, frame):
+    """Convert normalized [0..1] corner fractions to pixel coords for this frame."""
+    h, w = frame.shape[:2]
+    return [[c[0] * w, c[1] * h] for c in corners_norm]
+
+
+def _get_warp_matrix(corners_px, warp_size):
+    """Return M (raw→warp) and M_inv (warp→raw) from 4 pixel corner points."""
+    src = np.float32(corners_px)       # [TL, TR, BR, BL] in frame pixels
     sz = warp_size - 1
     dst = np.float32([[0, 0], [sz, 0], [sz, sz], [0, sz]])
     M     = cv2.getPerspectiveTransform(src, dst)
@@ -139,10 +147,11 @@ def _get_warp_matrix(corners, warp_size):
     return M, M_inv
 
 
-def _warp_frame(frame, corners, warp_size):
-    M, M_inv = _get_warp_matrix(corners, warp_size)
+def _warp_frame(frame, corners_norm, warp_size):
+    corners_px = _corners_to_px(corners_norm, frame)
+    M, M_inv = _get_warp_matrix(corners_px, warp_size)
     warped = cv2.warpPerspective(frame, M, (warp_size, warp_size))
-    return warped, M, M_inv
+    return warped, M, M_inv, corners_px
 
 
 # ─── Piece blob detection ─────────────────────────────────────────────────────
@@ -394,12 +403,13 @@ _proc_lock = threading.Lock()
 
 def _process_frame(frame, corners, p):
     try:
-        warped, M, M_inv = _warp_frame(frame, corners, p["warp_size"])
+        warped, M, M_inv, corners_px = _warp_frame(frame, corners, p["warp_size"])
         pieces64, white_mask, black_mask = _detect_pieces(warped, p)
         fen = _build_fen(pieces64)
 
-        raw_img  = _render_raw(frame, corners, p, pieces64, M_inv)
+        raw_img  = _render_raw(frame, corners_px, p, pieces64, M_inv)
         warp_img = _render_warp(warped, p, pieces64, white_mask, black_mask)
+
 
         with _lock:
             _state["pieces64"]     = pieces64
@@ -599,9 +609,12 @@ def api_corners_post():
     corners = data.get("corners")
     if not corners or len(corners) != 4:
         return jsonify({"ok": False, "msg": "Need 4 corners"}), 400
-    # Validate each is [x, y]
+    # Validate each is [fx, fy] normalized fraction
     try:
         corners = [[float(c[0]), float(c[1])] for c in corners]
+        for fx, fy in corners:
+            if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
+                return jsonify({"ok": False, "msg": "Fractions must be 0..1"}), 400
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 400
     with _lock:
@@ -755,31 +768,27 @@ var chessboard = Chessboard('board', {
 });
 
 // ── Corner management ───────────────────────────────────────────────────────
-// corners[i] = {x, y} in IMAGE pixel space (before any browser scaling)
-var corners = [{x:80,y:60},{x:560,y:60},{x:560,y:420},{x:80,y:420}];
+// corners[i] = {fx, fy} as NORMALIZED FRACTIONS [0..1] of image dimensions.
+// This is independent of JPEG scale or frame resolution.
+// The server converts fractions → pixels when computing the warp transform.
+var corners = [{fx:0.10,fy:0.10},{fx:0.90,fy:0.10},{fx:0.90,fy:0.90},{fx:0.10,fy:0.90}];
 var CORNER_LABELS = ['TL','TR','BR','BL'];
 var CORNER_COLORS = ['#ff5050','#50ff50','#5050ff','#ffff50'];
 var handles = [];
-var dragging = null;  // {index, startMouseX, startMouseY, startCornerX, startCornerY}
+var dragging = null; // {index, startMouseX, startMouseY, startFx, startFy}
 
-function imgToDisplay(x, y) {
-  // Convert image-pixel coords → display-pixel coords relative to cam-img element
+function positionHandles() {
   var img = document.getElementById('cam-img');
-  var scaleX = img.clientWidth  / (img.naturalWidth  || img.clientWidth);
-  var scaleY = img.clientHeight / (img.naturalHeight || img.clientHeight);
-  return {x: x * scaleX, y: y * scaleY};
-}
-
-function displayToImg(dx, dy) {
-  var img = document.getElementById('cam-img');
-  var scaleX = img.clientWidth  / (img.naturalWidth  || img.clientWidth);
-  var scaleY = img.clientHeight / (img.naturalHeight || img.clientHeight);
-  return {x: dx / scaleX, y: dy / scaleY};
+  var W = img.clientWidth, H = img.clientHeight;
+  corners.forEach(function(c, i) {
+    // fraction * display size = handle position in pixels within the wrapper
+    handles[i].style.left = (c.fx * W) + 'px';
+    handles[i].style.top  = (c.fy * H) + 'px';
+  });
 }
 
 function buildHandles() {
   var wrap = document.getElementById('cam-canvas-wrap');
-  // Remove old handles
   handles.forEach(function(h){ if(h.parentNode) h.parentNode.removeChild(h); });
   handles = [];
   corners.forEach(function(c, i) {
@@ -790,88 +799,53 @@ function buildHandles() {
     el.style.boxShadow = '0 0 6px rgba(0,0,0,0.8)';
     wrap.appendChild(el);
     handles.push(el);
-
     el.addEventListener('mousedown', function(e) {
       e.preventDefault();
       dragging = {index: i, startMouseX: e.clientX, startMouseY: e.clientY,
-                  startCornerX: corners[i].x, startCornerY: corners[i].y};
+                  startFx: corners[i].fx, startFy: corners[i].fy};
     });
+    el.addEventListener('touchstart', function(e) {
+      e.preventDefault();
+      var t = e.touches[0];
+      dragging = {index: i, startMouseX: t.clientX, startMouseY: t.clientY,
+                  startFx: corners[i].fx, startFy: corners[i].fy};
+    }, {passive: false});
   });
   positionHandles();
 }
 
-function positionHandles() {
-  var img = document.getElementById('cam-img');
-  var rect = img.getBoundingClientRect();
-  var wrapRect = document.getElementById('cam-canvas-wrap').getBoundingClientRect();
-  corners.forEach(function(c, i) {
-    var d = imgToDisplay(c.x, c.y);
-    handles[i].style.left = d.x + 'px';
-    handles[i].style.top  = d.y + 'px';
-  });
-}
-
-document.addEventListener('mousemove', function(e) {
+function moveDragging(clientX, clientY) {
   if (!dragging) return;
   var img = document.getElementById('cam-img');
-  var rect = img.getBoundingClientRect();
-  var dx = e.clientX - dragging.startMouseX;
-  var dy = e.clientY - dragging.startMouseY;
-  // Convert delta in display px → image px
-  var scaleX = img.clientWidth  / (img.naturalWidth  || img.clientWidth);
-  var scaleY = img.clientHeight / (img.naturalHeight || img.clientHeight);
-  corners[dragging.index].x = dragging.startCornerX + dx / scaleX;
-  corners[dragging.index].y = dragging.startCornerY + dy / scaleY;
+  var W = img.clientWidth, H = img.clientHeight;
+  var dx = clientX - dragging.startMouseX;
+  var dy = clientY - dragging.startMouseY;
+  // Convert pixel delta → fraction delta
+  corners[dragging.index].fx = Math.min(1, Math.max(0, dragging.startFx + dx / W));
+  corners[dragging.index].fy = Math.min(1, Math.max(0, dragging.startFy + dy / H));
   positionHandles();
   updateCornerInfo();
-});
+}
 
-document.addEventListener('mouseup', function(e) {
-  if (!dragging) return;
-  dragging = null;
-  sendCorners();
-});
-
-// Touch support
+document.addEventListener('mousemove', function(e) { moveDragging(e.clientX, e.clientY); });
+document.addEventListener('mouseup',   function(e) { if (dragging) { dragging = null; sendCorners(); } });
 document.addEventListener('touchmove', function(e) {
   if (!dragging) return;
   e.preventDefault();
-  var t = e.touches[0];
-  var img = document.getElementById('cam-img');
-  var scaleX = img.clientWidth  / (img.naturalWidth  || img.clientWidth);
-  var scaleY = img.clientHeight / (img.naturalHeight || img.clientHeight);
-  var dx = t.clientX - dragging.startMouseX;
-  var dy = t.clientY - dragging.startMouseY;
-  corners[dragging.index].x = dragging.startCornerX + dx / scaleX;
-  corners[dragging.index].y = dragging.startCornerY + dy / scaleY;
-  positionHandles();
-  updateCornerInfo();
+  moveDragging(e.touches[0].clientX, e.touches[0].clientY);
 }, {passive: false});
-
-document.addEventListener('touchend', function() {
-  if (!dragging) return;
-  dragging = null;
-  sendCorners();
-});
-
-handles.forEach(function(h, i) {
-  h.addEventListener('touchstart', function(e) {
-    e.preventDefault();
-    var t = e.touches[0];
-    dragging = {index: i, startMouseX: t.clientX, startMouseY: t.clientY,
-                startCornerX: corners[i].x, startCornerY: corners[i].y};
-  }, {passive: false});
-});
+document.addEventListener('touchend',  function() { if (dragging) { dragging = null; sendCorners(); } });
 
 function updateCornerInfo() {
   var txt = corners.map(function(c, i){
-    return CORNER_LABELS[i]+'('+Math.round(c.x)+','+Math.round(c.y)+')';
+    return CORNER_LABELS[i]+'('+c.fx.toFixed(3)+','+c.fy.toFixed(3)+')';
   }).join('  ');
-  document.getElementById('corner-coords').textContent = 'Corners: ' + txt;
+  document.getElementById('corner-coords').textContent = 'Corners (normalized): ' + txt;
 }
 
 function sendCorners() {
-  var payload = corners.map(function(c){ return [c.x, c.y]; });
+  // Send normalized fractions; server converts to pixels using live frame dims
+  var payload = corners.map(function(c){ return [c.fx, c.fy]; });
   fetch('/api/corners', {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({corners: payload})});
@@ -880,7 +854,7 @@ function sendCorners() {
 function saveCorners() { sendCorners(); }
 
 function resetCorners() {
-  corners = [{x:80,y:60},{x:560,y:60},{x:560,y:420},{x:80,y:420}];
+  corners = [{fx:0.10,fy:0.10},{fx:0.90,fy:0.10},{fx:0.90,fy:0.90},{fx:0.10,fy:0.90}];
   positionHandles();
   updateCornerInfo();
   sendCorners();
@@ -889,14 +863,14 @@ function resetCorners() {
 function loadCornersFromServer() {
   fetch('/api/corners').then(function(r){ return r.json(); }).then(function(d) {
     if (d.corners && d.corners.length === 4) {
-      corners = d.corners.map(function(c){ return {x:c[0], y:c[1]}; });
+      corners = d.corners.map(function(c){ return {fx: c[0], fy: c[1]}; });
       positionHandles();
       updateCornerInfo();
     }
   });
 }
 
-// Re-position handles whenever camera img loads (size may change)
+// Re-position handles on every image load and window resize
 document.getElementById('cam-img').addEventListener('load', function() {
   buildHandles();
   positionHandles();
