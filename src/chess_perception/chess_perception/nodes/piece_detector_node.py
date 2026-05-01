@@ -35,6 +35,7 @@ Parameters:
 """
 
 import threading
+import time
 from typing import Optional
 
 import chess
@@ -562,8 +563,8 @@ def main(args=None):
     executor.add_node(node)
     try:
         while rclpy.ok():
-            # timeout_sec>0 avoids rclpy's default busy-loop spin behavior
-            executor.spin_once(timeout_sec=0.1)
+            executor.spin_once(timeout_sec=0)
+            time.sleep(0.005)
     except KeyboardInterrupt:
         pass
     finally:

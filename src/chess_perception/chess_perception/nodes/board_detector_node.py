@@ -15,6 +15,8 @@ Published Topics:
   /perception/board_debug     (sensor_msgs/Image)           — annotated frame
 """
 
+import time
+
 import cv2
 import numpy as np
 import rclpy
@@ -135,8 +137,11 @@ def main(args=None):
     executor.add_node(node)
     try:
         while rclpy.ok():
-            # timeout_sec>0 makes the executor sleep if idle instead of busy-looping
-            executor.spin_once(timeout_sec=0.1)
+            # spin_once(timeout_sec=0.1) does NOT reliably sleep on CycloneDDS/arm.
+            # Use timeout_sec=0 + explicit sleep: process any ready callback then
+            # sleep 5ms. Detection timer at 5Hz is handled within 5ms of being due.
+            executor.spin_once(timeout_sec=0)
+            time.sleep(0.005)
     except KeyboardInterrupt:
         pass
     finally:
