@@ -59,8 +59,8 @@ def generate_launch_description():
         LogInfo(msg='Starting perception stack...'),
 
         # ── Camera backend: ros-humble-camera-ros (preferred on Ubuntu 22.04) ──
-        # Publishes /camera/image_raw as bgr8 at 5fps.
-        # Requires: sudo apt install ros-humble-camera-ros
+        # camera_ros publishes to /camera_node/image_raw — remap to /camera/image_raw
+        # using fully-qualified path since camera_ros doesn't honour relative remaps.
         Node(
             package='camera_ros',
             executable='camera_node',
@@ -71,8 +71,8 @@ def generate_launch_description():
                 'format': 'BGR888',
             }],
             remappings=[
-                ('image_raw',    '/camera/image_raw'),
-                ('camera_info',  '/camera/camera_info'),
+                ('/camera_node/image_raw',   '/camera/image_raw'),
+                ('/camera_node/camera_info', '/camera/camera_info'),
             ],
             condition=IfCondition(use_camera_ros),
             output='screen',

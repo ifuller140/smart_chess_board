@@ -81,6 +81,7 @@ def generate_launch_description():
         LogInfo(msg='[perception_test]   ros2 topic echo /perception/board_state'),
 
         # ── ros-humble-camera-ros backend (default, works on Ubuntu 22.04 Pi) ──
+        # camera_ros publishes /camera_node/image_raw — remap to /camera/image_raw
         Node(
             package='camera_ros',
             executable='camera_node',
@@ -91,8 +92,8 @@ def generate_launch_description():
                 'format': 'BGR888',
             }],
             remappings=[
-                ('image_raw',   '/camera/image_raw'),
-                ('camera_info', '/camera/camera_info'),
+                ('/camera_node/image_raw',   '/camera/image_raw'),
+                ('/camera_node/camera_info', '/camera/camera_info'),
             ],
             condition=IfCondition(use_camera_ros),
             output='screen',
