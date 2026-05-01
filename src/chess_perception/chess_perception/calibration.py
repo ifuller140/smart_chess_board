@@ -29,25 +29,33 @@ class CalibrationResult:
     image_size: Tuple[int, int]
     
     def save(self, filepath: str):
-        """Save calibration to npz file."""
-        np.savez(filepath,
-                 camera_matrix=self.camera_matrix,
-                 dist_coeffs=self.dist_coeffs,
-                 image_size=np.array(self.image_size),
-                 rms_error=np.array([self.rms_error]))
+        """Save calibration to OpenCV YAML file (compatible with cv2.FileStorage)."""
+        fs = cv2.FileStorage(filepath, cv2.FILE_STORAGE_WRITE)
+        fs.write('camera_matrix', self.camera_matrix)
+        fs.write('dist_coeffs', self.dist_coeffs)
+        fs.write('image_size', np.array(list(self.image_size), dtype=np.int32))
+        fs.write('rms_error', float(self.rms_error))
+        fs.release()
         print(f"Calibration saved to: {filepath}")
-    
+
     @classmethod
     def load(cls, filepath: str) -> 'CalibrationResult':
-        """Load calibration from npz file."""
-        data = np.load(filepath)
+        """Load calibration from OpenCV YAML file."""
+        fs = cv2.FileStorage(filepath, cv2.FILE_STORAGE_READ)
+        if not fs.isOpened():
+            raise IOError(f"Cannot open calibration file: {filepath}")
+        camera_matrix = fs.getNode('camera_matrix').mat()
+        dist_coeffs = fs.getNode('dist_coeffs').mat()
+        image_size_mat = fs.getNode('image_size').mat()
+        rms_error = float(fs.getNode('rms_error').real())
+        fs.release()
         return cls(
-            camera_matrix=data['camera_matrix'],
-            dist_coeffs=data['dist_coeffs'],
+            camera_matrix=camera_matrix,
+            dist_coeffs=dist_coeffs,
             rvecs=[],
             tvecs=[],
-            rms_error=float(data['rms_error'][0]),
-            image_size=tuple(data['image_size'])
+            rms_error=rms_error,
+            image_size=tuple(int(x) for x in image_size_mat.flatten())
         )
 
 
@@ -262,8 +270,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Camera Calibration Tool")
     parser.add_argument("--images", "-i", required=True,
                         help="Directory containing calibration images or glob pattern")
-    parser.add_argument("--output", "-o", default="calibration.npz",
-                        help="Output file path (default: calibration.npz)")
+    parser.add_argument("--output", "-o", default="calibration.yaml",
+                        help="Output file path (default: calibration.yaml)")
     parser.add_argument("--pattern", "-p", default="7x7",
                         help="Pattern size as WxH (default: 7x7 for chess board)")
     parser.add_argument("--square-size", "-s", type=float, default=38.1,

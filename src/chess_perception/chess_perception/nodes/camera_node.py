@@ -173,6 +173,11 @@ class CameraNode(Node):
         if self._picam is not None:
             try:
                 frame = self._picam.capture_array('main')
+                # picamera2 returns RGB; convert to BGR for OpenCV downstream (BUG-06)
+                if frame.ndim == 3 and frame.shape[2] == 3:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                elif frame.ndim == 3 and frame.shape[2] == 4:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
                 return frame
             except Exception as e:
                 self.get_logger().error(f'picamera2 capture error: {e}')
@@ -279,8 +284,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         if rclpy.ok():
-            if rclpy.ok():
-                rclpy.shutdown()
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

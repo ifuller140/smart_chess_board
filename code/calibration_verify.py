@@ -9,7 +9,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from calibration import (
+from gantry_calibration import (
     setup, cleanup, load_state, save_state, home_all,
     move_to_square, magnet_engage, magnet_release,
     wait_for_clock, gantry, show_status

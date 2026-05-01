@@ -38,7 +38,7 @@ Examples:
   python3 calibrate_camera.py -i /tmp/chess_camera_test/calibration
 
   # Save to specific location:
-  python3 calibrate_camera.py -i ./images -o ./config/calibration.npz
+  python3 calibrate_camera.py -i ./images -o ./config/calibration.yaml
 
   # Use custom pattern (not chess board):
   python3 calibrate_camera.py -i ./images --pattern 9x6 --square-size 25.0
@@ -47,9 +47,9 @@ Examples:
     
     parser.add_argument("--images", "-i", required=True,
                         help="Directory with calibration images")
-    parser.add_argument("--output", "-o", 
-                        default="chess_perception/config/calibration.npz",
-                        help="Output file path")
+    parser.add_argument("--output", "-o",
+                        default="chess_perception/config/calibration.yaml",
+                        help="Output file path (OpenCV YAML format)")
     parser.add_argument("--pattern", "-p", default="7x7",
                         help="Checkerboard pattern (internal corners). Default: 7x7 for chess board")
     parser.add_argument("--square-size", "-s", type=float, default=38.1,

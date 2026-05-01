@@ -123,26 +123,25 @@ class BoardDetector:
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(blur, 50, 150)
         
-        # Detect lines
-        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=100)
-        
-        if lines is None or len(lines) < 8:
+        # Detect lines — threshold lowered for reliable detection at 5fps
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=70)
+
+        if lines is None or len(lines) < 4:
             return None
-        
-        # Separate horizontal and vertical lines
-        horizontal = []
-        vertical = []
-        
+
+        # Separate lines by orientation.
+        # In Hough space: theta=0 or pi → perpendicular is horizontal → LINE is vertical
+        #                 theta=pi/2   → perpendicular is vertical   → LINE is horizontal
+        horizontal = []  # lines running left-right (theta ≈ pi/2)
+        vertical = []    # lines running up-down    (theta ≈ 0 or pi)
+
         for line in lines:
             rho, theta = line[0]
-            
-            # Horizontal: theta near 0 or pi
             if theta < np.pi / 6 or theta > 5 * np.pi / 6:
                 vertical.append((rho, theta))
-            # Vertical: theta near pi/2
             elif np.pi / 3 < theta < 2 * np.pi / 3:
                 horizontal.append((rho, theta))
-        
+
         if len(horizontal) < 2 or len(vertical) < 2:
             return None
         

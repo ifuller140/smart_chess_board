@@ -61,7 +61,7 @@ class ChessVisionPipeline:
     
     # Default config directories
     CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
-    DEFAULT_CALIBRATION = os.path.join(CONFIG_DIR, "calibration.npz")
+    DEFAULT_CALIBRATION = os.path.join(CONFIG_DIR, "calibration.yaml")
     
     def __init__(self, calibration_file: str = None):
         """

@@ -44,6 +44,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from chess_interfaces.msg import BoardState
 
@@ -74,10 +75,13 @@ class PieceDetectorNode(Node):
         self.declare_parameter('reference_capture_count', 5)
         self.declare_parameter('warp_size', 400)
 
+        self.declare_parameter('auto_capture_reference', True)
+
         self._occ_threshold   = self.get_parameter('occupancy_diff_threshold').value
         self._white_threshold = self.get_parameter('white_piece_brightness').value
         self._ref_count       = self.get_parameter('reference_capture_count').value
         self._warp_size       = self.get_parameter('warp_size').value
+        self._auto_capture    = self.get_parameter('auto_capture_reference').value
 
         # ── State ────────────────────────────────────────────────────────
         self._latest_image:     Optional[np.ndarray] = None
@@ -86,6 +90,7 @@ class PieceDetectorNode(Node):
         self._ref_frames:       list = []     # Accumulate for averaging
         self._authoritative_fen = chess.STARTING_FEN  # From game_manager
         self._lock = threading.Lock()
+        self._auto_ref_done = False
 
         # ── Subscribers ─────────────────────────────────────────────────
         self.create_subscription(
@@ -104,9 +109,12 @@ class PieceDetectorNode(Node):
             String, '/perception/reference_status', 10)
 
         # ── Services for reference capture ───────────────────────────────
-        from std_srvs.srv import Trigger
         self.create_service(Trigger, '/perception/capture_reference',
                             self._srv_capture_reference)
+
+        # Auto-capture empty-board reference at startup (ARCH-03)
+        if self._auto_capture:
+            self._auto_ref_timer = self.create_timer(3.0, self._auto_ref_tick)
 
         self.get_logger().info(
             f'Piece Detector ready (occ_threshold={self._occ_threshold}, '
@@ -141,6 +149,50 @@ class PieceDetectorNode(Node):
         """Receive authoritative game FEN from game_manager_node."""
         with self._lock:
             self._authoritative_fen = msg.data
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Auto Reference Capture (ARCH-03)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _auto_ref_tick(self):
+        """Timer callback: capture reference frame if board appears empty."""
+        if self._auto_ref_done:
+            self._auto_ref_timer.cancel()
+            return
+
+        with self._lock:
+            if self._latest_image is None or self._board_corners is None:
+                return  # Not ready yet
+            frame = self._latest_image.copy()
+            corners = self._board_corners.copy()
+
+        warped = self._warp_board(frame, corners)
+        if warped is None:
+            return
+
+        # Check if board looks empty: count squares with high variance
+        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        sq_px = warped.shape[0] // 8
+        high_var_count = 0
+        for row in range(8):
+            for col in range(8):
+                roi = gray[row * sq_px:(row + 1) * sq_px,
+                           col * sq_px:(col + 1) * sq_px]
+                if float(np.std(roi)) > 25.0:
+                    high_var_count += 1
+
+        if high_var_count > 4:
+            self.get_logger().debug(
+                f'Auto-capture skipped: {high_var_count} squares have high variance')
+            return
+
+        req = Trigger.Request()
+        resp = Trigger.Response()
+        self._srv_capture_reference(req, resp)
+        if resp.success:
+            self._auto_ref_done = True
+            self.get_logger().info('Auto-captured empty board reference frame')
+            self._auto_ref_timer.cancel()
 
     # ─────────────────────────────────────────────────────────────────────
     # Reference Capture Service
@@ -304,9 +356,10 @@ class PieceDetectorNode(Node):
                 # ── Color classification ───────────────────────────────
                 if occupied:
                     roi_mean = float(np.mean(roi_gray))
-                    # A bright piece is white; dark piece is black.
-                    # Compare against board mean scaled by threshold.
-                    is_white = roi_mean > (board_mean * (1.0 + (self._white_threshold - 0.5)))
+                    # white_piece_brightness (0-1) is an absolute brightness fraction:
+                    # 0.65 → pieces with mean > 165/255 are white, below are black
+                    white_level = self._white_threshold * 255.0
+                    is_white = roi_mean > white_level
                     colors.append('W' if is_white else 'B')
                 else:
                     colors.append('')
@@ -493,8 +546,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         if rclpy.ok():
-            if rclpy.ok():
-                rclpy.shutdown()
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
