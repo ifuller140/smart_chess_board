@@ -25,6 +25,9 @@ ros2 launch chess_perception perception_launch.py use_picamera2:=True calibratio
 - **`board_detector_node`**: Reads camera frames and identifies the chessboard's 4 outermost corners using OpenCV primitives to find an inner checkerboard grid. Returns perspective mappings.
 - **`piece_detector_node`**: Subscribes to warped top-down frames and finds chess pieces using simple color differentiation thresholds, publishing a standard FEN string representing the board state.
 
+  ros2 service call /perception/capture_reference std_srvs/srv/Trigger {}                           
+
+
 ## 2. Hardware Testing Suite
 
 The hardware test suite `test_runner.py` provides several test aliases specific to vision verification.

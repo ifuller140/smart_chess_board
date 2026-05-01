@@ -17,10 +17,18 @@ Usage:
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+# How long after launch to wait before the first capture_reference call (seconds).
+# The camera and piece_detector_node need time to fully initialize.
+_CAPTURE_START_DELAY_S = 8.0
+
+# Number of capture_reference calls to make, spaced 2s apart.
+_CAPTURE_COUNT = 5
+_CAPTURE_INTERVAL_S = 3.0
 
 
 def generate_launch_description():
@@ -115,4 +123,35 @@ def generate_launch_description():
         ),
 
         LogInfo(msg='Perception stack ready.'),
+
+        # ── Auto capture_reference ────────────────────────────────────────────
+        # Calls /perception/capture_reference 5 times, starting _CAPTURE_START_DELAY_S
+        # seconds after launch (to allow camera + piece_detector_node to fully init),
+        # then every _CAPTURE_INTERVAL_S seconds.
+        # Each call builds the empty-board reference frame used for occupancy detection.
+        # Multiple calls improve the reference by averaging across slight camera jitter.
+        *[
+            TimerAction(
+                period=_CAPTURE_START_DELAY_S + i * _CAPTURE_INTERVAL_S,
+                actions=[
+                    LogInfo(msg=f'Auto capture_reference ({i + 1}/{_CAPTURE_COUNT})...'),
+                    ExecuteProcess(
+                        cmd=[
+                            'ros2', 'service', 'call',
+                            '/perception/capture_reference',
+                            'std_srvs/srv/Trigger', '{}',
+                        ],
+                        output='screen',
+                    ),
+                ],
+            )
+            for i in range(_CAPTURE_COUNT)
+        ],
+
+        LogInfo(
+            msg=f'Will auto-capture reference {_CAPTURE_COUNT}x '
+                f'starting at {_CAPTURE_START_DELAY_S}s '
+                f'(every {_CAPTURE_INTERVAL_S}s). '
+                f'Make sure the board is EMPTY of pieces during this window.'
+        ),
     ])
