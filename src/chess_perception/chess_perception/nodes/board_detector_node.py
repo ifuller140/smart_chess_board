@@ -3,19 +3,17 @@
 Board Detector Node — detects the chess board in camera frames and
 publishes corner geometry for downstream piece detection.
 
-Detection runs in a background thread so the ROS callback never blocks
-the executor. The latest frame is always available to the detector;
-intermediate frames are dropped when the detector is busy (no queue).
+Architecture: camera subscription stores latest raw message (no decode);
+a 5fps timer picks up the latest frame, decodes it, and runs detection.
+This avoids decoding 12fps frames when detection only needs 5fps.
 
-Detection runs at reduced resolution (detection_scale=0.5 → 640x360 at
-1280x720 input) to keep CPU below 25% on Pi 4.
+Detection runs at reduced resolution (detection_scale=0.5 → 320x240 at
+640x480 input) to keep Pi 4 CPU below 30%.
 
 Published Topics:
   /perception/board_geometry  (chess_interfaces/BoardState) — 4 corners
   /perception/board_debug     (sensor_msgs/Image)           — annotated frame
 """
-
-import threading
 
 import cv2
 import numpy as np
@@ -33,22 +31,17 @@ class BoardDetectorNode(Node):
     def __init__(self):
         super().__init__('board_detector_node')
 
-        self.declare_parameter('detection_scale', 0.5)   # 320x240 at 640x480 input
-        self.declare_parameter('detection_interval_ms', 150)  # ~6fps max detection
-        self._det_scale    = float(self.get_parameter('detection_scale').value)
-        self._det_interval = self.get_parameter('detection_interval_ms').value / 1000.0
+        self.declare_parameter('detection_scale', 0.5)
+        self.declare_parameter('detection_hz', 5.0)
 
-        self._detector      = BoardDetector()
-        self._last_corners  = None
-        self._last_geometry = None
-        self._last_det_time = 0.0  # Monotonic time of last detection run
+        self._det_scale = float(self.get_parameter('detection_scale').value)
+        det_hz          = float(self.get_parameter('detection_hz').value)
 
-        # Thread-safe frame handoff: callback writes, detector thread reads
-        self._pending_frame  = None
-        self._pending_header = None
-        self._frame_lock     = threading.Lock()
-        self._frame_event    = threading.Event()
-        self._shutdown       = threading.Event()
+        self._detector     = BoardDetector()
+        self._last_corners = None
+
+        # Store latest raw message — no decode until timer fires
+        self._latest_msg = None
 
         self.image_sub = self.create_subscription(
             Image, '/camera/image_raw', self._on_image, 10)
@@ -58,108 +51,76 @@ class BoardDetectorNode(Node):
         self.geometry_pub = self.create_publisher(
             BoardState, '/perception/board_geometry', 10)
 
-        # Start background detection thread
-        self._detect_thread = threading.Thread(
-            target=self._detect_loop, daemon=True)
-        self._detect_thread.start()
+        # Timer drives detection at a controlled rate
+        self.create_timer(1.0 / det_hz, self._detect_tick)
 
         self.get_logger().info(
             f'Board Detector Node started '
             f'(detection_scale={self._det_scale:.2f}, '
-            f'min_interval={self._det_interval*1000:.0f}ms, threaded)')
+            f'detection_hz={det_hz:.1f})')
 
     # ─────────────────────────────────────────────────────────────────────
-    # ROS callback — just stores latest frame, never blocks
+    # Subscription — store raw message, do NOT decode (no numpy)
     # ─────────────────────────────────────────────────────────────────────
 
     def _on_image(self, msg: Image):
+        self._latest_msg = msg  # Just store reference; timer decodes
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Timer callback — decode + detect at controlled rate
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _detect_tick(self):
+        msg = self._latest_msg
+        if msg is None:
+            return
+
+        # Decode frame using frombuffer (no-copy view, fast)
         try:
-            frame = np.array(msg.data, dtype=np.uint8).reshape(
-                (msg.height, msg.width, 3))
+            cv_image = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(
+                (msg.height, msg.width, 3)).copy()
         except Exception as e:
             self.get_logger().error(f'Image decode error: {e}')
             return
 
-        with self._frame_lock:
-            self._pending_frame  = frame
-            self._pending_header = msg.header
-        self._frame_event.set()
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Background detection loop
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _detect_loop(self):
-        import time
-        while not self._shutdown.is_set():
-            # Wait for a new frame (timeout 1s to allow shutdown check)
-            if not self._frame_event.wait(timeout=1.0):
-                continue
-            self._frame_event.clear()
-
-            # Rate-limit: skip if too soon since last detection
-            now = time.monotonic()
-            if now - self._last_det_time < self._det_interval:
-                continue
-            self._last_det_time = now
-
-            with self._frame_lock:
-                frame  = self._pending_frame
-                header = self._pending_header
-
-            if frame is None:
-                continue
-
-            # Detect at reduced resolution
-            if self._det_scale < 1.0:
-                small = cv2.resize(frame, None,
-                                   fx=self._det_scale, fy=self._det_scale)
-                geometry = self._detector.detect(small)
-                if geometry is not None:
-                    geometry.corners = geometry.corners / self._det_scale
-            else:
-                geometry = self._detector.detect(frame)
-
+        # Detect at reduced resolution
+        if self._det_scale < 1.0:
+            small    = cv2.resize(cv_image, None,
+                                  fx=self._det_scale, fy=self._det_scale)
+            geometry = self._detector.detect(small)
             if geometry is not None:
-                self._last_corners  = geometry.corners.copy()
-                self._last_geometry = geometry
+                geometry.corners = geometry.corners / self._det_scale
+        else:
+            geometry = self._detector.detect(cv_image)
 
-            # Publish geometry (current or cached)
-            corners = (geometry.corners if geometry is not None
-                       else self._last_corners)
-            if corners is not None:
-                board_msg = BoardState()
-                board_msg.header = header
-                corners_list = []
-                for i in range(4):
-                    p = Point()
-                    p.x = float(corners[i][0])
-                    p.y = float(corners[i][1])
-                    corners_list.append(p)
-                board_msg.corners = corners_list
-                self.geometry_pub.publish(board_msg)
+        if geometry is not None:
+            self._last_corners = geometry.corners.copy()
 
-            # Publish debug image
-            debug_img = self._detector.draw_debug(frame, geometry)
-            debug_msg = Image()
-            debug_msg.header      = header
-            debug_msg.height      = debug_img.shape[0]
-            debug_msg.width       = debug_img.shape[1]
-            debug_msg.encoding    = 'bgr8'
-            debug_msg.is_bigendian = 0
-            debug_msg.step        = debug_img.shape[1] * 3
-            debug_msg.data        = debug_img.tobytes()
-            self.debug_pub.publish(debug_msg)
+        # Publish geometry (current or cached)
+        corners = geometry.corners if geometry is not None else self._last_corners
+        if corners is not None:
+            board_msg = BoardState()
+            board_msg.header = msg.header
+            corners_list = []
+            for i in range(4):
+                p = Point()
+                p.x = float(corners[i][0])
+                p.y = float(corners[i][1])
+                corners_list.append(p)
+            board_msg.corners = corners_list
+            self.geometry_pub.publish(board_msg)
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Cleanup
-    # ─────────────────────────────────────────────────────────────────────
-
-    def destroy_node(self):
-        self._shutdown.set()
-        self._frame_event.set()  # Unblock the detection thread
-        self._detect_thread.join(timeout=3.0)
-        super().destroy_node()
+        # Publish debug image
+        debug_img = self._detector.draw_debug(cv_image, geometry)
+        debug_msg = Image()
+        debug_msg.header      = msg.header
+        debug_msg.height      = debug_img.shape[0]
+        debug_msg.width       = debug_img.shape[1]
+        debug_msg.encoding    = 'bgr8'
+        debug_msg.is_bigendian = 0
+        debug_msg.step        = debug_img.shape[1] * 3
+        debug_msg.data        = debug_img.tobytes()
+        self.debug_pub.publish(debug_msg)
 
 
 def main(args=None):

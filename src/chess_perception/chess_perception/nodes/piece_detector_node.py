@@ -74,27 +74,30 @@ class PieceDetectorNode(Node):
         self.declare_parameter('white_piece_brightness', 0.65)
         self.declare_parameter('reference_capture_count', 5)
         self.declare_parameter('warp_size', 400)
-
         self.declare_parameter('auto_capture_reference', True)
+        self.declare_parameter('detection_hz', 3.0)
 
         self._occ_threshold   = self.get_parameter('occupancy_diff_threshold').value
         self._white_threshold = self.get_parameter('white_piece_brightness').value
         self._ref_count       = self.get_parameter('reference_capture_count').value
         self._warp_size       = self.get_parameter('warp_size').value
         self._auto_capture    = self.get_parameter('auto_capture_reference').value
+        det_hz                = float(self.get_parameter('detection_hz').value)
 
         # ── State ────────────────────────────────────────────────────────
+        self._latest_msg:       Optional[object] = None   # raw Image msg
         self._latest_image:     Optional[np.ndarray] = None
         self._board_corners:    Optional[np.ndarray] = None
-        self._reference_warped: Optional[np.ndarray] = None  # Empty-board baseline
-        self._ref_frames:       list = []     # Accumulate for averaging
-        self._authoritative_fen = chess.STARTING_FEN  # From game_manager
+        self._reference_warped: Optional[np.ndarray] = None
+        self._ref_frames:       list = []
+        self._authoritative_fen = chess.STARTING_FEN
         self._lock = threading.Lock()
         self._auto_ref_done = False
 
         # ── Subscribers ─────────────────────────────────────────────────
+        # Store raw message (no decode on every frame — timer decodes at 3fps)
         self.create_subscription(
-            Image, '/camera/image_raw', self._on_image, 10)
+            Image, '/camera/image_raw', self._on_image_raw, 10)
         self.create_subscription(
             BoardState, '/perception/board_geometry', self._on_geometry, 10)
         self.create_subscription(
@@ -112,23 +115,35 @@ class PieceDetectorNode(Node):
         self.create_service(Trigger, '/perception/capture_reference',
                             self._srv_capture_reference)
 
+        # Timer drives piece detection at controlled rate (avoids 12fps decode)
+        self.create_timer(1.0 / det_hz, self._detect_tick)
+
         # Auto-capture empty-board reference at startup (ARCH-03)
         if self._auto_capture:
             self._auto_ref_timer = self.create_timer(3.0, self._auto_ref_tick)
 
         self.get_logger().info(
             f'Piece Detector ready (occ_threshold={self._occ_threshold}, '
-            f'white_thresh={self._white_threshold:.2f})'
+            f'white_thresh={self._white_threshold:.2f}, '
+            f'detection_hz={det_hz:.1f})'
         )
 
     # ─────────────────────────────────────────────────────────────────────
     # Subscriptions
     # ─────────────────────────────────────────────────────────────────────
 
-    def _on_image(self, msg: Image):
-        """Store latest raw frame and process if corners are available."""
+    def _on_image_raw(self, msg: Image):
+        """Store raw message reference — decode happens in timer at 3fps."""
+        self._latest_msg = msg
+
+    def _detect_tick(self):
+        """Timer callback: decode latest frame and run piece detection."""
+        msg = self._latest_msg
+        if msg is None:
+            return
         try:
-            frame = np.array(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3))
+            frame = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(
+                (msg.height, msg.width, 3)).copy()
         except Exception as e:
             self.get_logger().error(f'Image decode error: {e}')
             return
