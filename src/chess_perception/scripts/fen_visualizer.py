@@ -4,11 +4,14 @@ FEN Live Board Visualizer — Enhanced Debug Dashboard
 =====================================================
 Serves at http://<pi-ip>:5000
 
-Two camera views:
+Three camera views:
   /api/frame        raw camera + piece/grid overlay
   /api/debug_frame  edge/line/corner/color-mask debug view
+  /api/warp_frame   perspective-corrected board (what the detector sees)
 
 All detection parameters are tunable live via the browser.
+Changes apply IMMEDIATELY — images auto-refresh every 1.5 s.
+Click "⟳ Reprocess Now" for an instant update after a change.
 
 Usage:
   # With ROS running:
@@ -16,9 +19,12 @@ Usage:
 
   # Offline test (no ROS):
   python3 src/chess_perception/scripts/fen_visualizer.py --no-ros
+
+  # Offline with static image:
+  python3 src/chess_perception/scripts/fen_visualizer.py --no-ros --image /path/to/frame.jpg
 """
 
-import argparse, threading, time, sys, io, base64
+import argparse, threading, time, sys, io, base64, json
 import numpy as np
 import cv2
 
@@ -86,15 +92,34 @@ _params = {
     "show_color_mask": 0,
     # Warp output size
     "warp_size":     480,
+    # Lens distortion correction (Pi Camera v2 barrel distortion)
+    # k1/k2 are stored * 100 so sliders work as integers.
+    # Negative k1 = barrel correction. Pi Cam v2 typical: k1 ≈ -0.25, k2 ≈ 0.08
+    "undistort_enable": 0,
+    "undistort_k1":    -25,   # actual k1 = this / 100.0
+    "undistort_k2":      8,   # actual k2 = this / 100.0
+    "undistort_focal":  83,   # focal length as % of image width (~1357 px at 1640 wide)
 }
+
+
+# ─── Lens distortion correction ───────────────────────────────────────────────
+def _undistort_frame(frame: np.ndarray, p: dict) -> np.ndarray:
+    """Apply lens undistortion using estimated Pi Camera v2 parameters."""
+    if not p.get("undistort_enable", 0):
+        return frame
+    h, w = frame.shape[:2]
+    f = p["undistort_focal"] / 100.0 * w
+    K = np.array([[f, 0, w / 2.0],
+                  [0, f, h / 2.0],
+                  [0, 0, 1.0]], dtype=np.float64)
+    D = np.array([p["undistort_k1"] / 100.0,
+                  p["undistort_k2"] / 100.0,
+                  0.0, 0.0], dtype=np.float64)
+    return cv2.undistort(frame, K, D)
 
 
 # ─── Detection pipeline ────────────────────────────────────────────────────────
 def _detect_board(gray, blur, edges, p):
-    """
-    Returns corners (4x2 float32, ordered TL/TR/BR/BL) or None.
-    Tries Hough lines first, falls back to largest quadrilateral contour.
-    """
     corners = _detect_hough(gray, blur, edges, p)
     if corners is None:
         corners = _detect_contour(edges, p)
@@ -209,7 +234,6 @@ def _build_fen(pieces64):
 
 
 def _make_color_mask(bgr, p):
-    """Return binary mask combining light-square and dark-square HSV ranges."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     light = cv2.inRange(hsv,
         np.array([p["sq_light_h_lo"], p["sq_light_s_lo"], p["sq_light_v_lo"]]),
@@ -221,64 +245,8 @@ def _make_color_mask(bgr, p):
 
 
 # ─── Frame rendering ───────────────────────────────────────────────────────────
-def _render_main(frame, p):
-    """Raw frame + detected grid overlay + piece labels."""
-    out = frame.copy()
-    with _lock:
-        corners = _state["corners"]
-
-    if corners is not None and p["show_corners"]:
-        for i, pt in enumerate(corners):
-            cv2.circle(out, tuple(pt.astype(int)), 10,
-                       [(255,0,0),(0,255,0),(0,0,255),(255,255,0)][i], -1)
-        cv2.polylines(out, [corners.astype(int).reshape(-1,1,2)], True, (0,255,0), 3)
-
-    if corners is not None and p["show_grid"]:
-        sz = p["warp_size"]
-        dst = np.float32([[0,0],[sz-1,0],[sz-1,sz-1],[0,sz-1]])
-        M = cv2.getPerspectiveTransform(corners, dst)
-        M_inv = cv2.getPerspectiveTransform(dst, corners)
-        sq = sz // 8
-        for i in range(1, 8):
-            # vertical
-            p0 = np.float32([[[i*sq, 0]]])
-            p1 = np.float32([[[i*sq, sz]]])
-            pt0 = cv2.perspectiveTransform(p0, M_inv)[0,0].astype(int)
-            pt1 = cv2.perspectiveTransform(p1, M_inv)[0,0].astype(int)
-            cv2.line(out, tuple(pt0), tuple(pt1), (0,200,200), 1)
-            # horizontal
-            q0 = np.float32([[[0, i*sq]]])
-            q1 = np.float32([[[sz, i*sq]]])
-            qt0 = cv2.perspectiveTransform(q0, M_inv)[0,0].astype(int)
-            qt1 = cv2.perspectiveTransform(q1, M_inv)[0,0].astype(int)
-            cv2.line(out, tuple(qt0), tuple(qt1), (0,200,200), 1)
-
-    # Piece labels in warped space mapped back
-    if corners is not None and p["show_pieces"]:
-        sz = p["warp_size"]
-        dst = np.float32([[0,0],[sz-1,0],[sz-1,sz-1],[0,sz-1]])
-        M_inv = cv2.getPerspectiveTransform(
-            np.float32([[0,0],[sz-1,0],[sz-1,sz-1],[0,sz-1]]), corners)
-        warped = cv2.warpPerspective(frame, cv2.getPerspectiveTransform(corners, dst), (sz, sz))
-        pieces = _analyze_squares(warped, p)
-        sq = sz // 8
-        for row in range(8):
-            for col in range(8):
-                idx = row * 8 + col
-                c = pieces[idx]
-                if c:
-                    cx = col * sq + sq // 2
-                    cy = row * sq + sq // 2
-                    pt = cv2.perspectiveTransform(np.float32([[[cx, cy]]]), M_inv)[0,0].astype(int)
-                    color = (255,255,255) if c == 'W' else (0,0,0)
-                    cv2.putText(out, c, tuple(pt), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
-    _add_status(out, corners is not None)
-    return out
-
-
 def _render_debug(frame, p):
-    """Debug view: edges, Hough lines, corners, color mask."""
+    """Debug view: edges, Hough lines, corners, color mask. Also updates corners."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     k = p["blur_ksize"] | 1  # ensure odd
     blur = cv2.GaussianBlur(gray, (k, k), 0)
@@ -292,7 +260,6 @@ def _render_debug(frame, p):
     else:
         out = frame.copy()
 
-    # Hough lines
     if p["show_lines"]:
         lines = cv2.HoughLines(edges, 1, np.pi / 180, p["hough_thresh"])
         if lines is not None:
@@ -304,78 +271,199 @@ def _render_debug(frame, p):
                 pt2 = (int(x0 - 2000 * (-b)), int(y0 - 2000 * a))
                 cv2.line(out, pt1, pt2, (0, 100, 255), 1)
 
-    # Detected corners
     corners = _detect_board(gray, blur, edges, p)
+    # Update shared corner state — must happen before _render_main reads it
     with _lock:
         _state["corners"] = corners
 
     if corners is not None and p["show_corners"]:
-        labels = ['TL','TR','BR','BL']
-        colors = [(255,0,0),(0,255,0),(0,0,255),(255,255,0)]
-        for i, (pt, col, lbl) in enumerate(zip(corners, colors, labels)):
+        labels = ['TL', 'TR', 'BR', 'BL']
+        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+        for pt, col, lbl in zip(corners, colors, labels):
             cv2.circle(out, tuple(pt.astype(int)), 12, col, -1)
-            cv2.putText(out, lbl, (int(pt[0])+14, int(pt[1])+6),
+            cv2.putText(out, lbl, (int(pt[0]) + 14, int(pt[1]) + 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2)
-        cv2.polylines(out, [corners.astype(int).reshape(-1,1,2)], True, (0,255,0), 3)
+        cv2.polylines(out, [corners.astype(int).reshape(-1, 1, 2)], True, (0, 255, 0), 3)
 
-    # Stats overlay
     n_lines = 0
     raw_lines = cv2.HoughLines(edges, 1, np.pi / 180, p["hough_thresh"])
     if raw_lines is not None: n_lines = len(raw_lines)
     cv2.putText(out, f"Lines: {n_lines}  Board: {'YES' if corners is not None else 'NO'}",
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                (0,255,0) if corners is not None else (0,0,255), 2)
+                (0, 255, 0) if corners is not None else (0, 0, 255), 2)
+    undistort_lbl = f"Undistort: {'ON k1={:.2f}'.format(p['undistort_k1']/100) if p['undistort_enable'] else 'OFF'}"
+    cv2.putText(out, undistort_lbl, (10, out.shape[0] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
     return out
+
+
+def _render_main(frame, p):
+    """Raw frame + detected grid overlay + piece labels."""
+    out = frame.copy()
+    with _lock:
+        corners = _state["corners"]
+
+    if corners is not None and p["show_corners"]:
+        for i, pt in enumerate(corners):
+            cv2.circle(out, tuple(pt.astype(int)), 10,
+                       [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)][i], -1)
+        cv2.polylines(out, [corners.astype(int).reshape(-1, 1, 2)], True, (0, 255, 0), 3)
+
+    if corners is not None and p["show_grid"]:
+        sz = p["warp_size"]
+        dst = np.float32([[0, 0], [sz - 1, 0], [sz - 1, sz - 1], [0, sz - 1]])
+        M_inv = cv2.getPerspectiveTransform(dst, corners)
+        sq = sz // 8
+        for i in range(1, 8):
+            p0 = cv2.perspectiveTransform(np.float32([[[i * sq, 0]]]), M_inv)[0, 0].astype(int)
+            p1 = cv2.perspectiveTransform(np.float32([[[i * sq, sz]]]), M_inv)[0, 0].astype(int)
+            cv2.line(out, tuple(p0), tuple(p1), (0, 200, 200), 1)
+            q0 = cv2.perspectiveTransform(np.float32([[[0, i * sq]]]), M_inv)[0, 0].astype(int)
+            q1 = cv2.perspectiveTransform(np.float32([[[sz, i * sq]]]), M_inv)[0, 0].astype(int)
+            cv2.line(out, tuple(q0), tuple(q1), (0, 200, 200), 1)
+
+    if corners is not None and p["show_pieces"]:
+        sz = p["warp_size"]
+        dst = np.float32([[0, 0], [sz - 1, 0], [sz - 1, sz - 1], [0, sz - 1]])
+        M = cv2.getPerspectiveTransform(corners, dst)
+        M_inv = cv2.getPerspectiveTransform(dst, corners)
+        warped = cv2.warpPerspective(frame, M, (sz, sz))
+        pieces = _analyze_squares(warped, p)
+        sq = sz // 8
+        for row in range(8):
+            for col in range(8):
+                c = pieces[row * 8 + col]
+                if c:
+                    cx = col * sq + sq // 2
+                    cy = row * sq + sq // 2
+                    pt = cv2.perspectiveTransform(np.float32([[[cx, cy]]]), M_inv)[0, 0].astype(int)
+                    color = (255, 255, 255) if c == 'W' else (0, 0, 0)
+                    cv2.putText(out, c, tuple(pt), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+    _add_status(out, corners is not None)
+    return out
+
+
+def _render_warp(frame, p):
+    """Perspective-corrected board view with grid and piece indicators."""
+    with _lock:
+        corners = _state["corners"]
+    sz = p["warp_size"]
+    if corners is None:
+        blank = np.full((sz, sz, 3), 35, dtype=np.uint8)
+        cv2.putText(blank, "Board not detected", (20, sz // 2 - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (90, 90, 90), 2)
+        cv2.putText(blank, "Adjust Hough/Canny params", (20, sz // 2 + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (70, 70, 70), 1)
+        return blank
+
+    dst = np.float32([[0, 0], [sz - 1, 0], [sz - 1, sz - 1], [0, sz - 1]])
+    M = cv2.getPerspectiveTransform(corners, dst)
+    warped = cv2.warpPerspective(frame, M, (sz, sz))
+
+    sq = sz // 8
+
+    # Checkerboard background tint to visualize square layout
+    for r in range(8):
+        for c in range(8):
+            if (r + c) % 2 == 0:
+                x1, y1 = c * sq, r * sq
+                overlay = warped[y1:y1+sq, x1:x1+sq].astype(np.float32)
+                overlay = cv2.addWeighted(overlay, 0.85,
+                    np.full_like(overlay, 200), 0.15, 0)
+                warped[y1:y1+sq, x1:x1+sq] = overlay.astype(np.uint8)
+
+    # Grid lines
+    for i in range(9):
+        cv2.line(warped, (i * sq, 0), (i * sq, sz), (0, 200, 200), 1)
+        cv2.line(warped, (0, i * sq), (sz, i * sq), (0, 200, 200), 1)
+
+    # Rank labels (8..1, top to bottom = rank 8..1)
+    for r in range(8):
+        cv2.putText(warped, str(8 - r), (3, r * sq + sq - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 50), 1)
+    # File labels (a..h)
+    for fi, lbl in enumerate('abcdefgh'):
+        cv2.putText(warped, lbl, (fi * sq + sq // 2 - 5, sz - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 50), 1)
+
+    # Piece indicators
+    pieces = _analyze_squares(warped.copy(), p)
+    for row in range(8):
+        for col in range(8):
+            c = pieces[row * 8 + col]
+            if c:
+                cx, cy = col * sq + sq // 2, row * sq + sq // 2
+                fill = (240, 240, 240) if c == 'W' else (20, 20, 20)
+                border = (80, 80, 80)
+                cv2.circle(warped, (cx, cy), sq // 3, fill, -1)
+                cv2.circle(warped, (cx, cy), sq // 3, border, 1)
+                txt_color = (30, 30, 30) if c == 'W' else (220, 220, 220)
+                cv2.putText(warped, c, (cx - 8, cy + 7),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, txt_color, 2)
+
+    cv2.rectangle(warped, (0, 0), (sz - 1, sz - 1), (0, 255, 0), 2)
+    return warped
 
 
 def _add_status(img, detected):
     cv2.putText(img, "Board: " + ("DETECTED" if detected else "NOT FOUND"),
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                (0,255,0) if detected else (0,0,255), 2)
+                (0, 255, 0) if detected else (0, 0, 255), 2)
 
 
-def _frame_to_jpeg(frame, scale=0.6):
-    """Resize and encode frame to JPEG bytes."""
+def _frame_to_jpeg(frame, scale=0.7, quality=82):
     h, w = frame.shape[:2]
-    small = cv2.resize(frame, (int(w * scale), int(h * scale)))
-    ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if scale != 1.0:
+        small = cv2.resize(frame, (int(w * scale), int(h * scale)))
+    else:
+        small = frame
+    ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return bytes(buf) if ok else b''
 
 
 # ─── Background processing thread ─────────────────────────────────────────────
-_processed = {"main": None, "debug": None}
+_processed = {"main": None, "debug": None, "warp": None}
 _proc_lock = threading.Lock()
 
+
+def _process_frame(frame, p):
+    """Render all three views from a frame. Debug runs first to update corners."""
+    debug_img = _render_debug(frame, p)   # sets _state["corners"]
+    main_img  = _render_main(frame, p)    # reads _state["corners"]
+    warp_img  = _render_warp(frame, p)    # reads _state["corners"]
+
+    with _lock:
+        corners = _state["corners"]
+    if corners is not None:
+        sz = p["warp_size"]
+        dst = np.float32([[0, 0], [sz - 1, 0], [sz - 1, sz - 1], [0, sz - 1]])
+        M = cv2.getPerspectiveTransform(corners, dst)
+        warped = cv2.warpPerspective(frame, M, (sz, sz))
+        pieces64 = _analyze_squares(warped, p)
+        fen = _build_fen(pieces64)
+        with _lock:
+            _state["fen"] = fen
+            _state["frame_count"] += 1
+            _state["last_updated"] = time.time()
+
+    with _proc_lock:
+        _processed["main"]  = _frame_to_jpeg(main_img, scale=0.7)
+        _processed["debug"] = _frame_to_jpeg(debug_img, scale=0.7)
+        _processed["warp"]  = _frame_to_jpeg(warp_img, scale=1.0)
+
+
 def _processing_loop():
-    """Runs every 2s: processes latest frame with current params."""
     while True:
         time.sleep(2.0)
         with _lock:
             frame = _state["raw_frame"]
+            p = dict(_params)
         if frame is None:
             continue
-        with _lock:
-            p = dict(_params)
         try:
-            main_img  = _render_main(frame, p)
-            debug_img = _render_debug(frame, p)
-            # After render_debug, update FEN
-            with _lock:
-                corners = _state["corners"]
-            if corners is not None:
-                sz = p["warp_size"]
-                dst = np.float32([[0,0],[sz-1,0],[sz-1,sz-1],[0,sz-1]])
-                M = cv2.getPerspectiveTransform(corners, dst)
-                warped = cv2.warpPerspective(frame, M, (sz, sz))
-                pieces64 = _analyze_squares(warped, p)
-                fen = _build_fen(pieces64)
-                with _lock:
-                    _state["fen"] = fen
-                    _state["frame_count"] += 1
-                    _state["last_updated"] = time.time()
-            with _proc_lock:
-                _processed["main"]  = _frame_to_jpeg(main_img)
-                _processed["debug"] = _frame_to_jpeg(debug_img)
+            frame = _undistort_frame(frame, p)
+            _process_frame(frame, p)
         except Exception as e:
             with _lock:
                 _state["error"] = str(e)
@@ -385,7 +473,6 @@ def _processing_loop():
 class FenNode(Node):
     def __init__(self):
         super().__init__("fen_visualizer")
-        # Try BoardState, fallback to String
         try:
             try:
                 from chess_perception.msg import BoardState
@@ -424,7 +511,7 @@ class FenNode(Node):
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             with _lock:
                 _state["raw_frame"] = frame.copy()
-        except Exception as e:
+        except Exception:
             pass
 
 
@@ -449,47 +536,55 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}
-h1{color:#58a6ff;font-size:1.1em;padding:12px 16px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:10px}
+h1{color:#58a6ff;font-size:1.05em;padding:10px 16px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:10px}
 #status-dot{width:10px;height:10px;border-radius:50%;background:#d29922;flex-shrink:0}
 #status-dot.live{background:#3fb950;animation:pulse 2s infinite}
 #status-dot.dead{background:#f85149}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.layout{display:grid;grid-template-columns:1fr 1fr 370px;grid-template-rows:auto auto;gap:10px;padding:10px}
+.layout{display:grid;grid-template-columns:1fr 1fr 260px 360px;grid-template-rows:auto auto;gap:8px;padding:8px}
 .cam-panel{background:#161b22;border:1px solid #21262d;border-radius:6px;overflow:hidden}
-.cam-panel h2{font-size:.72em;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;padding:6px 10px;border-bottom:1px solid #21262d;display:flex;justify-content:space-between}
+.cam-panel h2{font-size:.68em;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;padding:5px 10px;border-bottom:1px solid #21262d;display:flex;justify-content:space-between;align-items:center}
 .cam-panel img{width:100%;display:block}
-.right-col{grid-row:1/3;display:flex;flex-direction:column;gap:10px}
+.warp-panel{background:#161b22;border:1px solid #21262d;border-radius:6px;overflow:hidden}
+.warp-panel h2{font-size:.68em;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;padding:5px 10px;border-bottom:1px solid #21262d}
+.warp-panel img{width:100%;display:block;image-rendering:pixelated}
+.right-col{grid-row:1/3;display:flex;flex-direction:column;gap:8px}
 .card{background:#161b22;border:1px solid #21262d;border-radius:6px;overflow:hidden}
-.card h2{font-size:.72em;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;padding:6px 10px;border-bottom:1px solid #21262d}
-.card-body{padding:10px}
-#board-wrap{padding:10px;display:flex;justify-content:center}
-#board{width:300px}
-#fen-text{font-family:monospace;font-size:.72em;color:#3fb950;word-break:break-all;background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:6px;margin-top:6px}
-.stat-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #21262d;font-size:.78em}
+.card h2{font-size:.68em;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;padding:5px 10px;border-bottom:1px solid #21262d}
+.card-body{padding:8px}
+#board-wrap{padding:8px;display:flex;justify-content:center}
+#board{width:280px}
+#fen-text{font-family:monospace;font-size:.68em;color:#3fb950;word-break:break-all;background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:5px;margin-top:5px}
+.stat-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #21262d;font-size:.76em}
 .stat-row:last-child{border-bottom:none}
 .lbl{color:#8b949e}.val{font-family:monospace}
 .ok{color:#3fb950}.warn{color:#d29922}.err{color:#f85149}
-.ctrl-panel{grid-column:1/3;background:#161b22;border:1px solid #21262d;border-radius:6px;padding:12px}
-.ctrl-panel h2{font-size:.72em;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;margin-bottom:10px}
-.ctrl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(195px,1fr));gap:8px 16px}
-.ctrl-group{background:#0d1117;border:1px solid #21262d;border-radius:5px;padding:8px}
-.ctrl-group-title{font-size:.68em;text-transform:uppercase;color:#58a6ff;margin-bottom:6px;font-weight:700}
+.ctrl-panel{grid-column:1/4;background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px}
+.ctrl-panel h2{font-size:.68em;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
+.ctrl-hint{font-size:.65em;color:#3fb950;font-weight:normal;text-transform:none;letter-spacing:0}
+.ctrl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:7px 14px}
+.ctrl-group{background:#0d1117;border:1px solid #21262d;border-radius:5px;padding:7px}
+.ctrl-group-title{font-size:.65em;text-transform:uppercase;color:#58a6ff;margin-bottom:5px;font-weight:700}
 .slider-row{display:flex;align-items:center;gap:5px;margin:3px 0}
-.slider-row label{flex:0 0 110px;font-size:.72em;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.slider-row label{flex:0 0 108px;font-size:.7em;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .slider-row input[type=range]{flex:1;accent-color:#58a6ff}
-.slider-row .vb{flex:0 0 36px;text-align:right;font-family:monospace;font-size:.72em;color:#c9d1d9}
+.slider-row .vb{flex:0 0 34px;text-align:right;font-family:monospace;font-size:.7em;color:#c9d1d9}
 .tog-row{display:flex;align-items:center;gap:7px;margin:3px 0}
-.tog-row label{font-size:.72em;color:#8b949e}
+.tog-row label{font-size:.7em;color:#8b949e}
 .tog-row input[type=checkbox]{accent-color:#58a6ff;width:13px;height:13px}
-.hsv-preview{display:flex;gap:4px;margin-top:6px}
-.hsv-swatch{flex:1;height:18px;border-radius:3px;border:1px solid #30363d}
-.btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:.75em;text-decoration:none;display:inline-block}
+.hsv-preview{display:flex;gap:4px;margin-top:5px}
+.hsv-swatch{flex:1;height:16px;border-radius:3px;border:1px solid #30363d}
+.btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:3px 9px;border-radius:4px;cursor:pointer;font-size:.73em;text-decoration:none;display:inline-block}
 .btn:hover{background:#30363d}
 .btn.blue{background:#1f6feb;color:#fff;border-color:#1f6feb}
 .btn.blue:hover{background:#388bfd}
-.diff-item{font-family:monospace;font-size:.72em;padding:2px 5px;margin:1px 0;background:#2a1515;color:#f85149;border-radius:3px}
-.inj-row{display:flex;gap:6px;margin-top:6px}
-.inj-row input{flex:1;background:#0d1117;color:#c9d1d9;border:1px solid #21262d;border-radius:4px;padding:4px 7px;font-family:monospace;font-size:.72em}
+.btn.green{background:#196127;color:#fff;border-color:#196127}
+.btn.green:hover{background:#238636}
+.diff-item{font-family:monospace;font-size:.7em;padding:2px 5px;margin:1px 0;background:#2a1515;color:#f85149;border-radius:3px}
+.inj-row{display:flex;gap:6px;margin-top:5px}
+.inj-row input{flex:1;background:#0d1117;color:#c9d1d9;border:1px solid #21262d;border-radius:4px;padding:4px 7px;font-family:monospace;font-size:.7em}
+#reproc-flash{display:inline-block;width:8px;height:8px;border-radius:50%;background:#d29922;margin-left:6px;opacity:0;transition:opacity .2s}
+#reproc-flash.on{opacity:1}
 </style>
 </head>
 <body>
@@ -498,20 +593,27 @@ h1{color:#58a6ff;font-size:1.1em;padding:12px 16px;border-bottom:1px solid #2126
   ♟ Chess Perception — Live Debug Dashboard
   <span style="margin-left:auto;display:flex;gap:6px">
     <button class="btn" onclick="forceReprocess()">⟳ Reprocess Now</button>
-    <a href="/api/snapshot" class="btn">📷 Download Snapshot</a>
+    <a href="/api/snapshot" class="btn">📷 Snapshot</a>
+    <button class="btn green" onclick="saveParams()">💾 Save Params</button>
+    <label class="btn" style="cursor:pointer">📂 Load Params<input type="file" accept=".json" style="display:none" onchange="loadParams(event)"></label>
   </span>
 </h1>
 
 <div class="layout">
 
   <div class="cam-panel">
-    <h2>Live Camera + Grid &amp; Piece Overlay <span id="cam-ts" class="warn"></span></h2>
+    <h2>Live Camera + Grid &amp; Pieces <span id="cam-ts" class="warn"></span></h2>
     <img id="cam-img" src="/api/frame" alt="camera">
   </div>
 
   <div class="cam-panel">
-    <h2>Debug: Edges / Hough Lines / Corners <span id="dbg-ts" class="ok"></span></h2>
+    <h2>Debug: Edges / Lines / Corners <span id="dbg-ts" class="ok"></span></h2>
     <img id="dbg-img" src="/api/debug_frame" alt="debug">
+  </div>
+
+  <div class="warp-panel">
+    <h2>Warped Board View</h2>
+    <img id="warp-img" src="/api/warp_frame" alt="warp">
   </div>
 
   <div class="right-col">
@@ -522,25 +624,25 @@ h1{color:#58a6ff;font-size:1.1em;padding:12px 16px;border-bottom:1px solid #2126
         <div class="stat-row"><span class="lbl">Feed</span><span class="val" id="conn-stat">–</span></div>
         <div class="stat-row"><span class="lbl">Frames processed</span><span class="val" id="fc">0</span></div>
         <div class="stat-row"><span class="lbl">FEN age</span><span class="val"><span id="fen-age">–</span>s</span></div>
-        <div class="stat-row"><span class="lbl">Error</span><span class="val err" id="err-msg" style="font-size:.68em;word-break:break-all">–</span></div>
+        <div class="stat-row"><span class="lbl">Error</span><span class="val err" id="err-msg" style="font-size:.66em;word-break:break-all">–</span></div>
       </div>
     </div>
 
     <div class="card">
       <h2>Board State</h2>
       <div id="board-wrap"><div id="board"></div></div>
-      <div style="padding:0 10px 10px"><div id="fen-text">–</div></div>
+      <div style="padding:0 8px 8px"><div id="fen-text">–</div></div>
     </div>
 
     <div class="card">
       <h2>Diff vs Reference</h2>
       <div class="card-body">
-        <div style="display:flex;gap:6px;margin-bottom:7px">
+        <div style="display:flex;gap:6px;margin-bottom:6px">
           <button class="btn blue" onclick="setRef()">📌 Set Reference</button>
           <button class="btn" onclick="resetRef()">Reset</button>
         </div>
-        <div id="ref-lbl" style="font-size:.7em;color:#8b949e;margin-bottom:5px">Reference: starting position</div>
-        <div id="diff-list" style="max-height:110px;overflow-y:auto"><span style="color:#8b949e;font-size:.78em">Set a reference first</span></div>
+        <div id="ref-lbl" style="font-size:.68em;color:#8b949e;margin-bottom:4px">Reference: starting position</div>
+        <div id="diff-list" style="max-height:100px;overflow-y:auto"><span style="color:#8b949e;font-size:.76em">Set a reference first</span></div>
       </div>
     </div>
 
@@ -558,20 +660,21 @@ h1{color:#58a6ff;font-size:1.1em;padding:12px 16px;border-bottom:1px solid #2126
   </div><!-- /right-col -->
 
   <div class="ctrl-panel">
-    <h2>Detection Parameters — sliders apply immediately on release</h2>
+    <h2>
+      Detection Parameters
+      <span class="ctrl-hint">✓ Changes apply instantly — views refresh every 1.5 s. Use "⟳ Reprocess Now" for immediate update.<span id="reproc-flash"></span></span>
+    </h2>
     <div class="ctrl-grid" id="ctrl-grid"></div>
   </div>
 
 </div><!-- /layout -->
 
 <script>
-// Board
 var board = Chessboard('board',{position:'start',showNotation:true,
   pieceTheme:'https://lichess1.org/assets/piece/cburnett/{piece}.svg'});
 var refFen='rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 var curParams={};
 
-// Parameter definitions
 var GROUPS=[
   {t:'Preprocessing',p:[{k:'blur_ksize',l:'Blur kernel',mn:1,mx:21,st:2}]},
   {t:'Canny Edges',p:[
@@ -602,6 +705,12 @@ var GROUPS=[
     {k:'piece_std_thresh',l:'Std-dev thresh',mn:5,mx:100,st:1},
     {k:'piece_white_bright',l:'White min bright',mn:80,mx:255,st:1},
     {k:'piece_black_bright',l:'Black max bright',mn:10,mx:200,st:1}]},
+  {t:'Lens Distortion (Pi Cam v2)',p:[
+    {k:'undistort_k1',l:'k1 (×100)',mn:-80,mx:80,st:1},
+    {k:'undistort_k2',l:'k2 (×100)',mn:-50,mx:50,st:1},
+    {k:'undistort_focal',l:'Focal % width',mn:40,mx:130,st:1}],
+   togs:[{k:'undistort_enable',l:'Enable undistortion'}]},
+  {t:'Warp Output',p:[{k:'warp_size',l:'Warp size px',mn:240,mx:800,st:40}]},
   {t:'Overlays',togs:[
     {k:'show_edges',l:'Canny edges'},
     {k:'show_lines',l:'Hough lines'},
@@ -622,19 +731,23 @@ function buildControls(p){
     var box=document.createElement('div');
     box.className='ctrl-group';
     var html='<div class="ctrl-group-title">'+g.t+'</div>';
-    if(g.togs){
+    if(g.togs&&!g.p){
       g.togs.forEach(function(t){
         html+='<div class="tog-row"><input type="checkbox" id="t_'+t.k+'" '+(p[t.k]?'checked':'')+
               ' onchange="onTog(\''+t.k+'\',this.checked)"><label for="t_'+t.k+'">'+t.l+'</label></div>';
       });
     } else {
-      g.p.forEach(function(pr){
+      if(g.p) g.p.forEach(function(pr){
         var v=p[pr.k]!==undefined?p[pr.k]:0;
         html+='<div class="slider-row"><label title="'+pr.k+'">'+pr.l+'</label>'+
               '<input type="range" id="s_'+pr.k+'" min="'+pr.mn+'" max="'+pr.mx+'" step="'+pr.st+'" value="'+v+'"'+
               ' oninput="document.getElementById(\'vb_'+pr.k+'\').textContent=this.value"'+
               ' onchange="onSlider(\''+pr.k+'\',+this.value)">'+
               '<span class="vb" id="vb_'+pr.k+'">'+v+'</span></div>';
+      });
+      if(g.togs) g.togs.forEach(function(t){
+        html+='<div class="tog-row"><input type="checkbox" id="t_'+t.k+'" '+(p[t.k]?'checked':'')+
+              ' onchange="onTog(\''+t.k+'\',this.checked)"><label for="t_'+t.k+'">'+t.l+'</label></div>';
       });
       if(g.hsv&&g.sw){
         html+='<div class="hsv-preview">'+
@@ -656,6 +769,12 @@ function refreshSwatches(p){
   s('sdhi',p.sq_dark_h_hi, p.sq_dark_s_hi, p.sq_dark_v_hi);
 }
 
+function flashReproc(){
+  var f=document.getElementById('reproc-flash');
+  f.className='on';
+  setTimeout(function(){f.className='';},800);
+}
+
 function onSlider(k,v){
   curParams[k]=v;
   refreshSwatches(curParams);
@@ -663,9 +782,33 @@ function onSlider(k,v){
 }
 function onTog(k,c){curParams[k]=c?1:0;sendParams({[k]:c?1:0});}
 function sendParams(d){
+  flashReproc();
   fetch('/api/params',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
 }
-function forceReprocess(){sendParams({});}
+function forceReprocess(){flashReproc();sendParams({});}
+
+function saveParams(){
+  var a=document.createElement('a');
+  var blob=new Blob([JSON.stringify(curParams,null,2)],{type:'application/json'});
+  a.href=URL.createObjectURL(blob);
+  a.download='chess_params.json';
+  a.click();
+}
+function loadParams(evt){
+  var file=evt.target.files[0];
+  if(!file)return;
+  var reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      var p=JSON.parse(e.target.result);
+      fetch('/api/params',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)})
+        .then(function(){return fetch('/api/params');})
+        .then(function(r){return r.json();})
+        .then(function(p){curParams=p;buildControls(p);flashReproc();});
+    }catch(ex){alert('Invalid JSON: '+ex);}
+  };
+  reader.readAsText(file);
+}
 
 // FEN diff
 function fenSq(fen){
@@ -678,22 +821,22 @@ function showDiff(a,b){
   var A=fenSq(a),B=fenSq(b),all=new Set(Object.keys(A).concat(Object.keys(B))),d=[];
   all.forEach(function(sq){var av=A[sq]||'(empty)',bv=B[sq]||'(empty)';if(av!==bv)d.push(sq.toUpperCase()+': '+plabel(av)+' → '+plabel(bv));});
   var el=document.getElementById('diff-list');
-  el.innerHTML=d.length?d.map(function(x){return'<div class="diff-item">'+x+'</div>';}).join(''):'<span class="ok" style="font-size:.78em">✓ Matches reference</span>';
+  el.innerHTML=d.length?d.map(function(x){return'<div class="diff-item">'+x+'</div>';}).join(''):'<span class="ok" style="font-size:.76em">✓ Matches reference</span>';
 }
 function setRef(){fetch('/api/fen').then(r=>r.json()).then(d=>{refFen=d.fen;document.getElementById('ref-lbl').textContent='Ref: '+d.fen.split(' ')[0];});}
 function resetRef(){refFen='rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';document.getElementById('ref-lbl').textContent='Reference: starting position';}
 function injectFen(){var f=document.getElementById('inj-in').value.trim();fetch('/api/fen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fen:f})});}
 
-// Refresh image feeds every 2s
 function refreshImages(){
   var t=Date.now();
   document.getElementById('cam-img').src='/api/frame?t='+t;
   document.getElementById('dbg-img').src='/api/debug_frame?t='+t;
-  document.getElementById('cam-ts').textContent=new Date().toLocaleTimeString();
-  document.getElementById('dbg-ts').textContent=new Date().toLocaleTimeString();
+  document.getElementById('warp-img').src='/api/warp_frame?t='+t;
+  var ts=new Date().toLocaleTimeString();
+  document.getElementById('cam-ts').textContent=ts;
+  document.getElementById('dbg-ts').textContent=ts;
 }
 
-// Poll FEN every 1s
 function pollFen(){
   fetch('/api/fen').then(r=>r.json()).then(d=>{
     try{board.position(d.fen.split(' ')[0],false);}catch(e){}
@@ -707,15 +850,13 @@ function pollFen(){
     if(age<4){dot.className='live';cs.textContent='Live ✓';cs.className='val ok';}
     else if(age<30){dot.className='';cs.textContent='Stale';cs.className='val warn';}
     else{dot.className='dead';cs.textContent='No data';cs.className='val err';}
-    var em=document.getElementById('err-msg');
-    em.textContent=d.error||'–';
+    document.getElementById('err-msg').textContent=d.error||'–';
     showDiff(refFen,d.fen);
   }).catch(function(){document.getElementById('status-dot').className='dead';});
 }
 
-// Init
 fetch('/api/params').then(r=>r.json()).then(function(p){curParams=p;buildControls(p);});
-setInterval(refreshImages,2000);
+setInterval(refreshImages,1500);
 setInterval(pollFen,1000);
 refreshImages();pollFen();
 </script>
@@ -752,19 +893,20 @@ def api_fen_post():
     return jsonify({"ok": True})
 
 
+def _blank_jpeg(w, h, msg, color=(200, 200, 200)):
+    blank = np.full((h, w, 3), 50, dtype=np.uint8)
+    cv2.putText(blank, msg, (20, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    _, buf = cv2.imencode('.jpg', blank)
+    return bytes(buf)
+
+
 @app.route("/api/frame")
 def api_frame():
     with _proc_lock:
         data = _processed.get("main")
     if not data:
-        # Return blank grey frame
-        blank = np.full((360, 640, 3), 50, dtype=np.uint8)
-        cv2.putText(blank, "Waiting for camera...", (120, 180),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (200,200,200), 2)
-        _, buf = cv2.imencode('.jpg', blank)
-        data = bytes(buf)
-    return Response(data, mimetype="image/jpeg",
-                    headers={"Cache-Control": "no-store"})
+        data = _blank_jpeg(640, 360, "Waiting for camera...")
+    return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.route("/api/debug_frame")
@@ -772,13 +914,17 @@ def api_debug_frame():
     with _proc_lock:
         data = _processed.get("debug")
     if not data:
-        blank = np.full((360, 640, 3), 30, dtype=np.uint8)
-        cv2.putText(blank, "Waiting for debug frame...", (80, 180),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (100,200,100), 2)
-        _, buf = cv2.imencode('.jpg', blank)
-        data = bytes(buf)
-    return Response(data, mimetype="image/jpeg",
-                    headers={"Cache-Control": "no-store"})
+        data = _blank_jpeg(640, 360, "Waiting for debug frame...", (100, 200, 100))
+    return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.route("/api/warp_frame")
+def api_warp_frame():
+    with _proc_lock:
+        data = _processed.get("warp")
+    if not data:
+        data = _blank_jpeg(480, 480, "No board detected", (80, 80, 80))
+    return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.route("/api/params", methods=["GET"])
@@ -794,37 +940,19 @@ def api_params_post():
         for k, v in data.items():
             if k in _params:
                 _params[k] = type(_params[k])(v)
-    # Trigger immediate reprocess
     threading.Thread(target=_force_reprocess, daemon=True).start()
     return jsonify({"ok": True})
 
 
 def _force_reprocess():
-    """Immediately reprocess the latest frame when params change."""
     with _lock:
         frame = _state["raw_frame"]
         p = dict(_params)
     if frame is None:
         return
     try:
-        main_img  = _render_main(frame, p)
-        debug_img = _render_debug(frame, p)
-        with _lock:
-            corners = _state["corners"]
-        if corners is not None:
-            sz = p["warp_size"]
-            dst = np.float32([[0,0],[sz-1,0],[sz-1,sz-1],[0,sz-1]])
-            M = cv2.getPerspectiveTransform(corners, dst)
-            warped = cv2.warpPerspective(frame, M, (sz, sz))
-            pieces64 = _analyze_squares(warped, p)
-            fen = _build_fen(pieces64)
-            with _lock:
-                _state["fen"] = fen
-                _state["last_updated"] = time.time()
-                _state["frame_count"] += 1
-        with _proc_lock:
-            _processed["main"]  = _frame_to_jpeg(main_img)
-            _processed["debug"] = _frame_to_jpeg(debug_img)
+        frame = _undistort_frame(frame, p)
+        _process_frame(frame, p)
     except Exception as e:
         with _lock:
             _state["error"] = str(e)
@@ -832,7 +960,6 @@ def _force_reprocess():
 
 @app.route("/api/snapshot")
 def api_snapshot():
-    """Return current raw frame as full-res JPEG for download."""
     with _lock:
         frame = _state["raw_frame"]
     if frame is None:
@@ -850,7 +977,7 @@ def main():
     parser.add_argument("--no-ros", action="store_true")
     parser.add_argument("--fen", default=None)
     parser.add_argument("--image", default=None,
-                        help="Load a static image instead of camera (for offline testing)")
+                        help="Load a static image for offline testing")
     args = parser.parse_args()
 
     if args.fen:
@@ -864,12 +991,12 @@ def main():
         if frame is not None:
             with _lock:
                 _state["raw_frame"] = frame
-            print(f"Loaded static image: {args.image}  {frame.shape}")
+            print(f"Loaded static image: {args.image}  {frame.shape[1]}x{frame.shape[0]}")
+        else:
+            print(f"WARNING: could not load image: {args.image}")
 
-    # Start background processing
     threading.Thread(target=_processing_loop, daemon=True).start()
 
-    # Start ROS subscriber
     if not args.no_ros:
         if not ROS_AVAILABLE:
             print("ERROR: rclpy not found. Use --no-ros"); sys.exit(1)
@@ -878,7 +1005,7 @@ def main():
         threading.Thread(target=_ros_thread_fn, args=(ros_node,), daemon=True).start()
         print("✓ ROS subscriber started")
     else:
-        print("⚠  No-ROS mode. Use --image <path> or POST /api/fen")
+        print("⚠  No-ROS mode. Use --image <path> or inject FEN via browser")
 
     print(f"\nOpen browser: http://localhost:{args.port}")
     print(f"Network URL:  http://<pi-ip>:{args.port}\n")

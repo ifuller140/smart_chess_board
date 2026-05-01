@@ -53,8 +53,8 @@ class CameraNode(Node):
 
         self.declare_parameter('use_picamera2', True)
         self.declare_parameter('camera_id', 0)
-        self.declare_parameter('width', 1280)
-        self.declare_parameter('height', 720)
+        self.declare_parameter('width', 1640)   # full-sensor 2x2-binned width
+        self.declare_parameter('height', 1232)  # full-sensor 2x2-binned height
         self.declare_parameter('fps', 5.0)
         self.declare_parameter('calibration_file', '')
 
@@ -121,15 +121,26 @@ class CameraNode(Node):
             return False
         try:
             picam = Picamera2()
-            config = picam.create_video_configuration(
-                main={'size': (self._width, self._height)})
+            # Pin the sensor to the full-FOV 2x2-binned mode (1640x1232) so that
+            # picamera2 never selects a center-cropped video mode regardless of the
+            # requested output resolution.  The output is then scaled/letterboxed to
+            # (width, height) by the ISP — no digital zoom is applied.
+            try:
+                config = picam.create_video_configuration(
+                    main={'size': (self._width, self._height)},
+                    sensor={'output_size': (1640, 1232), 'bit_depth': 10})
+            except Exception:
+                config = picam.create_video_configuration(
+                    main={'size': (self._width, self._height)})
+                self.get_logger().warn(
+                    'picamera2 sensor spec not supported — full-FOV mode may not be active')
             picam.configure(config)
             picam.start()
             time.sleep(1.0)
             self._picam   = picam
             self._backend = 'picamera2'
             self.get_logger().info(
-                f'picamera2 backend ready: {self._width}x{self._height}')
+                f'picamera2 backend ready: {self._width}x{self._height} (sensor=1640x1232 full-FOV)')
             return True
         except Exception as e:
             err = str(e)
