@@ -1,24 +1,24 @@
 """
 Perception Stack Launch File.
 
-Starts only the nodes needed for camera and piece detection:
-  - camera_node
-  - board_detector_node
-  - piece_detector_node
+Starts camera + board detector + piece detector.
 
-Use this when running vision tests without the full system:
+Camera backend selection:
+  use_camera_ros:=True  (default) — uses ros-humble-camera-ros with libcamera.
+                                    Works on Ubuntu 22.04 + Pi Camera v2 out of the box.
+                                    Install: sudo apt install ros-humble-camera-ros
+  use_camera_ros:=False           — uses our custom chess_perception camera_node
+                                    (requires python3-libcamera for Pi CSI camera)
+
+Usage:
   ros2 launch chess_perception perception_launch.py
-
-Optional args:
-  use_picamera2:=True          Pi Camera v2 (CSI) vs USB webcam
-  calibration_file:=           Path to camera_calibration.yaml
+  ros2 launch chess_perception perception_launch.py use_camera_ros:=False use_picamera2:=True
+  ros2 launch chess_perception perception_launch.py calibration_file:=/home/ian/.chess/calibration.yaml
 """
 
-import os
-
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -26,30 +26,72 @@ from launch_ros.actions import Node
 def generate_launch_description():
 
     args = [
-        DeclareLaunchArgument('use_picamera2', default_value='False',
-                              description='True=Pi Camera CSI, False=OpenCV V4L2 (default: V4L2 due to libcamera 0.2.0 IPA bug)'),
-        DeclareLaunchArgument('calibration_file', default_value='',
-                              description='Path to camera_calibration.yaml'),
+        DeclareLaunchArgument(
+            'use_camera_ros', default_value='True',
+            description='True=use ros-humble-camera-ros (recommended on Ubuntu 22.04 Pi), '
+                        'False=use chess_perception camera_node (requires python3-libcamera)'),
+        DeclareLaunchArgument(
+            'use_picamera2', default_value='True',
+            description='(only when use_camera_ros=False) True=picamera2, False=OpenCV V4L2'),
+        DeclareLaunchArgument(
+            'calibration_file', default_value='',
+            description='Path to calibration.yaml (only used by chess_perception camera_node)'),
+        DeclareLaunchArgument(
+            'width', default_value='1280',
+            description='Camera capture width in pixels'),
+        DeclareLaunchArgument(
+            'height', default_value='720',
+            description='Camera capture height in pixels'),
+        DeclareLaunchArgument(
+            'fps', default_value='5.0',
+            description='Camera frame rate'),
     ]
 
-    use_picam = LaunchConfiguration('use_picamera2')
-    cal_file  = LaunchConfiguration('calibration_file')
+    use_camera_ros = LaunchConfiguration('use_camera_ros')
+    use_picam      = LaunchConfiguration('use_picamera2')
+    cal_file       = LaunchConfiguration('calibration_file')
+    width          = LaunchConfiguration('width')
+    height         = LaunchConfiguration('height')
+    fps            = LaunchConfiguration('fps')
 
     return LaunchDescription(args + [
 
-        LogInfo(msg='Starting perception stack (camera + board detector + piece detector)...'),
+        LogInfo(msg='Starting perception stack...'),
 
+        # ── Camera backend: ros-humble-camera-ros (preferred on Ubuntu 22.04) ──
+        # Publishes /camera/image_raw as bgr8 at 5fps.
+        # Requires: sudo apt install ros-humble-camera-ros
         Node(
-            package='chess_perception',
+            package='camera_ros',
             executable='camera_node',
             name='camera_node',
             parameters=[{
+                'width':  width,
+                'height': height,
+                'format': 'BGR888',
+            }],
+            remappings=[
+                ('image_raw',    '/camera/image_raw'),
+                ('camera_info',  '/camera/camera_info'),
+            ],
+            condition=IfCondition(use_camera_ros),
+            output='screen',
+        ),
+
+        # ── Camera backend: chess_perception camera_node (fallback) ──
+        # Used when use_camera_ros:=False.  Requires python3-libcamera for Pi CSI.
+        Node(
+            package='chess_perception',
+            executable='camera_node',
+            name='chess_camera_node',
+            parameters=[{
                 'use_picamera2':    use_picam,
-                'width':            1280,
-                'height':           720,
-                'fps':              5.0,
+                'width':            width,
+                'height':           height,
+                'fps':              fps,
                 'calibration_file': cal_file,
             }],
+            condition=UnlessCondition(use_camera_ros),
             output='screen',
         ),
 
@@ -72,6 +114,4 @@ def generate_launch_description():
         ),
 
         LogInfo(msg='Perception stack ready.'),
-        LogInfo(msg='Run vision tests with: --test vision_corners / vision_board / vision_pieces / vision_squares / vision_fen'),
     ])
-
