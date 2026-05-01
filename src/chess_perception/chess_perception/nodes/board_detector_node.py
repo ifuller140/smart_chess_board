@@ -33,12 +33,15 @@ class BoardDetectorNode(Node):
     def __init__(self):
         super().__init__('board_detector_node')
 
-        self.declare_parameter('detection_scale', 0.5)
-        self._det_scale = float(self.get_parameter('detection_scale').value)
+        self.declare_parameter('detection_scale', 0.25)
+        self.declare_parameter('detection_interval_ms', 200)
+        self._det_scale    = float(self.get_parameter('detection_scale').value)
+        self._det_interval = self.get_parameter('detection_interval_ms').value / 1000.0
 
         self._detector      = BoardDetector()
         self._last_corners  = None
-        self._last_geometry = None  # Most recent successful BoardGeometry
+        self._last_geometry = None
+        self._last_det_time = 0.0  # Monotonic time of last detection run
 
         # Thread-safe frame handoff: callback writes, detector thread reads
         self._pending_frame  = None
@@ -62,7 +65,8 @@ class BoardDetectorNode(Node):
 
         self.get_logger().info(
             f'Board Detector Node started '
-            f'(detection_scale={self._det_scale:.1f}, threaded)')
+            f'(detection_scale={self._det_scale:.2f}, '
+            f'min_interval={self._det_interval*1000:.0f}ms, threaded)')
 
     # ─────────────────────────────────────────────────────────────────────
     # ROS callback — just stores latest frame, never blocks
@@ -86,11 +90,18 @@ class BoardDetectorNode(Node):
     # ─────────────────────────────────────────────────────────────────────
 
     def _detect_loop(self):
+        import time
         while not self._shutdown.is_set():
             # Wait for a new frame (timeout 1s to allow shutdown check)
             if not self._frame_event.wait(timeout=1.0):
                 continue
             self._frame_event.clear()
+
+            # Rate-limit: skip if too soon since last detection
+            now = time.monotonic()
+            if now - self._last_det_time < self._det_interval:
+                continue
+            self._last_det_time = now
 
             with self._frame_lock:
                 frame  = self._pending_frame
