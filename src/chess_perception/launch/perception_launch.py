@@ -37,11 +37,11 @@ def generate_launch_description():
             'calibration_file', default_value='',
             description='Path to calibration.yaml (only used by chess_perception camera_node)'),
         DeclareLaunchArgument(
-            'width', default_value='640',
-            description='Camera capture width in pixels'),
+            'width', default_value='1640',
+            description='Camera capture width in pixels (1640 = Pi Cam v2 full-sensor 2x2-binned)'),
         DeclareLaunchArgument(
-            'height', default_value='480',
-            description='Camera capture height in pixels'),
+            'height', default_value='1232',
+            description='Camera capture height in pixels (1232 = Pi Cam v2 full-sensor 2x2-binned)'),
         DeclareLaunchArgument(
             'fps', default_value='5.0',
             description='Camera frame rate'),

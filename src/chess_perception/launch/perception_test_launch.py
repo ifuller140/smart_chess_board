@@ -81,14 +81,15 @@ def generate_launch_description():
         LogInfo(msg='[perception_test]   ros2 topic echo /perception/board_state'),
 
         # ── ros-humble-camera-ros backend (default, works on Ubuntu 22.04 Pi) ──
+        # 1640x1232 = Pi Camera v2 full-sensor 2x2-binned mode (full FOV, no center crop).
         # camera_ros publishes /camera_node/image_raw — remap to /camera/image_raw
         Node(
             package='camera_ros',
             executable='camera_node',
             name='camera_node',
             parameters=[{
-                'width':  640,
-                'height': 480,
+                'width':  1640,
+                'height': 1232,
                 'format': 'BGR888',
             }],
             remappings=[
@@ -108,8 +109,8 @@ def generate_launch_description():
             parameters=[{
                 'use_picamera2':    use_picam,
                 'camera_id':        camera_id,
-                'width':            1280,
-                'height':           720,
+                'width':            1640,
+                'height':           1232,
                 'fps':              5.0,
                 'calibration_file': cal_file,
             }],
