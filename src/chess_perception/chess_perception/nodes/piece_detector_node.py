@@ -76,7 +76,7 @@ class PieceDetectorNode(Node):
         self.declare_parameter('reference_capture_count', 5)
         self.declare_parameter('warp_size', 400)
         self.declare_parameter('auto_capture_reference', True)
-        self.declare_parameter('detection_hz', 3.0)
+        self.declare_parameter('detection_hz', 2.0)  # 2fps keeps Pi4 CPU below 30%
 
         self._occ_threshold   = self.get_parameter('occupancy_diff_threshold').value
         self._white_threshold = self.get_parameter('white_piece_brightness').value

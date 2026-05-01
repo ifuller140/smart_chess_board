@@ -33,8 +33,10 @@ class BoardDetectorNode(Node):
     def __init__(self):
         super().__init__('board_detector_node')
 
-        self.declare_parameter('detection_scale', 0.5)
-        self.declare_parameter('detection_hz', 5.0)
+        # At 640x480: scale=0.25 → 160x120. detect() takes ~40ms vs ~322ms at 320x240.
+        # 2Hz detection: 2 * 40ms = 80ms/sec = ~8% CPU for detection itself.
+        self.declare_parameter('detection_scale', 0.25)
+        self.declare_parameter('detection_hz', 2.0)
 
         self._det_scale = float(self.get_parameter('detection_scale').value)
         det_hz          = float(self.get_parameter('detection_hz').value)
