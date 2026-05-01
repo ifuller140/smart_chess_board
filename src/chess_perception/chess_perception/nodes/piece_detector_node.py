@@ -564,7 +564,7 @@ def main(args=None):
     try:
         while rclpy.ok():
             executor.spin_once(timeout_sec=0)
-            time.sleep(0.005)
+            time.sleep(0.02)  # 20ms idle sleep; 2Hz timer caught within 20ms
     except KeyboardInterrupt:
         pass
     finally:

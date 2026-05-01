@@ -143,7 +143,7 @@ def main(args=None):
             # Use timeout_sec=0 + explicit sleep: process any ready callback then
             # sleep 5ms. Detection timer at 5Hz is handled within 5ms of being due.
             executor.spin_once(timeout_sec=0)
-            time.sleep(0.005)
+            time.sleep(0.02)  # 20ms: ~50 checks/sec, callbacks caught within 20ms of due
     except KeyboardInterrupt:
         pass
     finally:
