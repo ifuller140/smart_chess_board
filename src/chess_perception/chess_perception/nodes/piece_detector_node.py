@@ -71,18 +71,25 @@ class PieceDetectorNode(Node):
         super().__init__('piece_detector_node')
 
         # ── Parameters ───────────────────────────────────────────────────
-        self.declare_parameter('occupancy_diff_threshold', 25)
+        self.declare_parameter('occupancy_diff_threshold', 12)
         self.declare_parameter('white_piece_brightness', 0.65)
         self.declare_parameter('reference_capture_count', 5)
         self.declare_parameter('warp_size', 400)
         self.declare_parameter('auto_capture_reference', True)
-        self.declare_parameter('detection_hz', 2.0)  # 2fps keeps Pi4 CPU below 30%
+        self.declare_parameter('detection_hz', 2.0)
+        # LAB-based detection (active when a reference frame exists)
+        self.declare_parameter('black_piece_L_delta', 25.0)
+        self.declare_parameter('white_piece_L_delta', 12.0)
+        self.declare_parameter('warm_shift_threshold', 8.0)
 
         self._occ_threshold   = self.get_parameter('occupancy_diff_threshold').value
         self._white_threshold = self.get_parameter('white_piece_brightness').value
         self._ref_count       = self.get_parameter('reference_capture_count').value
         self._warp_size       = self.get_parameter('warp_size').value
         self._auto_capture    = self.get_parameter('auto_capture_reference').value
+        self._black_delta     = float(self.get_parameter('black_piece_L_delta').value)
+        self._white_delta     = float(self.get_parameter('white_piece_L_delta').value)
+        self._warm_shift      = float(self.get_parameter('warm_shift_threshold').value)
         det_hz                = float(self.get_parameter('detection_hz').value)
 
         # ── State ────────────────────────────────────────────────────────
@@ -331,22 +338,56 @@ class PieceDetectorNode(Node):
         reference: Optional[np.ndarray],
     ):
         """
-        Analyse all 64 squares.
+        Analyse all 64 squares for occupancy and piece color.
+
+        When a reference (empty-board baseline) is available, uses LAB color
+        space comparison — robust against white-piece / tan-board confusion.
+
+        When no reference is available, falls back to variance-based detection.
 
         Returns:
-          occupancy (list[bool]): True if square has a piece, indexed [0..63]
-                                   index 0 = a8 (top-left in image), index 63 = h1.
-          colors    (list[str]):  'W', 'B', or '' for each square.
+          occupancy (list[bool]): True if occupied, index 0 = a8 (top-left in image)
+          colors    (list[str]):  'W', 'B', or '' per square
+        """
+        if reference is not None:
+            return self._analyse_squares_lab(warped, reference)
+        return self._analyse_squares_variance(warped)
+
+    def _analyse_squares_lab(
+        self,
+        warped: np.ndarray,
+        reference: np.ndarray,
+    ):
+        """
+        LAB-based square analysis using a stored empty-board reference.
+
+        Why LAB works here:
+          The tan/wood board has significant b+ (warm/yellow) color in LAB space.
+          White plastic chess pieces are largely color-neutral (b ≈ 0).
+          Even when a white piece and the board square have similar BRIGHTNESS,
+          the board's warmth (positive b) vs the piece's neutrality (low b) is
+          a reliable discriminator.
+
+        Occupancy score:
+          score = |ΔL| + 0.4·|Δb| + 0.5·max(0, σ_L_cur − σ_L_ref)
+          where ΔL = lightness change, Δb = warm/cool axis change, σ = std-dev
+          Pieces create both a lightness change AND increase intra-square variance
+          (shadow at base, highlight at top).
+
+        Color classification:
+          BLACK  → L drops significantly below reference (piece is dark)
+          WHITE  → b decreases (piece less warm than empty board) OR L rises
+          Ambiguous → compare piece L to overall board L mean
         """
         size   = warped.shape[0]
         sq_px  = size // 8
-        margin = sq_px // 6   # Ignore board square borders
+        margin = max(2, sq_px // 8)   # tight margin keeps sampling on the piece, not border
 
-        gray_warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        gray_ref    = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY) if reference is not None else None
+        cur_lab = cv2.cvtColor(warped,    cv2.COLOR_BGR2LAB).astype(np.float32)
+        ref_lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-        # Global board brightness statistics for relative color classification
-        board_mean = float(np.mean(gray_warped))
+        # Global L mean for the ambiguous-piece fallback (bright = white)
+        board_L_mean = float(np.mean(cur_lab[:, :, 0]))
 
         occupancy: list = []
         colors:    list = []
@@ -358,29 +399,67 @@ class PieceDetectorNode(Node):
                 x1 = col * sq_px + margin
                 x2 = (col + 1) * sq_px - margin
 
-                roi_gray = gray_warped[y1:y2, x1:x2]
+                cur_roi = cur_lab[y1:y2, x1:x2]
+                ref_roi = ref_lab[y1:y2, x1:x2]
 
-                # ── Occupancy ──────────────────────────────────────────
-                if gray_ref is not None:
-                    ref_roi = gray_ref[y1:y2, x1:x2]
-                    diff = cv2.absdiff(roi_gray, ref_roi)
-                    occupied = int(np.mean(diff)) > self._occ_threshold
-                else:
-                    # No reference: fall back to variance-based detection
-                    # High variance within a square suggests a piece boundary
-                    std_val = float(np.std(roi_gray))
-                    occupied = std_val > 20.0
+                cur_L = float(np.mean(cur_roi[:, :, 0]))
+                ref_L = float(np.mean(ref_roi[:, :, 0]))
+                cur_b = float(np.mean(cur_roi[:, :, 2]))   # b channel: warm (+) ↔ cool (−)
+                ref_b = float(np.mean(ref_roi[:, :, 2]))
 
+                signed_L = cur_L - ref_L   # positive = current brighter than empty
+                signed_b = ref_b - cur_b   # positive = reference warmer, piece more neutral
+                var_inc  = max(0.0,
+                               float(np.std(cur_roi[:, :, 0])) -
+                               float(np.std(ref_roi[:, :, 0])))
+
+                occ_score = abs(signed_L) + 0.4 * abs(signed_b) + 0.5 * var_inc
+                occupied  = occ_score > self._occ_threshold
                 occupancy.append(occupied)
 
-                # ── Color classification ───────────────────────────────
+                if not occupied:
+                    colors.append('')
+                    continue
+
+                if signed_L < -self._black_delta:
+                    # Much darker than reference → black piece
+                    colors.append('B')
+                elif signed_L > self._white_delta or signed_b > self._warm_shift:
+                    # Brighter than reference OR reference was warmer → white piece
+                    colors.append('W')
+                else:
+                    # Ambiguous: use current brightness vs overall board mean
+                    colors.append('W' if cur_L >= board_L_mean * 0.92 else 'B')
+
+        return occupancy, colors
+
+    def _analyse_squares_variance(self, warped: np.ndarray):
+        """
+        Variance-based occupancy fallback used when no reference frame exists.
+        Less accurate for white pieces on tan boards; capture a reference for best results.
+        """
+        size   = warped.shape[0]
+        sq_px  = size // 8
+        margin = sq_px // 6
+
+        gray        = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        white_level = self._white_threshold * 255.0
+
+        occupancy: list = []
+        colors:    list = []
+
+        for row in range(8):
+            for col in range(8):
+                y1 = row * sq_px + margin
+                y2 = (row + 1) * sq_px - margin
+                x1 = col * sq_px + margin
+                x2 = (col + 1) * sq_px - margin
+
+                roi = gray[y1:y2, x1:x2]
+                occupied = float(np.std(roi)) > 20.0
+                occupancy.append(occupied)
                 if occupied:
-                    roi_mean = float(np.mean(roi_gray))
-                    # white_piece_brightness (0-1) is an absolute brightness fraction:
-                    # 0.65 → pieces with mean > 165/255 are white, below are black
-                    white_level = self._white_threshold * 255.0
-                    is_white = roi_mean > white_level
-                    colors.append('W' if is_white else 'B')
+                    colors.append('W' if float(np.mean(roi)) > white_level else 'B')
                 else:
                     colors.append('')
 
