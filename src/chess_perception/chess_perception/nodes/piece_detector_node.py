@@ -441,16 +441,20 @@ class PieceDetectorNode(Node):
                         row_str   += str(empty_run)
                         empty_run = 0
 
-                    # Try to get piece from authoritative board first
+                    # Use authoritative piece type only when the detected color matches.
+                    # A color mismatch means a different piece moved here since the last
+                    # authoritative update (e.g. a capture destination or castling square).
                     auth_piece = auth_board.piece_at(sq)
-                    if auth_piece:
+                    if auth_piece and (auth_piece.color == chess.WHITE) == (col == 'W'):
                         symbol = auth_piece.symbol()  # uppercase=white, lowercase=black
                     else:
-                        # Not on auth board — guess generic piece
+                        # No auth piece here, or wrong color — piece moved to this square
                         symbol = 'P' if col == 'W' else 'p'
-                        self.get_logger().debug(
-                            f'Vision sees piece at {chess.square_name(sq)} '
-                            f'but auth board is empty — using fallback symbol {symbol}')
+                        if auth_piece:
+                            self.get_logger().debug(
+                                f'Color mismatch at {chess.square_name(sq)}: '
+                                f'vision={col} auth={auth_piece.symbol()} — using fallback'
+                            )
 
                     row_str += symbol
 
@@ -500,11 +504,13 @@ class PieceDetectorNode(Node):
                     continue
 
                 auth_piece = auth_board.piece_at(sq)
-                if auth_piece:
+                vision_white = (colors[arr_idx] == 'W')
+                if auth_piece and (auth_piece.color == chess.WHITE) == vision_white:
                     pid = PIECE_ID.get(auth_piece.piece_type, 1)
                     pieces.append(pid if auth_piece.color == chess.WHITE else -pid)
                 else:
-                    pieces.append(1 if colors[arr_idx] == 'W' else -1)
+                    # Color mismatch or unknown square — generic pawn placeholder
+                    pieces.append(1 if vision_white else -1)
 
         return pieces
 

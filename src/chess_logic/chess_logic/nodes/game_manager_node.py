@@ -140,6 +140,11 @@ class GameManagerNode(Node):
         self._engine_client = self.create_client(
             RequestMove, '/chess_engine/request_move')
 
+        # Publish initial FEN so piece_detector starts with correct state
+        self._publish_board_fen()
+        # Periodic re-publish so piece_detector gets FEN even after a restart
+        self.create_timer(2.0, self._publish_board_fen)
+
         # ── Start game loop thread ─────────────────────────────────────────
         self._game_thread = threading.Thread(
             target=self._game_loop, daemon=True, name='game_loop')
@@ -193,6 +198,7 @@ class GameManagerNode(Node):
             return
 
         self._transition(GS.IDLE)
+        self._verify_starting_position()
         self.get_logger().info('Ready. Waiting for human to make first move then press clock...')
 
         # ── Main game loop ────────────────────────────────────────────────
@@ -225,6 +231,7 @@ class GameManagerNode(Node):
                     self.get_logger().info('First clock press — game starting!')
                     self._board = chess.Board()        # fresh game
                     self._pre_move_fen = self._board.fen()
+                    self._publish_board_fen()
 
                 # ── Capture board state ───────────────────────────────────
                 self._transition(GS.CAPTURING_BOARD)
@@ -245,6 +252,7 @@ class GameManagerNode(Node):
 
                 # Apply move to internal board
                 self._board.push(human_move)
+                self._publish_board_fen()
                 self.get_logger().info(
                     f'Human move accepted: {human_move.uci()}  '
                     f'Board: {self._board.fen().split(" ")[0]}')
@@ -291,6 +299,7 @@ class GameManagerNode(Node):
                 )
 
                 self._board.push(computer_move)
+                self._publish_board_fen()
 
                 # If computer promoted (black pawn to rank 1), wait for user
                 if needs_promotion_wait:
@@ -377,37 +386,119 @@ class GameManagerNode(Node):
 
     def _do_validate_move(self) -> 'chess.Move | None':
         """
-        Infer the human's move by comparing pre-move and post-move FEN.
+        Infer the human's move by comparing which squares changed occupancy
+        between the pre-move board and the detected board.
 
-        Strategy: try every legal move from the pre-move position; see
-        which one produces a board position matching the detected FEN.
-        This handles all special moves (castling, en passant, promotion)
-        automatically via python-chess.
+        Uses square-occupancy comparison rather than piece-type comparison,
+        making it robust against the vision limitation that piece types for
+        moved pieces cannot always be determined (they fall back to generic
+        'P'/'p' symbols in the detected FEN).
+
+        Handles all special moves automatically:
+          - Normal moves:   1 square disappears, 1 appears
+          - Captures:       1 extra square disappears (captured piece gone)
+          - En passant:     2 squares disappear, 1 appears
+          - Castling:       2 squares disappear, 2 appear
+          - Promotion:      same footprint as normal; prefer queen if ambiguous
         """
-        pre_board = chess.Board(self._pre_move_fen)
-        detected_piece_layout = self._latest_fen.split(' ')[0]
+        pre_board    = chess.Board(self._pre_move_fen)
+        det_layout   = self._latest_fen.split(' ')[0]
+        det_occupied = self._fen_to_occupied_squares(det_layout)
+        det_colors   = self._fen_to_color_map(det_layout)
 
-        for candidate_move in pre_board.legal_moves:
-            test_board = pre_board.copy()
-            test_board.push(candidate_move)
-            candidate_layout = test_board.fen().split(' ')[0]
-            if candidate_layout == detected_piece_layout:
-                self.get_logger().info(
-                    f'Inferred move: {candidate_move.uci()} '
-                    f'({chess.piece_name(pre_board.piece_at(candidate_move.from_square).piece_type)} '
-                    f'{chess.square_name(candidate_move.from_square)}'
-                    f'→{chess.square_name(candidate_move.to_square)})'
-                )
-                return candidate_move
+        pre_occupied = {sq for sq in chess.SQUARES if pre_board.piece_at(sq) is not None}
+        disappeared  = pre_occupied - det_occupied
+        appeared     = det_occupied - pre_occupied
 
-        # No legal move matched — perception might be a placeholder or move is ambiguous
-        self.get_logger().warn(
-            f'No legal move matches detected FEN.\n'
-            f'  Pre-move:  {pre_board.fen()}\n'
-            f'  Detected:  {self._latest_fen}\n'
-            f'  Legal moves: {[m.uci() for m in pre_board.legal_moves]}'
+        candidates = []
+        for move in pre_board.legal_moves:
+            test_board   = pre_board.copy()
+            test_board.push(move)
+            test_occupied    = {sq for sq in chess.SQUARES if test_board.piece_at(sq) is not None}
+            test_disappeared = pre_occupied - test_occupied
+            test_appeared    = test_occupied - pre_occupied
+
+            if test_disappeared != disappeared or test_appeared != appeared:
+                continue
+
+            # Color sanity check: newly-appeared squares should have the right color
+            color_ok = True
+            for sq in appeared:
+                piece = test_board.piece_at(sq)
+                if piece is None:
+                    continue
+                expected_white = (piece.color == chess.WHITE)
+                detected_col   = det_colors.get(sq)
+                if detected_col is not None and (detected_col == 'W') != expected_white:
+                    color_ok = False
+                    break
+            if color_ok:
+                candidates.append(move)
+
+        if len(candidates) == 0:
+            self.get_logger().warn(
+                f'No legal move matches detected square changes.\n'
+                f'  Disappeared: {[chess.square_name(s) for s in sorted(disappeared)]}\n'
+                f'  Appeared:    {[chess.square_name(s) for s in sorted(appeared)]}\n'
+                f'  Pre-FEN:     {self._pre_move_fen}\n'
+                f'  Detected:    {self._latest_fen}'
+            )
+            return None
+
+        if len(candidates) == 1:
+            move = candidates[0]
+            piece = pre_board.piece_at(move.from_square)
+            pname = chess.piece_name(piece.piece_type) if piece else '?'
+            self.get_logger().info(
+                f'Inferred move: {move.uci()} '
+                f'({pname} {chess.square_name(move.from_square)}'
+                f'→{chess.square_name(move.to_square)})'
+            )
+            return move
+
+        # Multiple candidates — only happens with pawn promotion ambiguity
+        queen_promo = [m for m in candidates if m.promotion == chess.QUEEN]
+        if queen_promo:
+            self.get_logger().info(
+                f'Promotion ambiguity resolved to queen: {queen_promo[0].uci()}')
+            return queen_promo[0]
+
+        chosen = candidates[0]
+        self.get_logger().info(
+            f'Multiple candidates, chose: {chosen.uci()} '
+            f'(all: {[m.uci() for m in candidates]})'
         )
-        return None
+        return chosen
+
+    # ─────────────────────────────────────────────────────────────────────
+    # FEN Parsing Helpers (used by _do_validate_move)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _fen_to_occupied_squares(self, fen_position: str) -> set:
+        """Return the set of occupied square indices from a FEN position string."""
+        occupied, rank, col = set(), 7, 0
+        for ch in fen_position:
+            if ch == '/':
+                rank -= 1; col = 0
+            elif ch.isdigit():
+                col += int(ch)
+            else:
+                occupied.add(chess.square(col, rank))
+                col += 1
+        return occupied
+
+    def _fen_to_color_map(self, fen_position: str) -> dict:
+        """Return {square_index: 'W'|'B'} from a FEN position string."""
+        colors, rank, col = {}, 7, 0
+        for ch in fen_position:
+            if ch == '/':
+                rank -= 1; col = 0
+            elif ch.isdigit():
+                col += int(ch)
+            else:
+                colors[chess.square(col, rank)] = 'W' if ch.isupper() else 'B'
+                col += 1
+        return colors
 
     def _do_get_engine_move(self) -> 'str | None':
         """Call chess engine for best response move. Returns UCI string or None."""
@@ -531,6 +622,44 @@ class GameManagerNode(Node):
         self._turn_pub.publish(String(data=player))
         if player != 'NONE':
             self.get_logger().info(f'Clock turn: {player}')
+
+    def _publish_board_fen(self):
+        """Publish the current authoritative board FEN to piece_detector and visualizer."""
+        self._fen_pub.publish(String(data=self._board.fen()))
+
+    def _verify_starting_position(self):
+        """
+        Capture the board once and check it matches the chess starting position.
+        Non-blocking — just logs the result. Called once when entering IDLE.
+        """
+        self.get_logger().info('Verifying starting position...')
+        if not self._capture_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().info(
+                'Camera service not available for start check — '
+                'verify manually that all pieces are in starting position')
+            return
+
+        self._board_state_event.clear()
+        self._capture_client.call_async(Trigger.Request())
+        got = self._board_state_event.wait(timeout=4.0)
+
+        if not got:
+            self.get_logger().warn(
+                'Starting position check timed out — perception stack may not be running')
+            return
+
+        detected_layout = self._latest_fen.split(' ')[0]
+        starting_layout = chess.STARTING_FEN.split(' ')[0]
+
+        if detected_layout == starting_layout:
+            self.get_logger().info(
+                '✓ Starting position verified — all 32 pieces detected in correct positions')
+        else:
+            det_count = sum(1 for c in detected_layout if c.isalpha())
+            self.get_logger().warn(
+                f'Starting position not confirmed ({det_count} pieces detected). '
+                f'Please arrange all pieces in starting position before pressing clock.'
+            )
 
 
 def main(args=None):
