@@ -47,4 +47,4 @@
 
 ---
 
-See [AGENTS.md](../../AGENTS.md) for agent workflow constraints.
+See [CLAUDE.md](../../CLAUDE.md) for agent workflow constraints.

@@ -48,8 +48,9 @@ src/
 
 ### Build Workspace
 ```bash
-cd ~/smart_chess_ws
-colcon build
+cd ~/dev/smart_chess_board
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
 source install/setup.bash
 ```
 
@@ -96,10 +97,11 @@ colcon test --packages-select <package>
 ```
 
 ### Component Tests
-Standalone test scripts in `/code/`:
-- `square.py` - Test stepper motion
-- `ServoTestController.py` - Test servo
-- `rotate.py` - Test motor rotation
+Standalone scripts in `code/`:
+- `square.py` — Stepper motion test
+- `ServoTestController.py` — Servo test
+- `gantry_calibration.py` — Gantry calibration
+- `camera_stream_server.py` — Raw MJPEG stream (port 8080)
 
 ---
 

@@ -1,6 +1,6 @@
 # Project Context - Smart Chess Board
 
-> **Complete context document for AI agents. Read AGENTS.md first.**
+> **Complete context document for AI agents. Read CLAUDE.md first.**
 
 ## Project Vision
 
@@ -199,9 +199,12 @@ pip3 install RPi.GPIO python-chess opencv-python numpy
 | GPIO pin config | `src/chess_hw_interface/config/pins.yaml` |
 | CV parameters | `src/chess_perception/config/cv_params.yaml` |
 | Board coordinates | `src/gantry_control/config/board_map.yaml` |
+| Camera calibration | `src/chess_perception/config/calibration.npz` |
 | Launch all | `src/launch/full_system_launch.py` |
 | Test scripts | `code/*.py` |
 | CAD exports | `cad/exports/` |
+| System config (sudoers) | `setup/` |
+| Vision system docs | `docs/features/vision-system.md` |
 
 ## Testing Hierarchy
 
@@ -222,4 +225,4 @@ pip3 install RPi.GPIO python-chess opencv-python numpy
 
 ---
 
-*See [AGENTS.md](../AGENTS.md) for quick reference and task guidelines.*
+*See [CLAUDE.md](../CLAUDE.md) for quick reference and task guidelines.*

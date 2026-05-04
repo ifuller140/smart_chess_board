@@ -12,7 +12,7 @@ This section contains detailed technical documentation for each major feature of
 |----------|---------|--------|
 | [corexy-gantry.md](corexy-gantry.md) | CoreXY motion system | 🔄 In Development |
 | [moving-logic.md](moving-logic.md) | Collision-aware piece movement | 🔄 In Development |
-| [vision-calibration.md](vision-calibration.md) | Camera calibration & perspective | 📋 Planned |
+| [vision-system.md](vision-system.md) | Camera calibration, perception stack, web interfaces | 🔄 In Development |
 | [piece-detection.md](piece-detection.md) | Computer vision pipeline | 📋 Planned |
 | [game-logic.md](game-logic.md) | Chess engine integration | 📋 Planned |
 | [magnet-system.md](magnet-system.md) | Electromagnet piece pickup | 📋 Planned |
@@ -40,7 +40,7 @@ python3 -m chess_hw_interface.testing.test_runner --category gantry --subtest fu
 
 **Available test categories:** gantry, servo, camera, magnet, clock (with gantry subtests)
 
-See [AGENTS.md](../../AGENTS.md#hardware-testing-suite) for full CLI reference.
+See [CLAUDE.md](../../CLAUDE.md#hardware-testing-suite) for full CLI reference.
 
 ## Feature Roadmap
 

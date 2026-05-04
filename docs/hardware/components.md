@@ -302,7 +302,7 @@ Side View:
 
 > [!IMPORTANT]
 > Camera is NOT directly above the board. Perspective correction is required.
-> See [docs/features/vision-calibration.md](../features/vision-calibration.md) for calibration procedure.
+> See [docs/features/vision-system.md](../features/vision-system.md) for calibration procedure and web interfaces.
 
 ---
 
