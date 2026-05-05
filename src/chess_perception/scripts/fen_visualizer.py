@@ -43,8 +43,6 @@ _DEFAULT_CORNERS = [
 ]
 
 _state = {
-    # Vision / detection
-    "detected_fen":   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "last_move":      "",    # last detected changed squares e.g. "e2,e4"
     "frame_count":    0,
     "last_updated":   0.0,
@@ -52,7 +50,6 @@ _state = {
     "raw_frame":      None,
     "cam_info":       "–",
     "corners":        [list(c) for c in _DEFAULT_CORNERS],
-    "pieces64":       [""] * 64,
     # Game manager state (updated via ROS)
     "game_fen":       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "game_state":     "OFFLINE",
@@ -60,21 +57,14 @@ _state = {
     "fen_source":     "local",   # "game_mgr" | "local"
 }
 
-# Tunable detection params
+# Tunable display params
 _params = {
-    "white_thresh":       200,
-    "black_thresh":        60,
-    "min_blob_area":       80,
-    "bottom_anchor_bias": 0.85,
     "undistort_enable":    0,
     "undistort_k1":       -25,
     "undistort_k2":         8,
     "undistort_focal":     83,
     "warp_size":          480,
     "show_grid":            1,
-    "show_pieces":          1,
-    "show_white_mask":      0,
-    "show_black_mask":      0,
 }
 
 _CORNERS_FILE = os.path.join(os.path.dirname(__file__), "board_corners.json")
@@ -104,10 +94,7 @@ def _save_corners(corners):
 
 def _best_fen():
     """Return the most authoritative FEN available."""
-    src = _state.get("fen_source", "local")
-    if src == "game_mgr" and _state.get("game_fen"):
-        return _state["game_fen"]
-    return _state.get("detected_fen", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    return _state.get("game_fen") or "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 
 # ─── Lens undistortion ────────────────────────────────────────────────────────
@@ -143,84 +130,6 @@ def _warp_frame(frame, corners_norm, warp_size):
     return warped, M, M_inv, corners_px
 
 
-# ─── Piece blob detection ─────────────────────────────────────────────────────
-def _make_piece_masks(warped_gray, p):
-    white_mask = cv2.threshold(warped_gray, p["white_thresh"], 255, cv2.THRESH_BINARY)[1]
-    black_mask = cv2.threshold(warped_gray, p["black_thresh"], 255, cv2.THRESH_BINARY_INV)[1]
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, k)
-    black_mask = cv2.morphologyEx(black_mask, cv2.MORPH_OPEN, k)
-    return white_mask, black_mask
-
-
-def _assign_blob_to_square(blob_mask, sq_size, p, piece_color):
-    contours, _ = cv2.findContours(blob_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    assignments = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < p["min_blob_area"]:
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        M_cnt = cv2.moments(cnt)
-        if M_cnt["m00"] == 0:
-            continue
-        cx = int(M_cnt["m10"] / M_cnt["m00"])
-        cy_center = int(M_cnt["m01"] / M_cnt["m00"])
-        cy_bottom = y + h
-        bias = p["bottom_anchor_bias"]
-        cy_anchor = int(cy_center * (1.0 - bias) + cy_bottom * bias)
-        cy_anchor = min(cy_anchor, sq_size * 8 - 1)
-        cx = min(max(cx, 0), sq_size * 8 - 1)
-        row = cy_anchor // sq_size
-        col = cx // sq_size
-        assignments.append((row, col, area))
-    return assignments
-
-
-def _detect_pieces(warped, p):
-    sq = p["warp_size"] // 8
-    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-    white_mask, black_mask = _make_piece_masks(gray, p)
-    best = {}
-    for color_char, mask in [('W', white_mask), ('B', black_mask)]:
-        for row, col, area in _assign_blob_to_square(mask, sq, p, color_char):
-            key = (row, col)
-            if key not in best or area > best[key][0]:
-                best[key] = (area, color_char)
-    pieces64 = [""] * 64
-    for (row, col), (area, color_char) in best.items():
-        if 0 <= row < 8 and 0 <= col < 8:
-            pieces64[row * 8 + col] = color_char
-    return pieces64, white_mask, black_mask
-
-
-# ─── FEN builder (local/offline detection only — produces P/p) ────────────────
-def _build_fen_local(pieces64):
-    """
-    Builds a FEN from local color detection. Uses generic 'P'/'p' symbols
-    because color thresholding cannot distinguish piece types.
-    The game_manager's authoritative FEN (game_fen) is used for the chess
-    board display when ROS is connected.
-    """
-    rows = []
-    for rank_i in range(7, -1, -1):
-        warp_row = 7 - rank_i
-        empty, row_str = 0, ''
-        for file_i in range(8):
-            idx = warp_row * 8 + file_i
-            pc = pieces64[idx]
-            if not pc:
-                empty += 1
-            else:
-                if empty:
-                    row_str += str(empty)
-                    empty = 0
-                row_str += 'P' if pc == 'W' else 'p'
-        if empty:
-            row_str += str(empty)
-        rows.append(row_str)
-    return '/'.join(rows) + ' w KQkq - 0 1'
-
 
 # ─── Render helpers ───────────────────────────────────────────────────────────
 def _draw_grid(img, sq):
@@ -254,7 +163,7 @@ def _blank_jpeg(w, h, msg, color=(200, 200, 200)):
     return bytes(buf)
 
 
-def _render_raw(frame, corners, p, pieces64, M_inv):
+def _render_raw(frame, corners, p, M_inv):
     out = frame.copy()
     sz = p["warp_size"]
     sq = sz // 8
@@ -270,19 +179,6 @@ def _render_raw(frame, corners, p, pieces64, M_inv):
             q0 = cv2.perspectiveTransform(q0w, M_inv)[0, 0].astype(int)
             q1 = cv2.perspectiveTransform(q1w, M_inv)[0, 0].astype(int)
             cv2.line(out, tuple(q0), tuple(q1), (0, 200, 200), 1)
-    if p["show_pieces"] and M_inv is not None:
-        for row in range(8):
-            for col in range(8):
-                pc = pieces64[row * 8 + col]
-                if pc:
-                    cx_w = col * sq + sq // 2
-                    cy_w = row * sq + sq // 2
-                    pt = cv2.perspectiveTransform(
-                        np.float32([[[cx_w, cy_w]]]), M_inv)[0, 0].astype(int)
-                    color = (255, 255, 255) if pc == 'W' else (30, 30, 30)
-                    border = (0, 0, 0) if pc == 'W' else (200, 200, 200)
-                    cv2.putText(out, pc, tuple(pt), cv2.FONT_HERSHEY_SIMPLEX, 0.7, border, 4)
-                    cv2.putText(out, pc, tuple(pt), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     labels = ['TL', 'TR', 'BR', 'BL']
     handle_colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255), (255, 255, 80)]
     for i, (cx, cy) in enumerate(corners):
@@ -295,7 +191,7 @@ def _render_raw(frame, corners, p, pieces64, M_inv):
     return out
 
 
-def _render_warp(warped, p, pieces64, white_mask, black_mask):
+def _render_warp(warped, p):
     out = warped.copy()
     sz = p["warp_size"]
     sq = sz // 8
@@ -308,26 +204,6 @@ def _render_warp(warped, p, pieces64, white_mask, black_mask):
     if p["show_grid"]:
         _draw_grid(out, sq)
         _draw_rank_file_labels(out, sq)
-    if p["show_white_mask"] and white_mask is not None:
-        overlay = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
-        overlay[:, :, 0] = 0; overlay[:, :, 1] = 0
-        out = cv2.addWeighted(out, 0.7, overlay, 0.3, 0)
-    if p["show_black_mask"] and black_mask is not None:
-        overlay = cv2.cvtColor(black_mask, cv2.COLOR_GRAY2BGR)
-        overlay[:, :, 1] = 0; overlay[:, :, 2] = 0
-        out = cv2.addWeighted(out, 0.7, overlay, 0.3, 0)
-    if p["show_pieces"]:
-        for row in range(8):
-            for col in range(8):
-                pc = pieces64[row * 8 + col]
-                if pc:
-                    cx, cy = col * sq + sq // 2, row * sq + sq // 2
-                    fill   = (240, 240, 240) if pc == 'W' else (25, 25, 25)
-                    border = (80, 80, 80)
-                    cv2.circle(out, (cx, cy), sq // 3, fill, -1)
-                    cv2.circle(out, (cx, cy), sq // 3, border, 1)
-                    tc = (30, 30, 30) if pc == 'W' else (220, 220, 220)
-                    cv2.putText(out, pc, (cx - 8, cy + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, tc, 2)
     cv2.rectangle(out, (0, 0), (sz - 1, sz - 1), (0, 255, 100), 2)
     return out
 
@@ -340,21 +216,14 @@ _proc_lock = threading.Lock()
 def _process_frame(frame, corners, p):
     try:
         warped, M, M_inv, corners_px = _warp_frame(frame, corners, p["warp_size"])
-        pieces64, white_mask, black_mask = _detect_pieces(warped, p)
-        fen = _build_fen_local(pieces64)
 
-        raw_img  = _render_raw(frame, corners_px, p, pieces64, M_inv)
-        warp_img = _render_warp(warped, p, pieces64, white_mask, black_mask)
+        raw_img  = _render_raw(frame, corners_px, p, M_inv)
+        warp_img = _render_warp(warped, p)
 
         with _lock:
-            _state["pieces64"]      = pieces64
-            _state["detected_fen"]  = fen
             _state["frame_count"]  += 1
             _state["last_updated"]  = time.time()
             _state["error"]         = ""
-            # Only promote detected_fen if no better source is available
-            if _state["fen_source"] == "local":
-                pass  # detected_fen is already the fallback in _best_fen()
 
         with _proc_lock:
             _processed["raw"]  = _frame_to_jpeg(raw_img,  scale=0.8)
@@ -920,12 +789,6 @@ window.addEventListener('resize', positionHandles);
 // ── Parameter controls ───────────────────────────────────────────────────────
 var curParams = {};
 var GROUPS = [
-  {t:'Piece Detection', p:[
-    {k:'white_thresh',        l:'White threshold',      mn:100, mx:255, st:1},
-    {k:'black_thresh',        l:'Black threshold',      mn:0,   mx:120, st:1},
-    {k:'min_blob_area',       l:'Min blob area (px²)',  mn:10,  mx:1000,st:10},
-    {k:'bottom_anchor_bias',  l:'Bottom-anchor bias',   mn:0,   mx:100, st:1, scale:100}
-  ]},
   {t:'Lens Correction', p:[
     {k:'undistort_k1',    l:'k1 (×100)',       mn:-80, mx:80,  st:1},
     {k:'undistort_k2',    l:'k2 (×100)',       mn:-50, mx:50,  st:1},
@@ -935,10 +798,7 @@ var GROUPS = [
     {k:'warp_size', l:'Warp output size (px)', mn:240, mx:800, st:40}
   ]},
   {t:'Overlay Options', togs:[
-    {k:'show_grid',       l:'Show grid overlay'},
-    {k:'show_pieces',     l:'Show piece circles'},
-    {k:'show_white_mask', l:'White mask debug'},
-    {k:'show_black_mask', l:'Black mask debug'}
+    {k:'show_grid', l:'Show grid overlay'}
   ]}
 ];
 
