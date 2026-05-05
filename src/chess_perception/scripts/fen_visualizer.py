@@ -44,20 +44,20 @@ _DEFAULT_CORNERS = [
 
 _state = {
     # Vision / detection
-    "detected_fen":  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-    "perception_fen": "",
-    "frame_count":   0,
-    "last_updated":  0.0,
-    "error":         "",
-    "raw_frame":     None,
-    "cam_info":      "–",
-    "corners":       [list(c) for c in _DEFAULT_CORNERS],
-    "pieces64":      [""] * 64,
+    "detected_fen":   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "last_move":      "",    # last detected changed squares e.g. "e2,e4"
+    "frame_count":    0,
+    "last_updated":   0.0,
+    "error":          "",
+    "raw_frame":      None,
+    "cam_info":       "–",
+    "corners":        [list(c) for c in _DEFAULT_CORNERS],
+    "pieces64":       [""] * 64,
     # Game manager state (updated via ROS)
-    "game_fen":      "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-    "game_state":    "OFFLINE",
-    "game_turn":     "",
-    "fen_source":    "local",   # "game_mgr" | "perception" | "local"
+    "game_fen":       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "game_state":     "OFFLINE",
+    "game_turn":      "",
+    "fen_source":     "local",   # "game_mgr" | "local"
 }
 
 # Tunable detection params
@@ -107,8 +107,6 @@ def _best_fen():
     src = _state.get("fen_source", "local")
     if src == "game_mgr" and _state.get("game_fen"):
         return _state["game_fen"]
-    if _state.get("perception_fen"):
-        return _state["perception_fen"]
     return _state.get("detected_fen", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 
 
@@ -396,17 +394,9 @@ class FenNode(Node):
     def __init__(self):
         super().__init__("fen_visualizer")
 
-        # Perception pipeline FEN (has correct piece types when game_manager is running)
-        try:
-            try:
-                from chess_perception.msg import BoardState
-            except ImportError:
-                from chess_interfaces.msg import BoardState
-            self.create_subscription(BoardState, "/perception/board_state",
-                                     self._on_bs, 10)
-        except ImportError:
-            self.create_subscription(String, "/perception/board_state_fen",
-                                     self._on_str, 10)
+        # Changed squares from piece_detector_node (frame-diff detection)
+        self.create_subscription(String, "/perception/changed_squares",
+                                 self._on_changed_squares, 10)
 
         # Camera image for local processing
         self.create_subscription(Image, "/camera/image_raw", self._on_img, 10)
@@ -421,24 +411,12 @@ class FenNode(Node):
 
         self.get_logger().info("FenNode ready — subscribed to perception + game manager topics")
 
-    def _on_bs(self, msg):
-        fen = getattr(msg, "fen", "")
-        if fen:
-            with _lock:
-                _state["perception_fen"] = fen
-                _state["last_updated"]   = time.time()
-                _state["frame_count"]   += 1
-                # Promote perception_fen if game_mgr isn't connected
-                if _state["fen_source"] == "local":
-                    _state["fen_source"] = "perception"
-
-    def _on_str(self, msg):
+    def _on_changed_squares(self, msg):
+        raw = msg.data.strip()
         with _lock:
-            _state["perception_fen"] = msg.data.strip()
-            _state["last_updated"]   = time.time()
-            _state["frame_count"]   += 1
-            if _state["fen_source"] == "local":
-                _state["fen_source"] = "perception"
+            _state["last_move"]    = raw
+            _state["last_updated"] = time.time()
+            _state["frame_count"] += 1
 
     def _on_game_fen(self, msg):
         fen = msg.data.strip()
@@ -538,10 +516,11 @@ def api_fen_post():
 def api_game_state():
     with _lock:
         return jsonify({
-            "state":  _state.get("game_state", "OFFLINE"),
-            "turn":   _state.get("game_turn", ""),
-            "source": _state.get("fen_source", "local"),
-            "fen":    _best_fen(),
+            "state":     _state.get("game_state", "OFFLINE"),
+            "turn":      _state.get("game_turn", ""),
+            "source":    _state.get("fen_source", "local"),
+            "fen":       _best_fen(),
+            "last_move": _state.get("last_move", ""),
         })
 
 
@@ -772,6 +751,10 @@ body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-seri
         <div class="stat-row">
           <span class="stat-lbl">Full Move</span>
           <span class="stat-val" id="gs-fullmove">–</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-lbl">Last Move Squares</span>
+          <span class="stat-val" id="gs-lastmove" style="font-family:monospace;color:#58a6ff">–</span>
         </div>
         <div class="stat-row">
           <span class="stat-lbl">FEN Source</span>
@@ -1062,11 +1045,18 @@ function pollGameState() {
     else if (t === 'BLACK'){ turnEl.textContent='⬛ Black'; turnEl.className='stat-val turn-black'; }
     else { turnEl.textContent='–'; turnEl.className='stat-val'; }
 
+    // Last detected changed squares
+    var lmEl = document.getElementById('gs-lastmove');
+    if (d.last_move) {
+      lmEl.textContent = d.last_move.split(',').join(' → ');
+    } else {
+      lmEl.textContent = '–';
+    }
+
     // FEN source
     var srcEl = document.getElementById('gs-source');
-    if      (d.source === 'game_mgr')  { srcEl.textContent='Game Manager ✓'; srcEl.className='src-badge src-game'; }
-    else if (d.source === 'perception'){ srcEl.textContent='Perception';      srcEl.className='src-badge src-perc'; }
-    else                               { srcEl.textContent='Local (offline)'; srcEl.className='src-badge src-local'; }
+    if (d.source === 'game_mgr') { srcEl.textContent='Game Manager ✓'; srcEl.className='src-badge src-game'; }
+    else                         { srcEl.textContent='Local (offline)'; srcEl.className='src-badge src-local'; }
   }).catch(function(){
     var el = document.getElementById('gs-state');
     el.textContent = 'Offline'; el.className = 'state-badge s-offline';
@@ -1128,7 +1118,7 @@ def main():
         ros_node = FenNode()
         threading.Thread(target=_ros_thread_fn, args=(ros_node,), daemon=True).start()
         print("✓ ROS subscriber started")
-        print("  Subscribing to: /perception/board_state, /camera/image_raw")
+        print("  Subscribing to: /perception/changed_squares, /camera/image_raw")
         print("  Subscribing to: /game_manager/board_fen, /game_manager/state, /game_manager/turn")
     else:
         print("⚠  No-ROS mode — use --image <path> or drag corners in browser")

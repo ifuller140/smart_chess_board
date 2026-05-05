@@ -38,16 +38,17 @@ Published Topics:
   /motion/command     (String) — "UCI FEN" e.g. "e2e4 rnbq..." (read by motion_planner_node)
 
 Subscribed Topics:
-  /limit_switch/clock_hit  (Bool) — human pressed chess clock
-  /perception/board_state  (BoardState) — detected board FEN
-  /game_manager/clock_event (String) — "FLAG_WHITE" or "FLAG_BLACK" from chess_clock_node
-  /motion/done             (Bool) — motion planner completed move
+  /limit_switch/clock_hit      (Bool)   — human pressed chess clock
+  /perception/changed_squares  (String) — comma-separated changed square names from piece_detector
+  /game_manager/clock_event    (String) — "FLAG_WHITE" or "FLAG_BLACK" from chess_clock_node
+  /motion/done                 (Bool)   — motion planner completed move
 
 Service Clients:
-  /gantry/home      (Trigger)      — home gantry
-  /camera/capture   (Trigger)      — trigger camera capture
-  /clock/hit        (Trigger)      — servo presses clock button
-  /chess_engine/request_move (RequestMove) — get best engine move
+  /gantry/home                  (Trigger)     — home gantry
+  /camera/capture               (Trigger)     — trigger camera capture
+  /perception/capture_premove   (Trigger)     — tell piece_detector to snapshot current board
+  /clock/hit                    (Trigger)     — servo presses clock button
+  /chess_engine/request_move    (RequestMove) — get best engine move
 """
 
 import threading
@@ -59,7 +60,6 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
-from chess_interfaces.msg import BoardState
 from chess_interfaces.srv import RequestMove
 
 
@@ -106,14 +106,14 @@ class GameManagerNode(Node):
         self._state_lock = threading.Lock()
 
         # ── Threading events (callbacks → game loop) ──────────────────────
-        self._clock_hit_event  = threading.Event()
-        self._board_state_event = threading.Event()
-        self._motion_done_event = threading.Event()
-        self._flag_event        = threading.Event()
-        self._flag_loser        = ''        # 'WHITE' or 'BLACK'
+        self._clock_hit_event       = threading.Event()
+        self._board_state_event     = threading.Event()
+        self._motion_done_event     = threading.Event()
+        self._flag_event            = threading.Event()
+        self._flag_loser            = ''        # 'WHITE' or 'BLACK'
 
         # Latest values from subscriptions
-        self._latest_fen     = chess.STARTING_FEN
+        self._latest_changed_squares: set = set()   # chess.Square indices from perception
         self._motion_success = True
 
         # ── Publishers ────────────────────────────────────────────────────
@@ -127,17 +127,18 @@ class GameManagerNode(Node):
         self.create_subscription(
             Bool, '/limit_switch/clock_hit', self._on_clock_hit, 10)
         self.create_subscription(
-            BoardState, '/perception/board_state', self._on_board_state, 10)
+            String, '/perception/changed_squares', self._on_changed_squares, 10)
         self.create_subscription(
             String, '/game_manager/clock_event', self._on_clock_event, 10)
         self.create_subscription(
             Bool, '/motion/done', self._on_motion_done, 10)
 
         # ── Service clients ───────────────────────────────────────────────
-        self._home_client   = self.create_client(Trigger, '/gantry/home')
-        self._capture_client = self.create_client(Trigger, '/camera/capture')
+        self._home_client      = self.create_client(Trigger, '/gantry/home')
+        self._capture_client   = self.create_client(Trigger, '/camera/capture')
+        self._premove_client   = self.create_client(Trigger, '/perception/capture_premove')
         self._clock_hit_client = self.create_client(Trigger, '/clock/hit')
-        self._engine_client = self.create_client(
+        self._engine_client    = self.create_client(
             RequestMove, '/chess_engine/request_move')
 
         # Publish initial FEN so piece_detector starts with correct state
@@ -164,9 +165,19 @@ class GameManagerNode(Node):
                 self.get_logger().info(f'Clock hit received (state={state})')
                 self._clock_hit_event.set()
 
-    def _on_board_state(self, msg: BoardState):
-        """Received updated board state from perception pipeline."""
-        self._latest_fen = msg.fen
+    def _on_changed_squares(self, msg: String):
+        """Receive changed squares list from piece_detector_node."""
+        raw = msg.data.strip()
+        sqs: set = set()
+        if raw:
+            for name in raw.split(','):
+                name = name.strip()
+                if name:
+                    try:
+                        sqs.add(chess.parse_square(name))
+                    except ValueError:
+                        self.get_logger().warn(f'Invalid square name from perception: {name!r}')
+        self._latest_changed_squares = sqs
         self._board_state_event.set()
 
     def _on_motion_done(self, msg: Bool):
@@ -199,6 +210,8 @@ class GameManagerNode(Node):
 
         self._transition(GS.IDLE)
         self._verify_starting_position()
+        # Capture the starting-position board as the initial pre-move reference
+        self._do_capture_premove()
         self.get_logger().info('Ready. Waiting for human to make first move then press clock...')
 
         # ── Main game loop ────────────────────────────────────────────────
@@ -327,8 +340,9 @@ class GameManagerNode(Node):
                 # ── Switch clock to human ─────────────────────────────────
                 self._publish_turn('WHITE')
 
-                # Update pre-move FEN for next round
+                # Update pre-move FEN and capture fresh board reference for next round
                 self._pre_move_fen = self._board.fen()
+                self._do_capture_premove()
 
                 # ── Back to waiting player ────────────────────────────────
                 self._transition(GS.WAITING_PLAYER_MOVE)
@@ -361,93 +375,114 @@ class GameManagerNode(Node):
         return result.success
 
     def _do_capture_board(self) -> bool:
-        """Trigger camera capture and wait for board state update."""
-        self.get_logger().info('Capturing board image...')
+        """Trigger camera capture and wait for changed-squares detection."""
+        self.get_logger().info('Capturing post-move board image...')
 
-        # Clear previous board state event
         self._board_state_event.clear()
 
-        # Trigger camera
         if self._capture_client.wait_for_service(timeout_sec=3.0):
             self._capture_client.call_async(Trigger.Request())
         else:
             self.get_logger().warn(
-                '/camera/capture not available — waiting for board state anyway')
+                '/camera/capture not available — waiting for changed-squares anyway')
 
-        # Wait for piece_detector to publish updated board state
-        got_state = self._board_state_event.wait(timeout=self._cap_timeout)
-        if not got_state:
-            self.get_logger().warn('Board state not received within timeout')
+        got = self._board_state_event.wait(timeout=self._cap_timeout)
+        if not got:
+            self.get_logger().warn('Changed-squares message not received within timeout')
             return False
 
         self._board_state_event.clear()
-        self.get_logger().info(f'Board state received: {self._latest_fen[:40]}...')
+        sq_names = sorted(chess.square_name(s) for s in self._latest_changed_squares)
+        self.get_logger().info(f'Changed squares detected: {sq_names}')
         return True
+
+    def _do_capture_premove(self) -> bool:
+        """
+        Call /perception/capture_premove to store the current board image as
+        the pre-move reference. Called when entering WAITING_PLAYER_MOVE so
+        the reference reflects the board state before the player moves.
+        """
+        if not self._premove_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().warn(
+                '/perception/capture_premove not available — '
+                'frame-diff detection will be unavailable this turn')
+            return False
+        future = self._premove_client.call_async(Trigger.Request())
+        deadline = time.monotonic() + 5.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not future.done() or future.result() is None:
+            self.get_logger().warn('Pre-move capture timed out')
+            return False
+        result = future.result()
+        if result.success:
+            self.get_logger().info(f'Pre-move reference: {result.message}')
+        return result.success
 
     def _do_validate_move(self) -> 'chess.Move | None':
         """
-        Infer the human's move by comparing which squares changed occupancy
-        between the pre-move board and the detected board.
+        Infer the human's move from the set of changed squares reported by
+        piece_detector_node (frame diff of pre-move vs post-move board image).
 
-        Uses square-occupancy comparison rather than piece-type comparison,
-        making it robust against the vision limitation that piece types for
-        moved pieces cannot always be determined (they fall back to generic
-        'P'/'p' symbols in the detected FEN).
+        For each legal move, computes the exact set of squares that would change
+        on the board and matches it against what perception detected:
+          - Normal move:  2 squares (from, to)
+          - Capture:      2 squares (from=empty, to=piece-changed)
+          - En passant:   3 squares (from, to, captured-pawn)
+          - Castling:     4 squares (king from/to + rook from/to)
+          - Promotion:    2 squares (same footprint as normal; prefer queen)
 
-        Handles all special moves automatically:
-          - Normal moves:   1 square disappears, 1 appears
-          - Captures:       1 extra square disappears (captured piece gone)
-          - En passant:     2 squares disappear, 1 appears
-          - Castling:       2 squares disappear, 2 appear
-          - Promotion:      same footprint as normal; prefer queen if ambiguous
+        Noise tolerance: if no exact match, tries removing the lowest-diff square
+        to account for minor false positives from lighting or camera noise.
         """
-        pre_board    = chess.Board(self._pre_move_fen)
-        det_layout   = self._latest_fen.split(' ')[0]
-        det_occupied = self._fen_to_occupied_squares(det_layout)
-        det_colors   = self._fen_to_color_map(det_layout)
+        pre_board = chess.Board(self._pre_move_fen)
+        changed   = self._latest_changed_squares
 
-        pre_occupied = {sq for sq in chess.SQUARES if pre_board.piece_at(sq) is not None}
-        disappeared  = pre_occupied - det_occupied
-        appeared     = det_occupied - pre_occupied
+        if len(changed) == 0:
+            self.get_logger().warn('No squares changed — cannot infer move')
+            return None
 
+        sq_names = sorted(chess.square_name(s) for s in changed)
+        self.get_logger().info(f'Validating against changed squares: {sq_names}')
+
+        # Exact match first
+        move = self._match_legal_move(pre_board, changed)
+        if move:
+            return move
+
+        # Noise tolerance: try dropping one square at a time
+        if len(changed) > 2:
+            for sq in list(changed):
+                subset = changed - {sq}
+                if len(subset) >= 2:
+                    move = self._match_legal_move(pre_board, subset)
+                    if move:
+                        self.get_logger().warn(
+                            f'Noise tolerance applied: ignored square '
+                            f'{chess.square_name(sq)} — matched {move.uci()}')
+                        return move
+
+        self.get_logger().warn(
+            f'No legal move matches changed squares: {sq_names}  '
+            f'Pre-FEN: {self._pre_move_fen}'
+        )
+        return None
+
+    def _match_legal_move(
+        self, board: chess.Board, changed: set
+    ) -> 'chess.Move | None':
+        """Find a legal move whose board footprint exactly equals changed."""
         candidates = []
-        for move in pre_board.legal_moves:
-            test_board   = pre_board.copy()
-            test_board.push(move)
-            test_occupied    = {sq for sq in chess.SQUARES if test_board.piece_at(sq) is not None}
-            test_disappeared = pre_occupied - test_occupied
-            test_appeared    = test_occupied - pre_occupied
-
-            if test_disappeared != disappeared or test_appeared != appeared:
-                continue
-
-            # Color sanity check: newly-appeared squares should have the right color
-            color_ok = True
-            for sq in appeared:
-                piece = test_board.piece_at(sq)
-                if piece is None:
-                    continue
-                expected_white = (piece.color == chess.WHITE)
-                detected_col   = det_colors.get(sq)
-                if detected_col is not None and (detected_col == 'W') != expected_white:
-                    color_ok = False
-                    break
-            if color_ok:
+        for move in board.legal_moves:
+            if self._get_move_changed_squares(board, move) == changed:
                 candidates.append(move)
 
-        if len(candidates) == 0:
-            self.get_logger().warn(
-                f'No legal move matches detected square changes.\n'
-                f'  Disappeared: {[chess.square_name(s) for s in sorted(disappeared)]}\n'
-                f'  Appeared:    {[chess.square_name(s) for s in sorted(appeared)]}\n'
-                f'  Pre-FEN:     {self._pre_move_fen}\n'
-                f'  Detected:    {self._latest_fen}'
-            )
+        if not candidates:
             return None
 
         if len(candidates) == 1:
-            move = candidates[0]
-            piece = pre_board.piece_at(move.from_square)
+            move  = candidates[0]
+            piece = board.piece_at(move.from_square)
             pname = chess.piece_name(piece.piece_type) if piece else '?'
             self.get_logger().info(
                 f'Inferred move: {move.uci()} '
@@ -456,12 +491,12 @@ class GameManagerNode(Node):
             )
             return move
 
-        # Multiple candidates — only happens with pawn promotion ambiguity
-        queen_promo = [m for m in candidates if m.promotion == chess.QUEEN]
-        if queen_promo:
+        # Multiple candidates occur only with pawn promotion (same squares, different piece)
+        queen_promos = [m for m in candidates if m.promotion == chess.QUEEN]
+        if queen_promos:
             self.get_logger().info(
-                f'Promotion ambiguity resolved to queen: {queen_promo[0].uci()}')
-            return queen_promo[0]
+                f'Promotion ambiguity resolved to queen: {queen_promos[0].uci()}')
+            return queen_promos[0]
 
         chosen = candidates[0]
         self.get_logger().info(
@@ -470,35 +505,32 @@ class GameManagerNode(Node):
         )
         return chosen
 
-    # ─────────────────────────────────────────────────────────────────────
-    # FEN Parsing Helpers (used by _do_validate_move)
-    # ─────────────────────────────────────────────────────────────────────
+    def _get_move_changed_squares(self, board: chess.Board, move: chess.Move) -> set:
+        """
+        Return the set of chess.Square indices that change when move is applied.
 
-    def _fen_to_occupied_squares(self, fen_position: str) -> set:
-        """Return the set of occupied square indices from a FEN position string."""
-        occupied, rank, col = set(), 7, 0
-        for ch in fen_position:
-            if ch == '/':
-                rank -= 1; col = 0
-            elif ch.isdigit():
-                col += int(ch)
-            else:
-                occupied.add(chess.square(col, rank))
-                col += 1
-        return occupied
+        Standard move / capture:  {from_square, to_square}
+        Castling adds rook from/to:  e.g. O-O → {e1, g1, h1, f1}
+        En passant adds captured pawn's square:  {e5, d6, d5}
+        """
+        changed = {move.from_square, move.to_square}
 
-    def _fen_to_color_map(self, fen_position: str) -> dict:
-        """Return {square_index: 'W'|'B'} from a FEN position string."""
-        colors, rank, col = {}, 7, 0
-        for ch in fen_position:
-            if ch == '/':
-                rank -= 1; col = 0
-            elif ch.isdigit():
-                col += int(ch)
+        if board.is_castling(move):
+            rank = chess.square_rank(move.from_square)   # 0 for white, 7 for black
+            if board.is_kingside_castling(move):
+                # Rook moves h→f
+                changed.update({chess.square(7, rank), chess.square(5, rank)})
             else:
-                colors[chess.square(col, rank)] = 'W' if ch.isupper() else 'B'
-                col += 1
-        return colors
+                # Rook moves a→d
+                changed.update({chess.square(0, rank), chess.square(3, rank)})
+
+        if board.is_en_passant(move):
+            # Captured pawn: same file as destination, same rank as origin
+            ep_file = chess.square_file(move.to_square)
+            ep_rank = chess.square_rank(move.from_square)
+            changed.add(chess.square(ep_file, ep_rank))
+
+        return changed
 
     def _do_get_engine_move(self) -> 'str | None':
         """Call chess engine for best response move. Returns UCI string or None."""
@@ -629,37 +661,14 @@ class GameManagerNode(Node):
 
     def _verify_starting_position(self):
         """
-        Capture the board once and check it matches the chess starting position.
-        Non-blocking — just logs the result. Called once when entering IDLE.
+        Log readiness. With the frame-diff approach, vision verifies moves rather
+        than the starting position — the board is assumed to be correctly set up.
+        Called once when entering IDLE.
         """
-        self.get_logger().info('Verifying starting position...')
-        if not self._capture_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().info(
-                'Camera service not available for start check — '
-                'verify manually that all pieces are in starting position')
-            return
-
-        self._board_state_event.clear()
-        self._capture_client.call_async(Trigger.Request())
-        got = self._board_state_event.wait(timeout=4.0)
-
-        if not got:
-            self.get_logger().warn(
-                'Starting position check timed out — perception stack may not be running')
-            return
-
-        detected_layout = self._latest_fen.split(' ')[0]
-        starting_layout = chess.STARTING_FEN.split(' ')[0]
-
-        if detected_layout == starting_layout:
-            self.get_logger().info(
-                '✓ Starting position verified — all 32 pieces detected in correct positions')
-        else:
-            det_count = sum(1 for c in detected_layout if c.isalpha())
-            self.get_logger().warn(
-                f'Starting position not confirmed ({det_count} pieces detected). '
-                f'Please arrange all pieces in starting position before pressing clock.'
-            )
+        self.get_logger().info(
+            'Board assumed to be in starting position. '
+            'Ensure all 32 pieces are correctly placed before pressing clock.'
+        )
 
 
 def main(args=None):

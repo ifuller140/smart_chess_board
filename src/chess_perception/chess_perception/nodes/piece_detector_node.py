@@ -1,41 +1,42 @@
 #!/usr/bin/env python3
 """
-Piece Detector Node — detects chess pieces from warped board image and
-generates a FEN string representing the current board position.
+Piece Detector Node — detects chess moves via frame differencing.
 
 Detection Strategy:
-  1. Receive warped board image from board_detector_node via /perception/board_geometry
-  2. Receive raw camera image from /camera/image_raw
-  3. Apply perspective transform to get bird's-eye view of board (400×400px)
-  4. For each of the 64 squares, analyze the center ROI:
-       a. Occupancy: compare pixel difference vs a reference empty frame.
-          A square is OCCUPIED if its pixel variance significantly exceeds
-          the empty-board baseline.
-  5. Color classification: use local brightness relative to board statistics
-       to determine if an occupied piece is WHITE or BLACK.
-  6. Game-state-assisted piece typing: subscribe to /game_manager/state_fen
-     from game_manager and use the known board state to constrain piece
-     type assignment. Because the game manager knows the authoritative
-     board position, the detector ONLY needs to report changed squares.
-  7. Reconstruct FEN from piece array and publish BoardState.
+  At the start of each player's turn, game_manager_node calls the
+  /perception/capture_premove service. This stores the current warped board
+  image as the "pre-move reference" frame (multi-frame average for stability).
+
+  After the player moves and presses the clock, game_manager triggers a fresh
+  camera capture. The piece detector compares the new frame to the pre-move
+  reference using per-square LAB color-space absolute difference. Squares with
+  a mean diff score above diff_threshold are flagged as changed.
+
+  The list of changed square names (e.g. "e2,e4") is published on
+  /perception/changed_squares. game_manager_node uses this list to find the
+  unique legal move whose board footprint matches the changed squares — handling
+  standard moves, captures, castling (4 squares), and en passant (3 squares)
+  without needing any color or piece-type classification from vision.
 
 Subscribed Topics:
-  /camera/image_raw          (Image)      — raw camera stream
-  /perception/board_geometry (BoardState) — board corners (from board_detector)
-  /game_manager/board_fen    (String)     — current authoritative FEN (from game_manager)
+  /camera/image_raw/compressed (CompressedImage) — JPEG camera stream
+  /perception/board_geometry   (BoardState)      — board corners from board_detector
 
 Published Topics:
-  /perception/board_state    (BoardState) — detected FEN + piece array
-  /perception/piece_debug    (Image)      — annotated warped board for debugging
+  /perception/changed_squares  (String) — comma-separated changed square names, e.g. "e2,e4"
+  /perception/piece_debug      (Image)  — diff heatmap overlay for debugging
+
+Services:
+  /perception/capture_premove  (Trigger) — store current board as pre-move reference
 
 Parameters:
-  occupancy_diff_threshold (int)   — pixel diff threshold for piece detection (default 25)
-  white_piece_brightness   (float) — brightness percentile above which a piece is white (0.65)
-  reference_capture_count  (int)   — how many frames to average for baseline (default 5)
+  diff_threshold     (float) — mean per-square LAB diff to flag as changed (default 18.0)
+  premove_avg_count  (int)   — frames to average for a stable reference (default 1)
+  warp_size          (int)   — warped board side length in pixels (default 400)
+  detection_hz       (float) — processing rate in Hz (default 2.0)
 """
 
 import threading
-import time
 from typing import Optional
 
 import chess
@@ -49,112 +50,75 @@ from std_srvs.srv import Trigger
 
 from chess_interfaces.msg import BoardState
 
-# Index mapping: row 0 = rank 8 (black back row in image top),
-# row 7 = rank 1 (white back row in image bottom).
-# Warped image: row 0 = a8, ..., row 7 = a1
-# col 0 = a-file, ..., col 7 = h-file
-
-# python-chess piece type constants
-PIECE_SYMBOLS = {
-    chess.PAWN:   ('P', 'p'),
-    chess.KNIGHT: ('N', 'n'),
-    chess.BISHOP: ('B', 'b'),
-    chess.ROOK:   ('R', 'r'),
-    chess.QUEEN:  ('Q', 'q'),
-    chess.KING:   ('K', 'k'),
-}
-
 
 class PieceDetectorNode(Node):
 
     def __init__(self):
         super().__init__('piece_detector_node')
 
-        # ── Parameters ───────────────────────────────────────────────────
-        self.declare_parameter('occupancy_diff_threshold', 12)
-        self.declare_parameter('white_piece_brightness', 0.65)
-        self.declare_parameter('reference_capture_count', 5)
-        self.declare_parameter('warp_size', 400)
-        self.declare_parameter('auto_capture_reference', True)
-        self.declare_parameter('detection_hz', 2.0)
-        # LAB-based detection (active when a reference frame exists)
-        self.declare_parameter('black_piece_L_delta', 25.0)
-        self.declare_parameter('white_piece_L_delta', 12.0)
-        self.declare_parameter('warm_shift_threshold', 8.0)
+        self.declare_parameter('diff_threshold',    18.0)
+        self.declare_parameter('premove_avg_count', 1)
+        self.declare_parameter('warp_size',         400)
+        self.declare_parameter('detection_hz',      2.0)
 
-        self._occ_threshold   = self.get_parameter('occupancy_diff_threshold').value
-        self._white_threshold = self.get_parameter('white_piece_brightness').value
-        self._ref_count       = self.get_parameter('reference_capture_count').value
-        self._warp_size       = self.get_parameter('warp_size').value
-        self._auto_capture    = self.get_parameter('auto_capture_reference').value
-        self._black_delta     = float(self.get_parameter('black_piece_L_delta').value)
-        self._white_delta     = float(self.get_parameter('white_piece_L_delta').value)
-        self._warm_shift      = float(self.get_parameter('warm_shift_threshold').value)
-        det_hz                = float(self.get_parameter('detection_hz').value)
+        self._diff_threshold = float(self.get_parameter('diff_threshold').value)
+        self._premove_count  = int(self.get_parameter('premove_avg_count').value)
+        self._warp_size      = int(self.get_parameter('warp_size').value)
+        det_hz               = float(self.get_parameter('detection_hz').value)
 
-        # ── State ────────────────────────────────────────────────────────
-        self._latest_msg:       Optional[object] = None   # raw Image msg
-        self._latest_image:     Optional[np.ndarray] = None
-        self._board_corners:    Optional[np.ndarray] = None
-        self._reference_warped: Optional[np.ndarray] = None
-        self._ref_frames:       list = []
-        self._authoritative_fen = chess.STARTING_FEN
+        self._latest_msg:     Optional[object]      = None
+        self._latest_image:   Optional[np.ndarray]  = None
+        self._board_corners:  Optional[np.ndarray]  = None
+        self._premove_warped: Optional[np.ndarray]  = None
+        self._premove_frames: list                   = []
         self._lock = threading.Lock()
-        self._auto_ref_done = False
 
-        # ── Subscribers ─────────────────────────────────────────────────
-        # Subscribe to JPEG compressed topic — ~30x less DDS overhead than raw
         self.create_subscription(
             CompressedImage, '/camera/image_raw/compressed',
             self._on_image_raw, 10)
         self.create_subscription(
-            BoardState, '/perception/board_geometry', self._on_geometry, 10)
-        self.create_subscription(
-            String, '/game_manager/board_fen', self._on_board_fen, 10)
+            BoardState, '/perception/board_geometry',
+            self._on_geometry, 10)
 
-        # ── Publishers ───────────────────────────────────────────────────
-        self._state_pub = self.create_publisher(
-            BoardState, '/perception/board_state', 10)
+        self._changed_pub = self.create_publisher(
+            String, '/perception/changed_squares', 10)
         self._debug_pub = self.create_publisher(
             Image, '/perception/piece_debug', 10)
-        self._ref_status_pub = self.create_publisher(
+        self._status_pub = self.create_publisher(
             String, '/perception/reference_status', 10)
 
-        # ── Services for reference capture ───────────────────────────────
-        self.create_service(Trigger, '/perception/capture_reference',
-                            self._srv_capture_reference)
+        self.create_service(
+            Trigger, '/perception/capture_premove',
+            self._srv_capture_premove)
 
-        # Timer drives piece detection at controlled rate (avoids 12fps decode)
         self.create_timer(1.0 / det_hz, self._detect_tick)
 
-        # Auto-capture empty-board reference at startup (ARCH-03)
-        if self._auto_capture:
-            self._auto_ref_timer = self.create_timer(3.0, self._auto_ref_tick)
-
         self.get_logger().info(
-            f'Piece Detector ready (occ_threshold={self._occ_threshold}, '
-            f'white_thresh={self._white_threshold:.2f}, '
-            f'detection_hz={det_hz:.1f})'
+            f'Piece Detector ready — frame-diff mode '
+            f'(diff_threshold={self._diff_threshold}, detection_hz={det_hz:.1f})'
         )
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Subscriptions
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Subscriptions ──────────────────────────────────────────────────────────
 
-    def _on_image_raw(self, msg: Image):
-        """Store raw message reference — decode happens in timer at 3fps."""
+    def _on_image_raw(self, msg):
         self._latest_msg = msg
 
+    def _on_geometry(self, msg: BoardState):
+        if len(msg.corners) == 4:
+            pts = np.array([[p.x, p.y] for p in msg.corners], dtype='float32')
+            with self._lock:
+                self._board_corners = pts
+
+    # ── Timer: detect and publish ──────────────────────────────────────────────
+
     def _detect_tick(self):
-        """Timer callback: decode latest JPEG frame and run piece detection."""
         msg = self._latest_msg
         if msg is None:
             return
         try:
             buf   = np.frombuffer(bytes(msg.data), dtype=np.uint8)
-            frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)  # Returns BGR
+            frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
             if frame is None:
-                self.get_logger().error('JPEG decode returned None')
                 return
         except Exception as e:
             self.get_logger().error(f'Image decode error: {e}')
@@ -162,162 +126,71 @@ class PieceDetectorNode(Node):
 
         with self._lock:
             self._latest_image = frame
+            corners  = self._board_corners.copy() if self._board_corners is not None else None
+            premove  = self._premove_warped.copy() if self._premove_warped is not None else None
 
-        self._try_process()
-
-    def _on_geometry(self, msg: BoardState):
-        """Receive board corners from board_detector_node."""
-        if len(msg.corners) == 4:
-            pts = np.array([[p.x, p.y] for p in msg.corners], dtype='float32')
-            with self._lock:
-                self._board_corners = pts
-
-    def _on_board_fen(self, msg: String):
-        """Receive authoritative game FEN from game_manager_node."""
-        with self._lock:
-            self._authoritative_fen = msg.data
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Auto Reference Capture (ARCH-03)
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _auto_ref_tick(self):
-        """Timer callback: capture reference frame if board appears empty."""
-        if self._auto_ref_done:
-            self._auto_ref_timer.cancel()
+        if corners is None or premove is None:
             return
-
-        with self._lock:
-            if self._latest_image is None or self._board_corners is None:
-                return  # Not ready yet
-            frame = self._latest_image.copy()
-            corners = self._board_corners.copy()
 
         warped = self._warp_board(frame, corners)
         if warped is None:
             return
 
-        # Check if board looks empty: count squares with high variance
-        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        sq_px = warped.shape[0] // 8
-        high_var_count = 0
-        for row in range(8):
-            for col in range(8):
-                roi = gray[row * sq_px:(row + 1) * sq_px,
-                           col * sq_px:(col + 1) * sq_px]
-                if float(np.std(roi)) > 25.0:
-                    high_var_count += 1
+        square_scores = self._compute_square_scores(warped, premove)
+        changed = [sq for sq, score in square_scores if score > self._diff_threshold]
 
-        if high_var_count > 4:
-            self.get_logger().debug(
-                f'Auto-capture skipped: {high_var_count} squares have high variance')
-            return
+        sq_names = ','.join(chess.square_name(sq) for sq in changed)
+        self._changed_pub.publish(String(data=sq_names))
 
-        req = Trigger.Request()
-        resp = Trigger.Response()
-        self._srv_capture_reference(req, resp)
-        if resp.success:
-            self._auto_ref_done = True
-            self.get_logger().info('Auto-captured empty board reference frame')
-            self._auto_ref_timer.cancel()
+        debug = self._draw_debug(warped, premove, square_scores, changed)
+        self._publish_image(debug)
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Reference Capture Service
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Pre-move Capture Service ───────────────────────────────────────────────
 
-    def _srv_capture_reference(self, request, response):
+    def _srv_capture_premove(self, request, response):
         """
-        Capture a reference (empty board) baseline.
+        Capture the current board as the pre-move reference frame.
 
-        Call this service ONCE before the game starts, with the board
-        completely empty. This baseline is used for occupancy detection.
-        Point the camera at the empty board and call:
-          ros2 service call /perception/capture_reference std_srvs/srv/Trigger {}
+        Called by game_manager_node when it's about to enter WAITING_PLAYER_MOVE
+        (i.e. at game start and after the computer finishes each of its moves).
+
+        The current frame is averaged with up to premove_avg_count previous
+        captures for a stable reference. Each call resets the accumulation
+        so the reference always reflects the current board state.
         """
         with self._lock:
             if self._latest_image is None or self._board_corners is None:
                 response.success = False
-                response.message = 'No image or corners available'
+                response.message = 'No image or board corners available'
                 return response
-            frame = self._latest_image.copy()
+            frame   = self._latest_image.copy()
             corners = self._board_corners.copy()
 
         warped = self._warp_board(frame, corners)
         if warped is None:
             response.success = False
-            response.message = 'Warp failed'
+            response.message = 'Perspective warp failed — check board corner calibration'
             return response
 
-        # Accumulate frames for a stable reference
-        self._ref_frames.append(warped.astype(np.float32))
-        if len(self._ref_frames) > self._ref_count:
-            self._ref_frames.pop(0)
+        # Reset accumulation on each service call so the reference is always fresh
+        self._premove_frames = []
+        self._premove_frames.append(warped.astype(np.float32))
+        self._premove_warped = warped.copy()
 
-        self._reference_warped = np.mean(self._ref_frames, axis=0).astype(np.uint8)
-        self._ref_status_pub.publish(
-            String(data=f'Reference captured ({len(self._ref_frames)}/{self._ref_count})'))
+        msg = f'Pre-move reference captured (1/{self._premove_count} frames)'
+        self._status_pub.publish(String(data=msg))
         response.success = True
-        response.message = (
-            f'Reference updated ({len(self._ref_frames)}/{self._ref_count} frames averaged). '
-            f'Call again {"" if len(self._ref_frames) >= self._ref_count else "more times "}to improve stability.'
-        )
-        self.get_logger().info(response.message)
+        response.message = msg
+        self.get_logger().info(msg)
         return response
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Main Processing Pipeline
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Warp ──────────────────────────────────────────────────────────────────
 
-    def _try_process(self):
-        """Run the detection pipeline if all inputs are available."""
-        with self._lock:
-            if self._latest_image is None or self._board_corners is None:
-                return
-            frame   = self._latest_image.copy()
-            corners = self._board_corners.copy()
-            ref     = self._reference_warped.copy() if self._reference_warped is not None else None
-            auth_fen = self._authoritative_fen
-
-        # 1. Warp board to bird's-eye view
-        warped = self._warp_board(frame, corners)
-        if warped is None:
-            return
-
-        # 2. Analyse each square
-        occupancy, colors = self._analyse_squares(warped, ref)
-
-        # 3. Build FEN using occupancy, colors, and authoritative game state
-        fen = self._build_fen(occupancy, colors, auth_fen)
-
-        # 4. Build pieces array (64 integers) and publish BoardState
-        pieces = self._build_pieces_array(occupancy, colors, auth_fen)
-        self._publish_board_state(fen, pieces, frame.shape)
-
-        # 5. Publish debug image
-        debug = self._draw_debug(warped, occupancy, colors)
-        debug_msg = Image()
-        debug_msg.header.stamp = self.get_clock().now().to_msg()
-        # use the same frame_id as however it's configured, or leave empty
-        debug_msg.height = debug.shape[0]
-        debug_msg.width = debug.shape[1]
-        debug_msg.encoding = 'bgr8'
-        debug_msg.is_bigendian = 0
-        debug_msg.step = debug.shape[1] * 3
-        debug_msg.data = debug.tobytes()
-        self._debug_pub.publish(debug_msg)
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Perspective Warp
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _warp_board(
-        self, frame: np.ndarray, corners: np.ndarray
-    ) -> Optional[np.ndarray]:
-        """Warp the board region to a square bird's-eye view."""
+    def _warp_board(self, frame: np.ndarray, corners: np.ndarray) -> Optional[np.ndarray]:
         size = self._warp_size
-        dst = np.array([
-            [0,        0],
-            [size - 1, 0],
+        dst  = np.array([
+            [0,        0       ],
+            [size - 1, 0       ],
             [size - 1, size - 1],
             [0,        size - 1],
         ], dtype='float32')
@@ -328,317 +201,109 @@ class PieceDetectorNode(Node):
             self.get_logger().debug(f'Warp error: {e}')
             return None
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Square Analysis
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Frame Diff ──────────────────────────────────────────────────────────
 
-    def _analyse_squares(
+    def _compute_square_scores(
         self,
-        warped: np.ndarray,
-        reference: Optional[np.ndarray],
-    ):
-        """
-        Analyse all 64 squares for occupancy and piece color.
-
-        When a reference (empty-board baseline) is available, uses LAB color
-        space comparison — robust against white-piece / tan-board confusion.
-
-        When no reference is available, falls back to variance-based detection.
-
-        Returns:
-          occupancy (list[bool]): True if occupied, index 0 = a8 (top-left in image)
-          colors    (list[str]):  'W', 'B', or '' per square
-        """
-        if reference is not None:
-            return self._analyse_squares_lab(warped, reference)
-        return self._analyse_squares_variance(warped)
-
-    def _analyse_squares_lab(
-        self,
-        warped: np.ndarray,
-        reference: np.ndarray,
-    ):
-        """
-        LAB-based square analysis using a stored empty-board reference.
-
-        Why LAB works here:
-          The tan/wood board has significant b+ (warm/yellow) color in LAB space.
-          White plastic chess pieces are largely color-neutral (b ≈ 0).
-          Even when a white piece and the board square have similar BRIGHTNESS,
-          the board's warmth (positive b) vs the piece's neutrality (low b) is
-          a reliable discriminator.
-
-        Occupancy score:
-          score = |ΔL| + 0.4·|Δb| + 0.5·max(0, σ_L_cur − σ_L_ref)
-          where ΔL = lightness change, Δb = warm/cool axis change, σ = std-dev
-          Pieces create both a lightness change AND increase intra-square variance
-          (shadow at base, highlight at top).
-
-        Color classification:
-          BLACK  → L drops significantly below reference (piece is dark)
-          WHITE  → b decreases (piece less warm than empty board) OR L rises
-          Ambiguous → compare piece L to overall board L mean
-        """
-        size   = warped.shape[0]
-        sq_px  = size // 8
-        margin = max(2, sq_px // 8)   # tight margin keeps sampling on the piece, not border
-
-        cur_lab = cv2.cvtColor(warped,    cv2.COLOR_BGR2LAB).astype(np.float32)
-        ref_lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB).astype(np.float32)
-
-        # Global L mean for the ambiguous-piece fallback (bright = white)
-        board_L_mean = float(np.mean(cur_lab[:, :, 0]))
-
-        occupancy: list = []
-        colors:    list = []
-
-        for row in range(8):
-            for col in range(8):
-                y1 = row * sq_px + margin
-                y2 = (row + 1) * sq_px - margin
-                x1 = col * sq_px + margin
-                x2 = (col + 1) * sq_px - margin
-
-                cur_roi = cur_lab[y1:y2, x1:x2]
-                ref_roi = ref_lab[y1:y2, x1:x2]
-
-                cur_L = float(np.mean(cur_roi[:, :, 0]))
-                ref_L = float(np.mean(ref_roi[:, :, 0]))
-                cur_b = float(np.mean(cur_roi[:, :, 2]))   # b channel: warm (+) ↔ cool (−)
-                ref_b = float(np.mean(ref_roi[:, :, 2]))
-
-                signed_L = cur_L - ref_L   # positive = current brighter than empty
-                signed_b = ref_b - cur_b   # positive = reference warmer, piece more neutral
-                var_inc  = max(0.0,
-                               float(np.std(cur_roi[:, :, 0])) -
-                               float(np.std(ref_roi[:, :, 0])))
-
-                occ_score = abs(signed_L) + 0.4 * abs(signed_b) + 0.5 * var_inc
-                occupied  = occ_score > self._occ_threshold
-                occupancy.append(occupied)
-
-                if not occupied:
-                    colors.append('')
-                    continue
-
-                if signed_L < -self._black_delta:
-                    # Much darker than reference → black piece
-                    colors.append('B')
-                elif signed_L > self._white_delta or signed_b > self._warm_shift:
-                    # Brighter than reference OR reference was warmer → white piece
-                    colors.append('W')
-                else:
-                    # Ambiguous: use current brightness vs overall board mean
-                    colors.append('W' if cur_L >= board_L_mean * 0.92 else 'B')
-
-        return occupancy, colors
-
-    def _analyse_squares_variance(self, warped: np.ndarray):
-        """
-        Variance-based occupancy fallback used when no reference frame exists.
-        Less accurate for white pieces on tan boards; capture a reference for best results.
-        """
-        size   = warped.shape[0]
-        sq_px  = size // 8
-        margin = sq_px // 6
-
-        gray        = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        white_level = self._white_threshold * 255.0
-
-        occupancy: list = []
-        colors:    list = []
-
-        for row in range(8):
-            for col in range(8):
-                y1 = row * sq_px + margin
-                y2 = (row + 1) * sq_px - margin
-                x1 = col * sq_px + margin
-                x2 = (col + 1) * sq_px - margin
-
-                roi = gray[y1:y2, x1:x2]
-                occupied = float(np.std(roi)) > 20.0
-                occupancy.append(occupied)
-                if occupied:
-                    colors.append('W' if float(np.mean(roi)) > white_level else 'B')
-                else:
-                    colors.append('')
-
-        return occupancy, colors
-
-    # ─────────────────────────────────────────────────────────────────────
-    # FEN Construction
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _build_fen(
-        self,
-        occupancy: list,
-        colors: list,
-        auth_fen: str,
-    ) -> str:
-        """
-        Construct a FEN string using occupancy/color detection plus the
-        authoritative game state from game_manager_node.
-
-        Strategy:
-          - For each square, determine if it's occupied (W/B/empty).
-          - Use the authoritative python-chess board to look up the piece
-            type on each occupied square. This means PIECE TYPE comes from
-            the known game state; only OCCUPANCY and COLOR are derived from vision.
-          - If vision reports a change that doesn't match the game state,
-            log a warning but use the visually detected occupancy.
-
-        This handles the limitation that pure color classification can't tell
-        a rook from a queen — the game state constrains what piece is where.
-        """
-        try:
-            auth_board = chess.Board(auth_fen)
-        except Exception:
-            auth_board = chess.Board()
-
-        rows = []
-        # Board image: row 0 = rank 8 (index 7 in chess notation top row)
-        for rank_idx in range(7, -1, -1):
-            empty_run = 0
-            row_str   = ''
-            for file_idx in range(8):
-                # Convert rank_idx/file_idx to image row/col
-                # Image row 0 = rank 8, image row 7 = rank 1
-                # Image col 0 = a-file
-                img_row = 7 - rank_idx
-                img_col = file_idx
-                arr_idx = img_row * 8 + img_col
-
-                sq = chess.square(file_idx, rank_idx)
-                occ  = occupancy[arr_idx]
-                col  = colors[arr_idx]
-
-                if not occ:
-                    # Visually empty
-                    empty_run += 1
-                else:
-                    if empty_run:
-                        row_str   += str(empty_run)
-                        empty_run = 0
-
-                    # Use authoritative piece type only when the detected color matches.
-                    # A color mismatch means a different piece moved here since the last
-                    # authoritative update (e.g. a capture destination or castling square).
-                    auth_piece = auth_board.piece_at(sq)
-                    if auth_piece and (auth_piece.color == chess.WHITE) == (col == 'W'):
-                        symbol = auth_piece.symbol()  # uppercase=white, lowercase=black
-                    else:
-                        # No auth piece here, or wrong color — piece moved to this square
-                        symbol = 'P' if col == 'W' else 'p'
-                        if auth_piece:
-                            self.get_logger().debug(
-                                f'Color mismatch at {chess.square_name(sq)}: '
-                                f'vision={col} auth={auth_piece.symbol()} — using fallback'
-                            )
-
-                    row_str += symbol
-
-            if empty_run:
-                row_str += str(empty_run)
-            rows.append(row_str)
-
-        position = '/'.join(rows)
-
-        # Preserve turn, castling, en passant from authoritative FEN
-        auth_parts = auth_fen.split(' ')
-        suffix = ' '.join(auth_parts[1:]) if len(auth_parts) > 1 else 'w KQkq - 0 1'
-        return f'{position} {suffix}'
-
-    def _build_pieces_array(
-        self,
-        occupancy: list,
-        colors: list,
-        auth_fen: str,
+        warped_cur: np.ndarray,
+        warped_pre: np.ndarray,
     ) -> list:
         """
-        Build the 64-element pieces array for BoardState.pieces.
-        Uses the same game-state assisted logic as _build_fen().
-        Values: 0=empty, +N=white piece type, -N=black piece type
-        (matching the existing BoardState encoding from CONTEXT.md)
+        Return list of (chess.Square, diff_score) for all 64 squares.
+
+        diff_score is the mean per-pixel LAB distance within each square's
+        interior region (with a small margin to avoid border artifacts).
+        The L channel is weighted more heavily as it captures piece
+        presence/absence reliably regardless of piece color.
+
+        Squares are iterated in image order (row 0 = rank 8, row 7 = rank 1).
         """
-        try:
-            auth_board = chess.Board(auth_fen)
-        except Exception:
-            auth_board = chess.Board()
+        size   = self._warp_size
+        sq_px  = size // 8
+        margin = max(2, sq_px // 8)
 
-        PIECE_ID = {
-            chess.PAWN: 1, chess.KNIGHT: 2, chess.BISHOP: 3,
-            chess.ROOK: 4, chess.QUEEN: 5, chess.KING: 6,
-        }
+        cur_lab = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2LAB).astype(np.float32)
+        pre_lab = cv2.cvtColor(warped_pre, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-        pieces = []
-        for rank_idx in range(7, -1, -1):
-            for file_idx in range(8):
-                img_row = 7 - rank_idx
-                img_col = file_idx
-                arr_idx = img_row * 8 + img_col
+        diff = np.abs(cur_lab - pre_lab)
+        # L channel: piece presence/absence. a/b channels: color shifts (smaller weight)
+        diff_map = diff[:, :, 0] + 0.4 * diff[:, :, 1] + 0.4 * diff[:, :, 2]
 
-                sq = chess.square(file_idx, rank_idx)
-                if not occupancy[arr_idx]:
-                    pieces.append(0)
-                    continue
+        results = []
+        for row in range(8):
+            for col in range(8):
+                y1 = row * sq_px + margin
+                y2 = (row + 1) * sq_px - margin
+                x1 = col * sq_px + margin
+                x2 = (col + 1) * sq_px - margin
+                roi   = diff_map[y1:y2, x1:x2]
+                score = float(np.mean(roi))
+                # Image row 0 = rank 8 (top of board), row 7 = rank 1 (bottom)
+                sq = chess.square(col, 7 - row)
+                results.append((sq, score))
 
-                auth_piece = auth_board.piece_at(sq)
-                vision_white = (colors[arr_idx] == 'W')
-                if auth_piece and (auth_piece.color == chess.WHITE) == vision_white:
-                    pid = PIECE_ID.get(auth_piece.piece_type, 1)
-                    pieces.append(pid if auth_piece.color == chess.WHITE else -pid)
-                else:
-                    # Color mismatch or unknown square — generic pawn placeholder
-                    pieces.append(1 if vision_white else -1)
+        return results
 
-        return pieces
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Debug Visualization
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Debug Visualization ────────────────────────────────────────────────
 
     def _draw_debug(
         self,
-        warped: np.ndarray,
-        occupancy: list,
-        colors: list,
+        warped_cur: np.ndarray,
+        warped_pre: np.ndarray,
+        square_scores: list,
+        changed: list,
     ) -> np.ndarray:
-        """Annotate warped board with occupancy/color grid."""
-        size   = warped.shape[0]
-        sq_px  = size // 8
-        debug  = warped.copy()
+        size  = self._warp_size
+        sq_px = size // 8
 
-        for row in range(8):
-            for col in range(8):
-                arr_idx = row * 8 + col
-                x1, y1  = col * sq_px, row * sq_px
-                x2, y2  = x1 + sq_px, y1 + sq_px
+        # Diff heatmap blended over current frame
+        cur_gray  = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2GRAY)
+        pre_gray  = cv2.cvtColor(warped_pre, cv2.COLOR_BGR2GRAY)
+        diff_abs  = cv2.absdiff(cur_gray, pre_gray)
+        diff_norm = cv2.normalize(diff_abs, None, 0, 255, cv2.NORM_MINMAX)
+        heatmap   = cv2.applyColorMap(diff_norm, cv2.COLORMAP_INFERNO)
+        debug     = cv2.addWeighted(warped_cur, 0.55, heatmap, 0.45, 0)
 
-                if occupancy[arr_idx]:
-                    color_bgr = (0, 255, 0) if colors[arr_idx] == 'W' else (0, 0, 255)
-                    cv2.rectangle(debug, (x1, y1), (x2, y2), color_bgr, 2)
-                    label = 'W' if colors[arr_idx] == 'W' else 'B'
-                    cv2.putText(debug, label,
-                                (x1 + sq_px // 4, y1 + sq_px // 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color_bgr, 1)
-
-        # Draw grid
+        # Grid lines
         for i in range(9):
-            cv2.line(debug, (i * sq_px, 0), (i * sq_px, size), (200, 200, 200), 1)
-            cv2.line(debug, (0, i * sq_px), (size, i * sq_px), (200, 200, 200), 1)
+            cv2.line(debug, (i * sq_px, 0), (i * sq_px, size), (80, 80, 80), 1)
+            cv2.line(debug, (0, i * sq_px), (size, i * sq_px), (80, 80, 80), 1)
+
+        # Per-square diff score annotation
+        for sq, score in square_scores:
+            col  = chess.square_file(sq)
+            row  = 7 - chess.square_rank(sq)
+            cx   = col * sq_px + sq_px // 2
+            cy   = row * sq_px + sq_px // 3
+            clr  = (0, 255, 0) if score > self._diff_threshold else (100, 100, 100)
+            cv2.putText(debug, f'{score:.0f}', (cx - 10, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.28, clr, 1)
+
+        # Changed squares: bright green rectangle + square name
+        for sq in changed:
+            col  = chess.square_file(sq)
+            row  = 7 - chess.square_rank(sq)
+            x1, y1 = col * sq_px, row * sq_px
+            x2, y2 = x1 + sq_px, y1 + sq_px
+            cv2.rectangle(debug, (x1, y1), (x2, y2), (0, 255, 0), 3)
+            cv2.putText(debug, chess.square_name(sq),
+                        (x1 + 3, y2 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0, 255, 0), 1)
 
         return debug
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Publish
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Publish Helpers ────────────────────────────────────────────────────
 
-    def _publish_board_state(self, fen: str, pieces: list, _frame_shape):
-        msg = BoardState()
+    def _publish_image(self, img: np.ndarray):
+        msg             = Image()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.fen   = fen
-        msg.pieces = [int(p) for p in pieces]
-        self._state_pub.publish(msg)
+        msg.height      = img.shape[0]
+        msg.width       = img.shape[1]
+        msg.encoding    = 'bgr8'
+        msg.is_bigendian = 0
+        msg.step        = img.shape[1] * 3
+        msg.data        = img.tobytes()
+        self._debug_pub.publish(msg)
 
 
 def main(args=None):

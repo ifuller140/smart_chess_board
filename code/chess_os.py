@@ -93,7 +93,7 @@ _state = {
     "corners":        [[0.10,0.10],[0.90,0.10],[0.90,0.90],[0.10,0.90]],
     "pieces64":       [""] * 64,
     "detected_fen":   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-    "perception_fen": "",
+    "last_move":      "",    # last detected changed squares e.g. "e2,e4"
     # Game manager
     "game_fen":       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "game_state":     "OFFLINE",
@@ -197,8 +197,6 @@ def _best_fen() -> str:
     src = _state.get("fen_source", "local")
     if src == "game_mgr" and _state.get("game_fen"):
         return _state["game_fen"]
-    if _state.get("perception_fen"):
-        return _state["perception_fen"]
     return _state.get("detected_fen",
                       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 
@@ -420,6 +418,8 @@ if HAS_ROS:
                 String, "/game_manager/state", self._on_state, 10)
             self.create_subscription(
                 String, "/game_manager/turn", self._on_turn, 10)
+            self.create_subscription(
+                String, "/perception/changed_squares", self._on_changed_squares, 10)
             self._svc_engage  = self.create_client(Trigger, "/servo/engage")
             self._svc_release = self.create_client(Trigger, "/servo/release")
             self._svc_home    = self.create_client(Trigger, "/gantry/home")
@@ -473,6 +473,13 @@ if HAS_ROS:
         def _on_turn(self, msg):
             with _lock:
                 _state["game_turn"] = msg.data.strip()
+
+        def _on_changed_squares(self, msg):
+            raw = msg.data.strip()
+            with _lock:
+                _state["last_move"]    = raw
+                _state["last_updated"] = time.time()
+                _state["frame_count"] += 1
 
         def call_svc(self, client, timeout: float = 2.0):
             if not client.wait_for_service(timeout_sec=0.5):
@@ -583,6 +590,7 @@ def api_status():
             "fen_source":     _state["fen_source"],
             "game_state":     _state["game_state"],
             "game_turn":      _state["game_turn"],
+            "last_move":      _state["last_move"],
             "move_history":   _state["move_history"],
             "limit_x":        _state["limit_x"],
             "limit_y":        _state["limit_y"],
@@ -699,6 +707,27 @@ def api_gantry_home():
 @app.route("/api/hw/clock/hit", methods=["POST"])
 def api_clock_hit():
     return _call_svc("_svc_clock")
+
+@app.route("/api/capture_premove", methods=["POST"])
+def api_capture_premove():
+    """Call /perception/capture_premove service to snapshot the current board."""
+    node = _ros_node
+    if node is None:
+        return jsonify({"ok": False, "message": "ROS not connected"}), 503
+    try:
+        from std_srvs.srv import Trigger
+        client = node.create_client(Trigger, "/perception/capture_premove")
+        if not client.wait_for_service(timeout_sec=2.0):
+            return jsonify({"ok": False, "message": "Service not available"}), 503
+        future = client.call_async(Trigger.Request())
+        import rclpy as _rclpy
+        _rclpy.spin_until_future_complete(node, future, timeout_sec=5.0)
+        if future.done() and future.result():
+            r = future.result()
+            return jsonify({"ok": r.success, "message": r.message})
+        return jsonify({"ok": False, "message": "Timeout"}), 504
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
 
 # ── Gantry jog routes ─────────────────────────────────────────────────────────
 @app.route("/api/gantry/jog", methods=["POST"])
@@ -1241,12 +1270,29 @@ body.showcase #debug-view{display:none}
           </div>
         </div>
         <div class="card">
-          <div class="card-hdr">Overlay Toggles</div>
-          <div class="card-body" id="overlay-togs"></div>
+          <div class="card-hdr">Frame-Diff Detection</div>
+          <div class="card-body">
+            <div class="stat-row">
+              <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Method</span>
+              <span class="stat-val" style="font-size:.72em;color:#58a6ff">Pre-move frame diff</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Last Changed Squares</span>
+              <span class="stat-val" id="perc-lastmove" style="font-family:monospace;color:#3fb950;font-size:.75em">–</span>
+            </div>
+            <div class="btn-row" style="margin-top:10px">
+              <button class="btn primary" onclick="capturePreMove()">&#128247; Capture Pre-Move Ref</button>
+            </div>
+            <div style="font-size:.63em;color:var(--dim);margin-top:6px;line-height:1.5">
+              The pre-move reference is auto-captured by the game manager at the
+              start of each player's turn. Use this button to manually recapture
+              if the board was disturbed.
+            </div>
+          </div>
         </div>
       </div>
       <div class="card">
-        <div class="card-hdr">Detection Parameters</div>
+        <div class="card-hdr">Warp &amp; Lens Parameters</div>
         <div class="card-body">
           <div class="pg-grid" id="pg-grid"></div>
         </div>
@@ -1635,11 +1681,9 @@ function setCornerXY(i, ax, v) {
 
 // ── Overlay toggles ───────────────────────────────────────────────
 var OVLAY = [
-  {k:'show_grid',       l:'Show grid overlay'},
-  {k:'show_pieces',     l:'Show piece circles'},
-  {k:'show_white_mask', l:'White mask debug'},
-  {k:'show_black_mask', l:'Black mask debug'},
-  {k:'undistort_enable',l:'Enable lens undistortion'},
+  {k:'show_grid',        l:'Show grid overlay'},
+  {k:'show_pieces',      l:'Show piece circles'},
+  {k:'undistort_enable', l:'Enable lens undistortion'},
 ];
 function buildOverlayToggles(p) {
   var el = document.getElementById('overlay-togs');
@@ -1655,21 +1699,13 @@ function buildOverlayToggles(p) {
 
 // ── Param sliders ─────────────────────────────────────────────────
 var PARAM_GRP = [
-  {t:'White Detection', ps:[
-    {k:'white_thresh',      l:'White threshold',     mn:100,mx:255,st:1},
-    {k:'min_blob_area',     l:'Min blob area (px²)',mn:10,mx:1000,st:10},
-  ]},
-  {t:'Black Detection', ps:[
-    {k:'black_thresh',      l:'Black threshold',     mn:0,  mx:150,st:1},
-    {k:'bottom_anchor_bias',l:'Bottom anchor bias',  mn:0,  mx:100,st:1,scale:100},
-  ]},
   {t:'Lens Correction', ps:[
-    {k:'undistort_k1',      l:'k1 (×100)',      mn:-80,mx:80, st:1},
-    {k:'undistort_k2',      l:'k2 (×100)',      mn:-50,mx:50, st:1},
-    {k:'undistort_focal',   l:'Focal % width',        mn:40, mx:130,st:1},
+    {k:'undistort_k1',    l:'k1 (×100)',      mn:-80,mx:80, st:1},
+    {k:'undistort_k2',    l:'k2 (×100)',      mn:-50,mx:50, st:1},
+    {k:'undistort_focal', l:'Focal % width',  mn:40, mx:130,st:1},
   ]},
   {t:'Transform', ps:[
-    {k:'warp_size',         l:'Warp output size',    mn:240,mx:800,st:40},
+    {k:'warp_size',       l:'Warp output size', mn:240,mx:800,st:40},
   ]},
 ];
 
@@ -1701,6 +1737,11 @@ function sendParam(d) {
     body:JSON.stringify(d)});
 }
 function triggerReprocess() { sendParam({}); }
+function capturePreMove() {
+  fetch('/api/capture_premove', {method:'POST'}).then(function(r){return r.json();})
+    .then(function(d){ alert(d.message || (d.ok ? 'Pre-move captured' : 'Failed')); })
+    .catch(function(){ alert('Service unavailable'); });
+}
 
 // ── Gantry controls ───────────────────────────────────────────────
 function getStep() { return +document.getElementById('jog-step').value; }
@@ -2025,10 +2066,15 @@ function pollStatus() {
     var sEl = document.getElementById('gs-source');
     var scS = document.getElementById('sc-source');
     var sm  = {game_mgr:['Game Mgr ✓','b-src-game'],
-               perception:['Perception','b-src-perc'],
                local:['Local','b-src-local']}[src] || ['Local','b-src-local'];
     sEl.textContent = sm[0]; sEl.className = 'badge '+sm[1];
     scS.textContent = sm[0];
+
+    // Last detected changed squares (from perception tab)
+    var lmEl = document.getElementById('perc-lastmove');
+    if (lmEl) {
+      lmEl.textContent = d.last_move ? d.last_move.split(',').join(' → ') : '–';
+    }
 
     // Move history
     if (d.move_history && d.move_history.length) {
