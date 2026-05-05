@@ -1,17 +1,38 @@
 #!/usr/bin/env python3
 """
-FEN Live Board Visualizer — Full Game Dashboard
-================================================
-Live dashboard showing camera feed, warped board, chess board state with
-actual piece types, and game manager state (when ROS is running).
+Chess Board Debug Dashboard
+============================
+Tabbed web UI for diagnosing the smart chess board perception pipeline.
 
-Board corners are manually defined (draggable in the browser). The chess
-board display uses the authoritative game FEN from game_manager_node when
-connected, falling back to the perception pipeline FEN, then local detection.
+Tabs:
+  📷 Live     — Raw unprocessed camera feed
+  📐 Corners  — Drag board corners, tune lens correction, preview warp
+  🔍 Diff     — Per-square diff heatmap, score grid, threshold tuning
+  ♟  Game     — Chess board diagram, game state machine, FEN management
+
+Always-visible header actions:
+  CLOCK HIT     — Publishes Bool(True) to /limit_switch/clock_hit
+                  Simulates the player pressing the chess clock → triggers move detection
+  Capture Ref   — Calls /perception/capture_premove to snapshot current board as reference
+  Save Corners  — Persists corner positions to board_corners.json
+  Snapshot      — Downloads a full-resolution camera image
+
+How the perception pipeline works (frame-diff approach):
+  1. game_manager enters WAITING_PLAYER_MOVE → calls /perception/capture_premove
+     piece_detector stores the current warped board as the pre-move reference.
+  2. Human moves a piece, then presses the clock.
+  3. game_manager receives the clock hit → transitions to CAPTURING_BOARD.
+  4. piece_detector compares every incoming frame to the pre-move reference.
+     Per-square LAB diff scores are published to /perception/square_scores (raw).
+     After applying global shift compensation, squares above diff_threshold are
+     published as changed_squares.
+  5. game_manager matches the changed squares to a legal chess move.
+  6. After the computer's move, a new pre-move reference is captured.
 
 Usage:
-  python3 src/chess_perception/scripts/fen_visualizer.py
-  python3 src/chess_perception/scripts/fen_visualizer.py --no-ros --image /path/to/frame.jpg
+  python3 fen_visualizer.py
+  python3 fen_visualizer.py --no-ros --image /path/to/frame.jpg
+  python3 fen_visualizer.py --port 8080
 """
 
 import argparse, threading, time, sys, json, os
@@ -21,55 +42,71 @@ import cv2
 try:
     import rclpy
     from rclpy.node import Node
-    from std_msgs.msg import String
+    from std_msgs.msg import String, Bool
     from sensor_msgs.msg import Image
+    from std_srvs.srv import Trigger
     ROS_AVAILABLE = True
 except ImportError:
     ROS_AVAILABLE = False
+
+try:
+    from rcl_interfaces.srv import SetParameters
+    from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
+    _RCL_PARAMS_AVAILABLE = True
+except ImportError:
+    _RCL_PARAMS_AVAILABLE = False
 
 try:
     from flask import Flask, jsonify, request as freq, Response, render_template_string
 except ImportError:
     print("ERROR: pip3 install flask"); sys.exit(1)
 
-# ─── Shared state ─────────────────────────────────────────────────────────────
-_lock = threading.Lock()
 
-_DEFAULT_CORNERS = [
-    [0.10, 0.10],   # TL
-    [0.90, 0.10],   # TR
-    [0.90, 0.90],   # BR
-    [0.10, 0.90],   # BL
-]
+# ─── Shared state ──────────────────────────────────────────────────────────────
+_lock     = threading.Lock()
+_ros_node = None  # FenNode instance, set in main()
+
+_DEFAULT_CORNERS = [[0.10, 0.10], [0.90, 0.10], [0.90, 0.90], [0.10, 0.90]]
+_CORNERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "board_corners.json")
 
 _state = {
-    "last_move":      "",    # last detected changed squares e.g. "e2,e4"
+    "raw_frame":      None,    # latest BGR ndarray from camera
+    "diff_frame":     None,    # JPEG bytes of /perception/piece_debug heatmap
+    "square_scores":  {},      # {sq_name: float} raw LAB diff scores (pre-compensation)
+    "cam_info":       "–",
     "frame_count":    0,
     "last_updated":   0.0,
     "error":          "",
-    "raw_frame":      None,
-    "cam_info":       "–",
     "corners":        [list(c) for c in _DEFAULT_CORNERS],
-    # Game manager state (updated via ROS)
+    "ref_status":     "No reference captured yet. Click 'Capture Ref' to start.",
+    # From game_manager ROS topics
     "game_fen":       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "game_state":     "OFFLINE",
     "game_turn":      "",
-    "fen_source":     "local",   # "game_mgr" | "local"
+    "fen_source":     "local",
+    "last_move":      "",
+    "clock_hit_time": 0.0,
 }
 
-# Tunable display params
 _params = {
-    "undistort_enable":    0,
-    "undistort_k1":       -25,
-    "undistort_k2":         8,
-    "undistort_focal":     83,
-    "warp_size":          480,
-    "show_grid":            1,
+    # Lens correction (corners tab)
+    "undistort_enable":     0,
+    "undistort_k1":        -25,
+    "undistort_k2":          8,
+    "undistort_focal":      83,
+    # Warp (corners tab)
+    "warp_size":           480,
+    "show_grid":             1,
+    # Diff display thresholds (diff tab — preview only in visualizer)
+    "display_threshold":   18.0,
+    "shift_compensation":   1.0,
 }
 
-_CORNERS_FILE = os.path.join(os.path.dirname(__file__), "board_corners.json")
+_processed = {"raw": None, "warp": None}
+_proc_lock  = threading.Lock()
 
 
+# ─── Persistence ───────────────────────────────────────────────────────────────
 def _load_corners():
     try:
         with open(_CORNERS_FILE) as f:
@@ -92,143 +129,126 @@ def _save_corners(corners):
         print(f"⚠  Could not save corners: {e}")
 
 
-def _best_fen():
-    """Return the most authoritative FEN available."""
-    return _state.get("game_fen") or "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+# ─── Image helpers ──────────────────────────────────────────────────────────────
+def _frame_to_jpeg(frame, scale=1.0, quality=82):
+    if scale != 1.0:
+        h, w = frame.shape[:2]
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+    ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return bytes(buf) if ok else b''
 
 
-# ─── Lens undistortion ────────────────────────────────────────────────────────
+def _blank_jpeg(w, h, msg, color=(160, 160, 160)):
+    blank = np.full((h, w, 3), 25, dtype=np.uint8)
+    (tw, th), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    cv2.putText(blank, msg, (max(0, (w - tw) // 2), (h + th) // 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+    _, buf = cv2.imencode('.jpg', blank)
+    return bytes(buf)
+
+
+# ─── Lens undistortion ──────────────────────────────────────────────────────────
 def _undistort_frame(frame, p):
     if not p.get("undistort_enable", 0):
         return frame
     h, w = frame.shape[:2]
     f = p["undistort_focal"] / 100.0 * w
     K = np.array([[f, 0, w / 2.0], [0, f, h / 2.0], [0, 0, 1.0]], dtype=np.float64)
-    D = np.array([p["undistort_k1"] / 100.0, p["undistort_k2"] / 100.0, 0.0, 0.0], dtype=np.float64)
+    D = np.array([p["undistort_k1"] / 100.0, p["undistort_k2"] / 100.0, 0.0, 0.0],
+                 dtype=np.float64)
     return cv2.undistort(frame, K, D)
 
 
-# ─── Perspective warp ─────────────────────────────────────────────────────────
+# ─── Perspective warp ───────────────────────────────────────────────────────────
 def _corners_to_px(corners_norm, frame):
     h, w = frame.shape[:2]
     return [[c[0] * w, c[1] * h] for c in corners_norm]
 
 
-def _get_warp_matrix(corners_px, warp_size):
+def _warp_frame(frame, corners_norm, warp_size):
+    corners_px = _corners_to_px(corners_norm, frame)
     src = np.float32(corners_px)
-    sz = warp_size - 1
+    sz  = warp_size - 1
     dst = np.float32([[0, 0], [sz, 0], [sz, sz], [0, sz]])
     M     = cv2.getPerspectiveTransform(src, dst)
     M_inv = cv2.getPerspectiveTransform(dst, src)
-    return M, M_inv
-
-
-def _warp_frame(frame, corners_norm, warp_size):
-    corners_px = _corners_to_px(corners_norm, frame)
-    M, M_inv = _get_warp_matrix(corners_px, warp_size)
     warped = cv2.warpPerspective(frame, M, (warp_size, warp_size))
     return warped, M, M_inv, corners_px
 
 
-
-# ─── Render helpers ───────────────────────────────────────────────────────────
+# ─── Render helpers ─────────────────────────────────────────────────────────────
 def _draw_grid(img, sq):
     size = sq * 8
     for i in range(9):
-        cv2.line(img, (i * sq, 0),    (i * sq, size),  (0, 200, 200), 1)
-        cv2.line(img, (0,    i * sq), (size,   i * sq), (0, 200, 200), 1)
+        cv2.line(img, (i * sq, 0),    (i * sq, size),   (0, 200, 200), 1)
+        cv2.line(img, (0,      i * sq), (size, i * sq), (0, 200, 200), 1)
 
 
-def _draw_rank_file_labels(img, sq):
+def _draw_labels(img, sq):
     for r in range(8):
         cv2.putText(img, str(8 - r), (3, r * sq + sq - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 50), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 50), 1)
     for fi, lbl in enumerate('abcdefgh'):
         cv2.putText(img, lbl, (fi * sq + sq // 2 - 4, sq * 8 - 3),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 50), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 50), 1)
 
 
-def _frame_to_jpeg(frame, scale=0.8, quality=82):
-    h, w = frame.shape[:2]
-    if scale != 1.0:
-        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-    ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    return bytes(buf) if ok else b''
-
-
-def _blank_jpeg(w, h, msg, color=(200, 200, 200)):
-    blank = np.full((h, w, 3), 50, dtype=np.uint8)
-    cv2.putText(blank, msg, (20, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-    _, buf = cv2.imencode('.jpg', blank)
-    return bytes(buf)
-
-
-def _render_raw(frame, corners, p, M_inv):
+def _render_corner_cam(frame, corners_px, p, M_inv):
+    """Raw camera with grid projected back to camera space + corner handles."""
     out = frame.copy()
-    sz = p["warp_size"]
-    sq = sz // 8
+    sz  = p["warp_size"]
+    sq  = sz // 8
     if p["show_grid"] and M_inv is not None:
         for i in range(9):
-            p0w = np.float32([[[i * sq, 0]]])
-            p1w = np.float32([[[i * sq, sz]]])
-            p0 = cv2.perspectiveTransform(p0w, M_inv)[0, 0].astype(int)
-            p1 = cv2.perspectiveTransform(p1w, M_inv)[0, 0].astype(int)
+            p0 = cv2.perspectiveTransform(np.float32([[[i * sq, 0]]]),  M_inv)[0, 0].astype(int)
+            p1 = cv2.perspectiveTransform(np.float32([[[i * sq, sz]]]), M_inv)[0, 0].astype(int)
             cv2.line(out, tuple(p0), tuple(p1), (0, 200, 200), 1)
-            q0w = np.float32([[[0, i * sq]]])
-            q1w = np.float32([[[sz, i * sq]]])
-            q0 = cv2.perspectiveTransform(q0w, M_inv)[0, 0].astype(int)
-            q1 = cv2.perspectiveTransform(q1w, M_inv)[0, 0].astype(int)
+            q0 = cv2.perspectiveTransform(np.float32([[[0,  i * sq]]]), M_inv)[0, 0].astype(int)
+            q1 = cv2.perspectiveTransform(np.float32([[[sz, i * sq]]]), M_inv)[0, 0].astype(int)
             cv2.line(out, tuple(q0), tuple(q1), (0, 200, 200), 1)
     labels = ['TL', 'TR', 'BR', 'BL']
-    handle_colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255), (255, 255, 80)]
-    for i, (cx, cy) in enumerate(corners):
-        cv2.circle(out, (int(cx), int(cy)), 10, handle_colors[i], -1)
-        cv2.circle(out, (int(cx), int(cy)), 10, (255, 255, 255), 1)
-        cv2.putText(out, labels[i], (int(cx) + 12, int(cy) + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, handle_colors[i], 2)
-    pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+    colors = [(80, 80, 255), (80, 255, 80), (255, 80, 80), (80, 220, 255)]
+    for i, (cx, cy) in enumerate(corners_px):
+        cv2.circle(out, (int(cx), int(cy)), 11, colors[i], -1)
+        cv2.circle(out, (int(cx), int(cy)), 11, (255, 255, 255), 1)
+        cv2.putText(out, labels[i], (int(cx) + 14, int(cy) + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, colors[i], 2)
+    pts = np.array(corners_px, dtype=np.int32).reshape(-1, 1, 2)
     cv2.polylines(out, [pts], True, (0, 255, 100), 2)
     return out
 
 
 def _render_warp(warped, p):
+    """Top-down warped board with checkerboard tint + grid."""
     out = warped.copy()
-    sz = p["warp_size"]
-    sq = sz // 8
+    sz  = p["warp_size"]
+    sq  = sz // 8
     for r in range(8):
         for c in range(8):
             if (r + c) % 2 == 0:
-                roi = out[r*sq:(r+1)*sq, c*sq:(c+1)*sq].astype(np.float32)
+                roi = out[r * sq:(r + 1) * sq, c * sq:(c + 1) * sq].astype(np.float32)
                 roi = cv2.addWeighted(roi, 0.82, np.full_like(roi, 190), 0.18, 0)
-                out[r*sq:(r+1)*sq, c*sq:(c+1)*sq] = roi.astype(np.uint8)
+                out[r * sq:(r + 1) * sq, c * sq:(c + 1) * sq] = roi.astype(np.uint8)
     if p["show_grid"]:
         _draw_grid(out, sq)
-        _draw_rank_file_labels(out, sq)
+        _draw_labels(out, sq)
     cv2.rectangle(out, (0, 0), (sz - 1, sz - 1), (0, 255, 100), 2)
     return out
 
 
-# ─── Background processing ────────────────────────────────────────────────────
-_processed = {"raw": None, "warp": None}
-_proc_lock = threading.Lock()
-
-
+# ─── Background processing ─────────────────────────────────────────────────────
 def _process_frame(frame, corners, p):
     try:
         warped, M, M_inv, corners_px = _warp_frame(frame, corners, p["warp_size"])
-
-        raw_img  = _render_raw(frame, corners_px, p, M_inv)
-        warp_img = _render_warp(warped, p)
-
+        corner_img = _render_corner_cam(frame, corners_px, p, M_inv)
+        warp_img   = _render_warp(warped, p)
         with _lock:
             _state["frame_count"]  += 1
             _state["last_updated"]  = time.time()
             _state["error"]         = ""
-
         with _proc_lock:
-            _processed["raw"]  = _frame_to_jpeg(raw_img,  scale=0.8)
-            _processed["warp"] = _frame_to_jpeg(warp_img, scale=1.0)
-
+            _processed["raw"]  = _frame_to_jpeg(corner_img, scale=0.75, quality=80)
+            _processed["warp"] = _frame_to_jpeg(warp_img,   scale=1.0,  quality=82)
     except Exception as e:
         with _lock:
             _state["error"] = str(e)
@@ -236,7 +256,7 @@ def _process_frame(frame, corners, p):
 
 def _processing_loop():
     while True:
-        time.sleep(1.5)
+        time.sleep(1.0)
         with _lock:
             frame   = _state["raw_frame"]
             corners = _state["corners"]
@@ -258,19 +278,23 @@ def _force_reprocess():
     _process_frame(frame, corners, p)
 
 
-# ─── ROS subscriber ────────────────────────────────────────────────────────────
+# ─── ROS Node ──────────────────────────────────────────────────────────────────
 class FenNode(Node):
+
     def __init__(self):
         super().__init__("fen_visualizer")
 
-        # Changed squares from piece_detector_node (frame-diff detection)
+        # Subscriptions
+        self.create_subscription(Image,  "/camera/image_raw",
+                                 self._on_img, 10)
+        self.create_subscription(Image,  "/perception/piece_debug",
+                                 self._on_diff_img, 10)
         self.create_subscription(String, "/perception/changed_squares",
                                  self._on_changed_squares, 10)
-
-        # Camera image for local processing
-        self.create_subscription(Image, "/camera/image_raw", self._on_img, 10)
-
-        # Game manager topics — authoritative game state
+        self.create_subscription(String, "/perception/square_scores",
+                                 self._on_square_scores, 10)
+        self.create_subscription(String, "/perception/reference_status",
+                                 self._on_ref_status, 10)
         self.create_subscription(String, "/game_manager/board_fen",
                                  self._on_game_fen, 10)
         self.create_subscription(String, "/game_manager/state",
@@ -278,38 +302,85 @@ class FenNode(Node):
         self.create_subscription(String, "/game_manager/turn",
                                  self._on_game_turn, 10)
 
-        self.get_logger().info("FenNode ready — subscribed to perception + game manager topics")
+        # Publishers
+        self._clock_pub = self.create_publisher(Bool, '/limit_switch/clock_hit', 10)
 
-    def _on_changed_squares(self, msg):
-        raw = msg.data.strip()
+        # Service clients
+        self._premove_client = self.create_client(Trigger, '/perception/capture_premove')
+        if _RCL_PARAMS_AVAILABLE:
+            self._detector_param_client = self.create_client(
+                SetParameters, '/piece_detector_node/set_parameters')
+
+        # Requests from Flask threads (set flag → ROS timer picks up)
+        self._pending_capture         = False
+        self._pending_detector_params = None
+        self.create_timer(0.2, self._check_pending)
+
+        self.get_logger().info("FenNode ready — subscribed to perception + game manager")
+
+    def _check_pending(self):
+        if self._pending_capture:
+            self._pending_capture = False
+            if self._premove_client.service_is_ready():
+                future = self._premove_client.call_async(Trigger.Request())
+                future.add_done_callback(self._on_premove_result)
+            else:
+                with _lock:
+                    _state["ref_status"] = "⚠ /perception/capture_premove not available"
+
+        if self._pending_detector_params and _RCL_PARAMS_AVAILABLE:
+            params = self._pending_detector_params
+            self._pending_detector_params = None
+            if self._detector_param_client.service_is_ready():
+                req = SetParameters.Request()
+                type_map = {
+                    "diff_threshold":          ParameterType.PARAMETER_DOUBLE,
+                    "global_shift_compensation": ParameterType.PARAMETER_DOUBLE,
+                }
+                for name, value in params.items():
+                    pv = ParameterValue()
+                    pv.type = type_map.get(name, ParameterType.PARAMETER_DOUBLE)
+                    pv.double_value = float(value)
+                    p = Parameter()
+                    p.name = name
+                    p.value = pv
+                    req.parameters.append(p)
+                self._detector_param_client.call_async(req)
+
+    def _on_premove_result(self, future):
+        try:
+            result = future.result()
+            msg = result.message if result.success else f"Failed: {result.message}"
+        except Exception as e:
+            msg = f"Error: {e}"
         with _lock:
-            _state["last_move"]    = raw
-            _state["last_updated"] = time.time()
-            _state["frame_count"] += 1
+            _state["ref_status"] = msg
 
-    def _on_game_fen(self, msg):
-        fen = msg.data.strip()
-        if fen:
-            with _lock:
-                _state["game_fen"]     = fen
-                _state["fen_source"]   = "game_mgr"
-                _state["last_updated"] = time.time()
-                _state["frame_count"] += 1
-
-    def _on_game_state(self, msg):
+    def publish_clock_hit(self):
+        self._clock_pub.publish(Bool(data=True))
         with _lock:
-            _state["game_state"] = msg.data.strip()
+            _state["clock_hit_time"] = time.time()
+        self.get_logger().info("Clock hit published from UI")
 
-    def _on_game_turn(self, msg):
+    def request_capture_premove(self):
+        self._pending_capture = True
         with _lock:
-            _state["game_turn"] = msg.data.strip()
+            _state["ref_status"] = "Capture requested…"
 
-    def _on_img(self, msg):
+    def request_detector_params(self, threshold, compensation):
+        self._pending_detector_params = {
+            "diff_threshold":            threshold,
+            "global_shift_compensation": compensation,
+        }
+
+    # ── Camera image ──────────────────────────────────────────────────────────
+
+    def _on_img(self, msg: Image):
         try:
             enc  = msg.encoding.lower()
             h, w = msg.height, msg.width
             step = msg.step
-            data = np.frombuffer(msg.data, dtype=np.uint8)
+            data = np.frombuffer(bytes(msg.data), dtype=np.uint8)
             if enc in ('bgr8', 'bgr888'):
                 frame = data.reshape((h, step))[:, :w * 3].reshape(h, w, 3)
             elif enc in ('rgb8', 'rgb888'):
@@ -325,7 +396,7 @@ class FenNode(Node):
                 mono  = data.reshape((h, step))[:, :w].reshape(h, w)
                 frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
             else:
-                bpp = len(msg.data) // (h * w) if h * w > 0 else 3
+                bpp   = len(msg.data) // (h * w) if h * w > 0 else 3
                 frame = data.reshape((h, w, bpp if bpp in (3, 4) else 3)).copy()
                 if bpp == 4:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
@@ -337,6 +408,50 @@ class FenNode(Node):
             with _lock:
                 _state["error"] = f"Image decode: {e}"
 
+    def _on_diff_img(self, msg: Image):
+        try:
+            h, w = msg.height, msg.width
+            data = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+            img  = data.reshape((h, w, 3))
+            ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                with _lock:
+                    _state["diff_frame"] = bytes(buf)
+        except Exception:
+            pass
+
+    def _on_changed_squares(self, msg: String):
+        with _lock:
+            _state["last_move"]    = msg.data.strip()
+            _state["last_updated"] = time.time()
+            _state["frame_count"] += 1
+
+    def _on_square_scores(self, msg: String):
+        try:
+            with _lock:
+                _state["square_scores"] = json.loads(msg.data)
+        except Exception:
+            pass
+
+    def _on_ref_status(self, msg: String):
+        with _lock:
+            _state["ref_status"] = msg.data
+
+    def _on_game_fen(self, msg: String):
+        fen = msg.data.strip()
+        if fen:
+            with _lock:
+                _state["game_fen"]   = fen
+                _state["fen_source"] = "game_mgr"
+
+    def _on_game_state(self, msg: String):
+        with _lock:
+            _state["game_state"] = msg.data.strip()
+
+    def _on_game_turn(self, msg: String):
+        with _lock:
+            _state["game_turn"] = msg.data.strip()
+
 
 def _ros_thread_fn(node):
     rclpy.spin(node)
@@ -344,7 +459,7 @@ def _ros_thread_fn(node):
     rclpy.shutdown()
 
 
-# ─── Flask app + API ───────────────────────────────────────────────────────────
+# ─── Flask app ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.logger.setLevel("ERROR")
 
@@ -354,47 +469,40 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 
-@app.route("/api/fen")
-def api_fen():
-    with _lock:
-        fen = _best_fen()
-        return jsonify({
-            "fen":          fen,
-            "frame_count":  _state["frame_count"],
-            "last_updated": _state["last_updated"],
-            "error":        _state["error"],
-            "cam_info":     _state.get("cam_info", "–"),
-        })
-
-
-@app.route("/api/fen", methods=["POST"])
-def api_fen_post():
-    data = freq.get_json(silent=True) or {}
-    fen = data.get("fen", "").strip()
-    if not fen:
-        return jsonify({"ok": False}), 400
-    with _lock:
-        _state["game_fen"]     = fen
-        _state["fen_source"]   = "local"
-        _state["last_updated"] = time.time()
-        _state["frame_count"] += 1
-    return jsonify({"ok": True})
-
-
-@app.route("/api/game_state")
-def api_game_state():
+@app.route("/api/status")
+def api_status():
     with _lock:
         return jsonify({
-            "state":     _state.get("game_state", "OFFLINE"),
-            "turn":      _state.get("game_turn", ""),
-            "source":    _state.get("fen_source", "local"),
-            "fen":       _best_fen(),
-            "last_move": _state.get("last_move", ""),
+            "fen":            _state.get("game_fen", ""),
+            "game_state":     _state.get("game_state", "OFFLINE"),
+            "game_turn":      _state.get("game_turn", ""),
+            "fen_source":     _state.get("fen_source", "local"),
+            "last_move":      _state.get("last_move", ""),
+            "frame_count":    _state["frame_count"],
+            "last_updated":   _state["last_updated"],
+            "cam_info":       _state.get("cam_info", "–"),
+            "error":          _state.get("error", ""),
+            "ref_status":     _state.get("ref_status", "–"),
+            "clock_hit_time": _state.get("clock_hit_time", 0.0),
+            "ros_connected":  _ros_node is not None,
         })
 
 
 @app.route("/api/frame")
 def api_frame():
+    """Raw camera — no overlays."""
+    with _lock:
+        frame = _state["raw_frame"]
+    if frame is None:
+        return Response(_blank_jpeg(640, 360, "Waiting for camera..."),
+                        mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+    data = _frame_to_jpeg(frame, scale=0.75, quality=80)
+    return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.route("/api/corner_frame")
+def api_corner_frame():
+    """Camera with grid + corner handle circles rendered in."""
     with _proc_lock:
         data = _processed.get("raw")
     if not data:
@@ -407,8 +515,28 @@ def api_warp_frame():
     with _proc_lock:
         data = _processed.get("warp")
     if not data:
-        data = _blank_jpeg(480, 480, "No corners set", (80, 80, 80))
+        data = _blank_jpeg(480, 480, "Set corners first", (80, 80, 80))
     return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.route("/api/diff_frame")
+def api_diff_frame():
+    """Piece detector heatmap from /perception/piece_debug."""
+    with _lock:
+        data = _state.get("diff_frame")
+    if not data:
+        data = _blank_jpeg(400, 400, "Waiting for piece_detector...", (100, 180, 255))
+    return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.route("/api/square_scores")
+def api_square_scores():
+    with _lock:
+        return jsonify({
+            "scores":            dict(_state.get("square_scores", {})),
+            "display_threshold": _params.get("display_threshold", 18.0),
+            "shift_compensation": _params.get("shift_compensation", 1.0),
+        })
 
 
 @app.route("/api/params", methods=["GET"])
@@ -444,13 +572,70 @@ def api_corners_post():
         corners = [[float(c[0]), float(c[1])] for c in corners]
         for fx, fy in corners:
             if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
-                return jsonify({"ok": False, "msg": "Fractions must be 0..1"}), 400
+                return jsonify({"ok": False, "msg": "Fractions must be 0–1"}), 400
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 400
     with _lock:
         _state["corners"] = corners
     _save_corners(corners)
     threading.Thread(target=_force_reprocess, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/clock_hit", methods=["POST"])
+def api_clock_hit():
+    if _ros_node:
+        _ros_node.publish_clock_hit()
+        return jsonify({"ok": True, "msg": "Clock hit published to /limit_switch/clock_hit"})
+    return jsonify({"ok": False, "msg": "ROS not connected — start with ROS running"}), 503
+
+
+@app.route("/api/capture_premove", methods=["POST"])
+def api_capture_premove():
+    if _ros_node:
+        _ros_node.request_capture_premove()
+        return jsonify({"ok": True, "msg": "Capture request queued"})
+    return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+
+
+@app.route("/api/detector_params", methods=["POST"])
+def api_detector_params():
+    """Push threshold + compensation values to piece_detector_node via ROS set_parameters."""
+    data = freq.get_json(silent=True) or {}
+    thresh = float(data.get("diff_threshold", 18.0))
+    comp   = float(data.get("shift_compensation", 1.0))
+    if _ros_node and _RCL_PARAMS_AVAILABLE:
+        _ros_node.request_detector_params(thresh, comp)
+        return jsonify({"ok": True,
+                        "msg": f"Applied threshold={thresh}, compensation={comp} to piece_detector_node"})
+    elif _ros_node and not _RCL_PARAMS_AVAILABLE:
+        return jsonify({"ok": False,
+                        "msg": "rcl_interfaces not available — cannot set parameters remotely"}), 503
+    return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+
+
+@app.route("/api/fen", methods=["GET"])
+def api_fen():
+    with _lock:
+        return jsonify({
+            "fen":          _state.get("game_fen", ""),
+            "frame_count":  _state["frame_count"],
+            "last_updated": _state["last_updated"],
+            "error":        _state.get("error", ""),
+            "cam_info":     _state.get("cam_info", "–"),
+        })
+
+
+@app.route("/api/fen", methods=["POST"])
+def api_fen_post():
+    data = freq.get_json(silent=True) or {}
+    fen = data.get("fen", "").strip()
+    if not fen:
+        return jsonify({"ok": False}), 400
+    with _lock:
+        _state["game_fen"]     = fen
+        _state["fen_source"]   = "local"
+        _state["last_updated"] = time.time()
     return jsonify({"ok": True})
 
 
@@ -465,226 +650,431 @@ def api_snapshot():
                     headers={"Content-Disposition": "attachment; filename=snapshot.jpg"})
 
 
-# ─── HTML Template ─────────────────────────────────────────────────────────────
+# ─── HTML Dashboard ────────────────────────────────────────────────────────────
 HTML_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Smart Chess Board — Live Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chess Board Debug Dashboard</title>
 <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
 <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
 <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
 <style>
-/* ── Reset & base ───────────────────────────────────────────────── */
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;min-height:100vh}
+code{font-family:monospace;font-size:.9em;background:#161b22;padding:1px 4px;border-radius:3px}
 
-/* ── Header ─────────────────────────────────────────────────────── */
-.header{background:#161b22;border-bottom:1px solid #21262d;padding:8px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.header h1{color:#58a6ff;font-size:1.0em;font-weight:600;display:flex;align-items:center;gap:8px;margin:0}
-#status-dot{width:10px;height:10px;border-radius:50%;background:#d29922;flex-shrink:0;transition:background .3s}
+/* ── Header ─────────────────────────────────────────────────────────── */
+.hdr{background:#161b22;border-bottom:2px solid #21262d;padding:8px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:100}
+.hdr-left{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap}
+.hdr-right{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+.title{color:#58a6ff;font-size:.95em;font-weight:700;white-space:nowrap}
+#status-dot{width:9px;height:9px;border-radius:50%;background:#d29922;flex-shrink:0;transition:background .3s}
 #status-dot.live{background:#3fb950;animation:pulse 2s infinite}
 #status-dot.dead{background:#f85149}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-.header-actions{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
-/* ── Layout grid ─────────────────────────────────────────────────── */
-.layout{display:grid;grid-template-columns:1fr 380px 300px;grid-template-rows:auto auto;gap:8px;padding:8px;align-items:start}
+/* ── Status bar ──────────────────────────────────────────────────────── */
+.status-bar{background:#0d1117;border-bottom:1px solid #21262d;padding:4px 14px;display:flex;gap:14px;flex-wrap:wrap;font-size:.68em;color:#8b949e}
+.status-bar span{white-space:nowrap}
+.status-bar .hl{color:#c9d1d9;font-family:monospace}
+.status-bar .ok{color:#3fb950}
+.status-bar .warn{color:#d29922}
+.status-bar .err{color:#f85149}
 
-/* ── Generic card ────────────────────────────────────────────────── */
-.card{background:#161b22;border:1px solid #21262d;border-radius:6px;overflow:hidden}
-.card-header{font-size:.65em;text-transform:uppercase;letter-spacing:.09em;color:#8b949e;padding:6px 10px;border-bottom:1px solid #21262d;display:flex;justify-content:space-between;align-items:center;font-weight:600}
-.card-body{padding:8px 10px}
+/* ── Tabs ────────────────────────────────────────────────────────────── */
+.tab-nav{display:flex;background:#161b22;border-bottom:2px solid #21262d;padding:0 8px}
+.tab-btn{background:none;border:none;border-bottom:3px solid transparent;padding:8px 16px;color:#8b949e;cursor:pointer;font-size:.78em;font-weight:600;transition:color .15s,border-color .15s;margin-bottom:-2px;white-space:nowrap}
+.tab-btn:hover{color:#c9d1d9}
+.tab-btn.active{color:#58a6ff;border-bottom-color:#58a6ff}
+.tab-pane{display:none;padding:12px 14px}
+.tab-pane.active{display:block}
 
-/* ── Camera panel ────────────────────────────────────────────────── */
-.cam-panel{grid-column:1;grid-row:1}
-#cam-canvas-wrap{position:relative;width:100%}
-#cam-img{width:100%;display:block;cursor:crosshair}
-.corner-info{font-size:.65em;color:#8b949e;padding:4px 10px 6px}
-.handle{cursor:grab;position:absolute;width:20px;height:20px;border-radius:50%;transform:translate(-50%,-50%);border:2px solid white;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;color:#fff;user-select:none;z-index:10}
-.handle:active{cursor:grabbing}
+/* ── Buttons ─────────────────────────────────────────────────────────── */
+.btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:5px 11px;border-radius:5px;cursor:pointer;font-size:.73em;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;font-weight:500}
+.btn:hover{background:#30363d}
+.btn.clock{background:#7c3aed;color:#fff;border-color:#7c3aed;font-weight:700;font-size:.8em;letter-spacing:.02em}
+.btn.clock:hover{background:#8b5cf6}
+.btn.clock.flash{animation:clockflash .4s}
+@keyframes clockflash{0%{background:#10b981}50%{background:#059669}100%{background:#7c3aed}}
+.btn.blue{background:#1f6feb;color:#fff;border-color:#1f6feb}
+.btn.blue:hover{background:#388bfd}
+.btn.green{background:#196127;color:#fff;border-color:#196127}
+.btn.green:hover{background:#238636}
+.btn.orange{background:#9a3412;color:#fff;border-color:#c2410c}
+.btn.orange:hover{background:#c2410c}
 
-/* ── Warp panel ──────────────────────────────────────────────────── */
-.warp-panel{grid-column:2;grid-row:1}
-.warp-panel img{width:100%;display:block;image-rendering:pixelated}
+/* ── Section labels ──────────────────────────────────────────────────── */
+.sec-lbl{font-size:.63em;text-transform:uppercase;letter-spacing:.09em;color:#58a6ff;font-weight:700;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #21262d}
+.instr{background:#161b22;border:1px solid #21262d;border-radius:5px;padding:8px 12px;font-size:.7em;color:#8b949e;line-height:1.7;margin-bottom:10px}
+.instr b{color:#c9d1d9}
+.instr code{color:#79b8ff}
 
-/* ── Right column ────────────────────────────────────────────────── */
-.right-col{grid-column:3;grid-row:1/3;display:flex;flex-direction:column;gap:8px}
+/* ── Game state badges ───────────────────────────────────────────────── */
+.state-badge{padding:2px 8px;border-radius:3px;font-size:.65em;font-weight:700;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+.s-offline,.s-startup{background:#21262d;color:#8b949e}
+.s-homing{background:#9e6a03;color:#fff}
+.s-idle{background:#1c2742;color:#79b8ff}
+.s-waiting_player_move{background:#1f6feb;color:#fff}
+.s-capturing_board,.s-validating_move{background:#6e40c9;color:#fff}
+.s-calculating_response{background:#d29922;color:#0d1117}
+.s-executing_move,.s-hitting_clock{background:#e16f24;color:#fff}
+.s-promotion_wait{background:#8957e5;color:#fff}
+.s-game_over{background:#b91c1c;color:#fff}
+.src-badge{padding:1px 6px;border-radius:3px;font-size:.63em;font-weight:600}
+.src-game{background:#196127;color:#fff}
+.src-local{background:#21262d;color:#8b949e}
 
-/* ── Stat rows ───────────────────────────────────────────────────── */
-.stat-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #21262d;font-size:.75em;gap:6px}
+/* ── Stat table ──────────────────────────────────────────────────────── */
+.stat-table{border:1px solid #21262d;border-radius:5px;overflow:hidden}
+.stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 10px;border-bottom:1px solid #21262d;font-size:.75em;gap:8px}
 .stat-row:last-child{border-bottom:none}
 .stat-lbl{color:#8b949e;white-space:nowrap;flex-shrink:0}
 .stat-val{font-family:monospace;text-align:right;word-break:break-all}
 .ok{color:#3fb950}.warn{color:#d29922}.err{color:#f85149}
 
-/* ── Game state badges ───────────────────────────────────────────── */
-.state-badge{padding:2px 7px;border-radius:3px;font-size:.65em;font-weight:700;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
-.s-offline,.s-startup     {background:#21262d;color:#8b949e}
-.s-homing                 {background:#9e6a03;color:#fff}
-.s-idle                   {background:#1c2742;color:#79b8ff}
-.s-waiting_player_move    {background:#1f6feb;color:#fff}
-.s-capturing_board,.s-validating_move{background:#6e40c9;color:#fff}
-.s-calculating_response   {background:#d29922;color:#0d1117}
-.s-executing_move,.s-hitting_clock{background:#e16f24;color:#fff}
-.s-promotion_wait         {background:#8957e5;color:#fff}
-.s-game_over              {background:#b91c1c;color:#fff}
-
-.turn-white{color:#f0f0f0;font-weight:700}
-.turn-black{color:#8b949e;font-weight:700}
-
-.src-badge{padding:1px 5px;border-radius:3px;font-size:.63em;font-weight:600}
-.src-game{background:#196127;color:#fff}
-.src-perc{background:#1c2742;color:#79b8ff}
-.src-local{background:#21262d;color:#8b949e}
-
-/* ── Chess board ─────────────────────────────────────────────────── */
-#board-wrap{padding:8px;display:flex;justify-content:center}
-#board{width:256px}
-#fen-text{font-family:monospace;font-size:.6em;color:#3fb950;word-break:break-all;background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:5px;margin:0 8px 8px}
-
-/* ── Controls ─────────────────────────────────────────────────────── */
-.ctrl-panel{grid-column:1/3;grid-row:2;background:#161b22;border:1px solid #21262d;border-radius:6px;padding:12px 14px}
-.ctrl-panel-header{font-size:.65em;text-transform:uppercase;letter-spacing:.09em;color:#8b949e;font-weight:600;margin-bottom:10px}
-.ctrl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px 16px}
-.ctrl-group{background:#0d1117;border:1px solid #21262d;border-radius:5px;padding:10px 12px}
-.ctrl-group-title{font-size:.63em;text-transform:uppercase;letter-spacing:.08em;color:#58a6ff;margin-bottom:8px;font-weight:700;border-bottom:1px solid #21262d;padding-bottom:5px}
+/* ── Controls ────────────────────────────────────────────────────────── */
+.ctrl-section{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.ctrl-group{background:#0d1117;border:1px solid #21262d;border-radius:5px;padding:10px 12px;min-width:240px;flex:1}
+.ctrl-title{font-size:.63em;text-transform:uppercase;letter-spacing:.08em;color:#58a6ff;margin-bottom:8px;font-weight:700;border-bottom:1px solid #21262d;padding-bottom:5px}
 .slider-row{display:flex;align-items:center;gap:6px;margin:5px 0}
-.slider-row label{flex:0 0 140px;font-size:.7em;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.slider-row input[type=range]{flex:1;accent-color:#58a6ff;height:4px}
-.slider-row .vb{flex:0 0 38px;text-align:right;font-family:monospace;font-size:.7em;color:#c9d1d9}
+.slider-row label{flex:0 0 150px;font-size:.7em;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slider-row input[type=range]{flex:1;accent-color:#58a6ff;height:4px;min-width:80px}
+.slider-row .vb{flex:0 0 42px;text-align:right;font-family:monospace;font-size:.72em;color:#c9d1d9}
 .tog-row{display:flex;align-items:center;gap:8px;margin:5px 0}
 .tog-row label{font-size:.7em;color:#8b949e;cursor:pointer}
 .tog-row input[type=checkbox]{accent-color:#58a6ff;width:13px;height:13px;cursor:pointer}
 
-/* ── Buttons ─────────────────────────────────────────────────────── */
-.btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:.73em;text-decoration:none;display:inline-block;white-space:nowrap}
-.btn:hover{background:#30363d}
-.btn.blue{background:#1f6feb;color:#fff;border-color:#1f6feb}
-.btn.blue:hover{background:#388bfd}
-.btn.green{background:#196127;color:#fff;border-color:#196127}
-.btn.green:hover{background:#238636}
+/* ── Live tab ────────────────────────────────────────────────────────── */
+#live-img{width:100%;max-height:78vh;object-fit:contain;display:block;background:#000;border-radius:4px}
 
-/* ── FEN inject ──────────────────────────────────────────────────── */
-.fen-inject-row{display:flex;gap:6px;padding:8px 10px}
+/* ── Corners tab ─────────────────────────────────────────────────────── */
+.corners-layout{display:grid;grid-template-columns:2fr 1fr;gap:10px;align-items:start}
+.cam-wrap{position:relative;width:100%;overflow:hidden;border-radius:4px}
+#corner-cam-img{width:100%;display:block;cursor:crosshair;user-select:none}
+.handle{position:absolute;width:22px;height:22px;border-radius:50%;transform:translate(-50%,-50%);border:2px solid rgba(255,255,255,0.9);cursor:grab;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;color:#fff;user-select:none;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.8)}
+.handle:active{cursor:grabbing}
+.warp-wrap{border-radius:4px;overflow:hidden;border:1px solid #21262d}
+#corner-coords{font-size:.63em;color:#8b949e;padding:5px 8px;background:#0d1117}
+
+/* ── Diff tab ────────────────────────────────────────────────────────── */
+.diff-layout{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+#diff-img{width:100%;display:block;image-rendering:pixelated;border-radius:4px;border:1px solid #21262d}
+#score-canvas{display:block;border:1px solid #21262d;border-radius:4px;image-rendering:pixelated;width:100%;max-width:360px;aspect-ratio:1}
+.ref-row{display:flex;align-items:flex-start;gap:8px;padding:6px 0;font-size:.72em;flex-wrap:wrap}
+.ref-lbl{color:#8b949e;white-space:nowrap;flex-shrink:0;padding-top:1px}
+#ref-status-text{color:#d29922;font-family:monospace;word-break:break-all;flex:1}
+.flagged-row{padding:5px 0;font-size:.78em}
+.flagged-row .lbl{color:#8b949e}
+#flagged-squares{color:#3fb950;font-family:monospace;font-weight:700;letter-spacing:.05em}
+.median-row{padding:2px 0;font-size:.68em;color:#8b949e}
+#median-floor{color:#79b8ff;font-family:monospace}
+.apply-note{font-size:.63em;color:#8b949e;margin-top:4px;line-height:1.5}
+
+/* ── Game tab ────────────────────────────────────────────────────────── */
+.game-layout{display:grid;grid-template-columns:300px 1fr;gap:14px;align-items:start}
+#board-wrap{padding:4px;display:flex;justify-content:center}
+#fen-text{font-family:monospace;font-size:.6em;color:#3fb950;word-break:break-all;background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:5px;margin-top:6px}
+.fen-inject-row{display:flex;gap:6px;margin-top:6px}
 .fen-inject-row input{flex:1;background:#0d1117;color:#c9d1d9;border:1px solid #21262d;border-radius:4px;padding:4px 7px;font-family:monospace;font-size:.68em}
+.pipeline-steps{font-size:.68em;color:#8b949e;line-height:1.9;margin-top:8px}
+.pipeline-steps b{color:#c9d1d9}
+.pipeline-steps .step-active{color:#3fb950;font-weight:700}
+
+@media (max-width:700px){
+  .corners-layout,.diff-layout,.game-layout{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1><span id="status-dot"></span>♟ Smart Chess Board — Live Dashboard</h1>
-  <div class="header-actions">
-    <button class="btn blue" onclick="forceReprocess()">⟳ Reprocess</button>
-    <button class="btn green" onclick="saveCorners()">📌 Save Corners</button>
-    <button class="btn" onclick="resetCorners()">↺ Reset</button>
-    <a href="/api/snapshot" class="btn">📷 Snapshot</a>
+<!-- ── Header ──────────────────────────────────────────────────────────────── -->
+<div class="hdr">
+  <div class="hdr-left">
+    <span id="status-dot"></span>
+    <span class="title">♟ Chess Board Debug Dashboard</span>
+    <span id="hdr-state" class="state-badge s-offline">OFFLINE</span>
+    <span id="hdr-turn" style="font-size:.72em;color:#8b949e"></span>
+  </div>
+  <div class="hdr-right">
+    <button class="btn clock" id="clock-btn" onclick="clockHit()" title="Simulate player pressing chess clock — triggers move detection">
+      🕐 CLOCK HIT
+    </button>
+    <button class="btn orange" onclick="captureRef()" title="Capture current board as pre-move reference frame">
+      📸 Capture Ref
+    </button>
+    <button class="btn green" onclick="saveCorners()" title="Save corner positions to board_corners.json">
+      📌 Save Corners
+    </button>
+    <a href="/api/snapshot" class="btn" title="Download full-resolution camera image">
+      📷 Snapshot
+    </a>
   </div>
 </div>
 
-<div class="layout">
+<!-- ── Status bar ──────────────────────────────────────────────────────────── -->
+<div class="status-bar">
+  <span>Camera: <span class="hl" id="sb-cam">–</span></span>
+  <span>Frames: <span class="hl" id="sb-frames">0</span></span>
+  <span>Feed age: <span id="sb-age">–</span></span>
+  <span>Last detected: <span class="hl" id="sb-squares">–</span></span>
+  <span>Ref: <span id="sb-ref">–</span></span>
+  <span id="sb-error" class="err"></span>
+</div>
 
-  <!-- ── Camera + draggable corners ─────────────────────────────── -->
-  <div class="card cam-panel">
-    <div class="card-header">
-      Live Camera — drag corners to define board
-      <span id="cam-ts" class="warn" style="font-size:.9em;text-transform:none;letter-spacing:0"></span>
-    </div>
-    <div id="cam-canvas-wrap">
-      <img id="cam-img" src="/api/frame" alt="camera" draggable="false">
-    </div>
-    <div class="corner-info" id="corner-coords">Corners: loading…</div>
+<!-- ── Tabs ────────────────────────────────────────────────────────────────── -->
+<div class="tab-nav">
+  <button class="tab-btn active" data-tab="live"    onclick="showTab('live')">📷 Live Camera</button>
+  <button class="tab-btn"        data-tab="corners" onclick="showTab('corners')">📐 Corner Setup</button>
+  <button class="tab-btn"        data-tab="diff"    onclick="showTab('diff')">🔍 Diff Analysis</button>
+  <button class="tab-btn"        data-tab="game"    onclick="showTab('game')">♟ Game State</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     Tab: Live Camera
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="tab-live" class="tab-pane active">
+  <div class="instr">
+    <b>Raw camera feed</b> — no processing applied. Check camera focus, lighting, and board visibility here.
+    The board should be evenly lit with no harsh shadows. <b>Go to Corner Setup</b> to align the board boundaries.
   </div>
+  <img id="live-img" src="/api/frame" alt="Live camera">
+</div>
 
-  <!-- ── Top-down warped board ───────────────────────────────────── -->
-  <div class="card warp-panel">
-    <div class="card-header">Top-Down Board View</div>
-    <img id="warp-img" src="/api/warp_frame" alt="warp">
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     Tab: Corner Setup
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="tab-corners" class="tab-pane">
+  <div class="instr">
+    <b>Drag the 4 colored handles</b> to the corners of the chess board in the camera image.
+    <b style="color:#5050ff">■ TL</b> = top-left &nbsp;
+    <b style="color:#50ff50">■ TR</b> = top-right &nbsp;
+    <b style="color:#ff5050">■ BR</b> = bottom-right &nbsp;
+    <b style="color:#50ddff">■ BL</b> = bottom-left (as seen from the camera, not from above).
+    The <b>Warped View</b> on the right should show a perfectly square top-down board when aligned correctly.
+    Click <b>Save Corners</b> in the header to persist across restarts.
   </div>
+  <div class="corners-layout">
+    <div>
+      <div class="sec-lbl">Live Camera — drag corner handles</div>
+      <div class="cam-wrap" id="corner-cam-wrap">
+        <img id="corner-cam-img" src="/api/corner_frame" draggable="false" alt="corners">
+      </div>
+      <div id="corner-coords">Corners: loading…</div>
+    </div>
+    <div>
+      <div class="sec-lbl">Warped Top-Down View</div>
+      <div class="warp-wrap">
+        <img id="warp-img" src="/api/warp_frame" alt="warp" style="width:100%;display:block;image-rendering:pixelated">
+        <div id="warp-status" style="font-size:.63em;color:#8b949e;padding:4px 8px;background:#0d1117"></div>
+      </div>
+    </div>
+  </div>
+  <div class="ctrl-section">
+    <div class="ctrl-group">
+      <div class="ctrl-title">Lens Correction</div>
+      <div class="tog-row">
+        <input type="checkbox" id="t_undistort_enable"
+               onchange="onTog('undistort_enable',this.checked)">
+        <label for="t_undistort_enable">Enable lens undistortion</label>
+      </div>
+      <div class="slider-row">
+        <label title="k1: barrel (negative) or pincushion (positive) distortion">k1 barrel/pincushion</label>
+        <input type="range" id="s_undistort_k1" min="-80" max="80" step="1" value="-25"
+               oninput="onSlider('undistort_k1',+this.value);document.getElementById('vb_undistort_k1').textContent=this.value">
+        <span class="vb" id="vb_undistort_k1">-25</span>
+      </div>
+      <div class="slider-row">
+        <label title="k2: higher-order radial distortion correction">k2 higher-order</label>
+        <input type="range" id="s_undistort_k2" min="-50" max="50" step="1" value="8"
+               oninput="onSlider('undistort_k2',+this.value);document.getElementById('vb_undistort_k2').textContent=this.value">
+        <span class="vb" id="vb_undistort_k2">8</span>
+      </div>
+      <div class="slider-row">
+        <label title="Effective focal length as % of frame width">Focal length (% width)</label>
+        <input type="range" id="s_undistort_focal" min="40" max="130" step="1" value="83"
+               oninput="onSlider('undistort_focal',+this.value);document.getElementById('vb_undistort_focal').textContent=this.value">
+        <span class="vb" id="vb_undistort_focal">83</span>
+      </div>
+    </div>
+    <div class="ctrl-group">
+      <div class="ctrl-title">Warp & Display</div>
+      <div class="slider-row">
+        <label title="Resolution of the warped top-down board image in pixels">Warp size (px)</label>
+        <input type="range" id="s_warp_size" min="240" max="800" step="40" value="480"
+               oninput="onSlider('warp_size',+this.value);document.getElementById('vb_warp_size').textContent=this.value">
+        <span class="vb" id="vb_warp_size">480</span>
+      </div>
+      <div class="tog-row">
+        <input type="checkbox" id="t_show_grid" checked
+               onchange="onTog('show_grid',this.checked)">
+        <label for="t_show_grid">Show rank/file grid overlay</label>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:6px">
+        <button class="btn" onclick="resetCorners()">↺ Reset corners</button>
+        <button class="btn blue" onclick="saveCorners()">📌 Save corners</button>
+      </div>
+    </div>
+  </div>
+</div>
 
-  <!-- ── Right column ────────────────────────────────────────────── -->
-  <div class="right-col">
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     Tab: Diff Analysis
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="tab-diff" class="tab-pane">
+  <div class="instr">
+    <b>Left panel:</b> Heatmap from <code>piece_detector_node</code> — shows per-square LAB color difference
+    between the pre-move reference frame and the current frame. Green outlines = squares flagged as changed
+    by the actual detector (using the node's own threshold and compensation settings).
+    <br>
+    <b>Right panel:</b> Interactive score grid using the <b>sliders below</b> — adjust threshold and
+    shift compensation to preview how detection would behave without restarting the node.
+    <b>Global shift compensation</b> subtracts <code>median_score × factor</code> from every square.
+    Camera vibration raises all squares equally, so after subtraction all ≈ 0. A moved piece raises only
+    its square, so it stands out clearly after subtraction.
+    Use <b>Apply to Detector</b> to push your tuned values to the actual node.
+    Use <b>Capture Ref</b> in the header to take a fresh reference frame before testing.
+  </div>
+  <div class="diff-layout">
+    <!-- Left: heatmap from ROS -->
+    <div>
+      <div class="sec-lbl">Piece Detector Heatmap (live from ROS)</div>
+      <img id="diff-img" src="/api/diff_frame" alt="diff heatmap">
+      <div class="ref-row">
+        <span class="ref-lbl">Reference status:</span>
+        <span id="ref-status-text">–</span>
+      </div>
+      <button class="btn orange" onclick="captureRef()" style="margin-top:4px">
+        📸 Capture New Pre-move Reference
+      </button>
+      <div style="font-size:.63em;color:#8b949e;margin-top:5px;line-height:1.6">
+        Click <b>Capture Ref</b> to snapshot the current board as the reference frame.
+        Then move a piece and watch the heatmap — moved squares should light up bright.
+        Press <b>Clock Hit</b> to trigger the game state machine.
+      </div>
+    </div>
+    <!-- Right: interactive score grid -->
+    <div>
+      <div class="sec-lbl">Interactive Score Grid (preview — uses sliders below)</div>
+      <canvas id="score-canvas" width="400" height="400"></canvas>
+      <div class="flagged-row">
+        <span class="lbl">Would flag: </span>
+        <span id="flagged-squares">–</span>
+      </div>
+      <div class="median-row">
+        Compensation floor (median × factor): <span id="median-floor">–</span>
+      </div>
 
-    <!-- Game State -->
-    <div class="card">
-      <div class="card-header">Game State</div>
-      <div class="card-body">
+      <div class="ctrl-group" style="margin-top:10px">
+        <div class="ctrl-title">Detection Thresholds
+          <small style="font-weight:400;text-transform:none;letter-spacing:0">— preview only</small>
+        </div>
+        <div class="slider-row">
+          <label title="Adjusted score above this = square is flagged as changed. Default: 18">
+            Diff threshold
+          </label>
+          <input type="range" id="s_display_threshold" min="5" max="80" step="0.5" value="18"
+                 oninput="onSlider('display_threshold',+this.value);document.getElementById('vb_display_threshold').textContent=(+this.value).toFixed(1)">
+          <span class="vb" id="vb_display_threshold">18.0</span>
+        </div>
+        <div class="slider-row">
+          <label title="0 = no compensation. 1 = subtract full median. >1 = aggressive. Default: 1.0">
+            Shift compensation
+          </label>
+          <input type="range" id="s_shift_compensation" min="0" max="2.5" step="0.05" value="1.0"
+                 oninput="onSlider('shift_compensation',+this.value);document.getElementById('vb_shift_compensation').textContent=(+this.value).toFixed(2)">
+          <span class="vb" id="vb_shift_compensation">1.00</span>
+        </div>
+        <button class="btn blue" onclick="applyToDetector()" style="margin-top:8px">
+          ⚙ Apply to Actual Detector
+        </button>
+        <div class="apply-note">
+          Pushes <code>diff_threshold</code> and <code>global_shift_compensation</code>
+          to <code>piece_detector_node</code> via ROS set_parameters service.
+          The heatmap (left) will reflect the new values after the next detection cycle.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     Tab: Game State
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="tab-game" class="tab-pane">
+  <div class="game-layout">
+    <!-- Left: board diagram -->
+    <div>
+      <div class="sec-lbl">Board State</div>
+      <div id="board-wrap"><div id="board"></div></div>
+      <div id="fen-text">–</div>
+      <div style="margin-top:10px">
+        <div class="sec-lbl">Inject FEN (offline test)</div>
+        <div class="fen-inject-row">
+          <input id="inj-in" type="text"
+                 value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1">
+          <button class="btn blue" onclick="injectFen()">Send</button>
+        </div>
+      </div>
+    </div>
+    <!-- Right: game info + pipeline guide -->
+    <div>
+      <div class="sec-lbl">Game Info</div>
+      <div class="stat-table">
         <div class="stat-row">
           <span class="stat-lbl">State</span>
-          <span class="stat-val"><span id="gs-state" class="state-badge s-offline">OFFLINE</span></span>
+          <span class="stat-val"><span id="gi-state" class="state-badge s-offline">OFFLINE</span></span>
         </div>
         <div class="stat-row">
           <span class="stat-lbl">Turn</span>
-          <span class="stat-val" id="gs-turn">–</span>
+          <span class="stat-val" id="gi-turn">–</span>
         </div>
         <div class="stat-row">
-          <span class="stat-lbl">Full Move</span>
-          <span class="stat-val" id="gs-fullmove">–</span>
+          <span class="stat-lbl">Move #</span>
+          <span class="stat-val" id="gi-fullmove">–</span>
         </div>
         <div class="stat-row">
-          <span class="stat-lbl">Last Move Squares</span>
-          <span class="stat-val" id="gs-lastmove" style="font-family:monospace;color:#58a6ff">–</span>
+          <span class="stat-lbl">Last detected squares</span>
+          <span class="stat-val" id="gi-lastmove" style="color:#58a6ff;font-family:monospace">–</span>
         </div>
         <div class="stat-row">
-          <span class="stat-lbl">FEN Source</span>
-          <span class="stat-val"><span id="gs-source" class="src-badge src-local">Local</span></span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Connection Status -->
-    <div class="card">
-      <div class="card-header">Connection</div>
-      <div class="card-body">
-        <div class="stat-row">
-          <span class="stat-lbl">Feed</span>
-          <span class="stat-val" id="conn-stat">–</span>
+          <span class="stat-lbl">FEN source</span>
+          <span class="stat-val"><span id="gi-source" class="src-badge src-local">Local</span></span>
         </div>
         <div class="stat-row">
           <span class="stat-lbl">Camera</span>
-          <span class="stat-val" id="cam-info">–</span>
-        </div>
-        <div class="stat-row">
-          <span class="stat-lbl">Frames</span>
-          <span class="stat-val" id="fc">0</span>
-        </div>
-        <div class="stat-row">
-          <span class="stat-lbl">FEN age</span>
-          <span class="stat-val"><span id="fen-age">–</span>s</span>
+          <span class="stat-val" id="gi-cam">–</span>
         </div>
         <div class="stat-row">
           <span class="stat-lbl">Error</span>
-          <span class="stat-val err" id="err-msg" style="font-size:.63em">–</span>
+          <span class="stat-val err" id="gi-err" style="font-size:.63em">–</span>
         </div>
       </div>
-    </div>
 
-    <!-- Chess Board -->
-    <div class="card">
-      <div class="card-header">Board State</div>
-      <div id="board-wrap"><div id="board"></div></div>
-      <div id="fen-text">–</div>
-    </div>
+      <div style="margin-top:14px">
+        <div class="sec-lbl">Detection Pipeline — How It Works</div>
+        <div class="pipeline-steps" id="pipeline-steps">
+          <div id="ps1">1. game_manager enters <b>WAITING_PLAYER_MOVE</b></div>
+          <div id="ps2">2. <b>Pre-move reference</b> captured by piece_detector_node</div>
+          <div id="ps3">3. Human moves a piece on the board</div>
+          <div id="ps4">4. Human presses <b>clock</b> (or use CLOCK HIT button)</div>
+          <div id="ps5">5. game_manager → <b>CAPTURING_BOARD</b></div>
+          <div id="ps6">6. piece_detector compares current frame to reference</div>
+          <div id="ps7">7. Changed squares matched to a legal chess move</div>
+          <div id="ps8">8. Computer responds, new reference captured → repeat</div>
+        </div>
+      </div>
 
-    <!-- Inject FEN -->
-    <div class="card">
-      <div class="card-header">Inject FEN (offline test)</div>
-      <div class="fen-inject-row">
-        <input id="inj-in" type="text"
-          value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1">
-        <button class="btn blue" onclick="injectFen()">Send</button>
+      <div style="margin-top:12px">
+        <button class="btn clock" onclick="clockHit()">🕐 CLOCK HIT</button>
+        <span style="font-size:.65em;color:#8b949e;margin-left:8px">
+          Triggers the same action as the physical clock button
+        </span>
       </div>
     </div>
-
-  </div><!-- /right-col -->
-
-  <!-- ── Detection Parameters ────────────────────────────────────── -->
-  <div class="ctrl-panel">
-    <div class="ctrl-panel-header">Detection Parameters</div>
-    <div class="ctrl-grid" id="ctrl-grid"></div>
   </div>
-
-</div><!-- /layout -->
+</div>
 
 <script>
 // ── Chess board ──────────────────────────────────────────────────────────────
@@ -694,44 +1084,56 @@ var chessboard = Chessboard('board', {
   pieceTheme: 'https://lichess1.org/assets/piece/cburnett/{piece}.svg'
 });
 
-// ── Corner management ────────────────────────────────────────────────────────
+// ── Tab management ───────────────────────────────────────────────────────────
+var currentTab = 'live';
+function showTab(id) {
+  document.querySelectorAll('.tab-pane').forEach(function(el){ el.classList.remove('active'); });
+  document.querySelectorAll('.tab-btn').forEach(function(el){ el.classList.remove('active'); });
+  document.getElementById('tab-' + id).classList.add('active');
+  document.querySelector('[data-tab="' + id + '"]').classList.add('active');
+  currentTab = id;
+  if (id === 'corners') { positionHandles(); }
+}
+
+// ── Corner drag handles ──────────────────────────────────────────────────────
 var corners = [{fx:0.10,fy:0.10},{fx:0.90,fy:0.10},{fx:0.90,fy:0.90},{fx:0.10,fy:0.90}];
-var CORNER_LABELS  = ['TL','TR','BR','BL'];
-var CORNER_COLORS  = ['#ff5050','#50ff50','#5050ff','#ffff50'];
+var CORNER_LABELS = ['TL','TR','BR','BL'];
+// BGR → CSS color: TL=#5050ff TR=#50ff50 BR=#ff5050 BL=#50ddff
+var CORNER_COLORS = ['#5050ff','#50ff50','#ff5050','#50ddff'];
 var handles = [];
 var dragging = null;
 
 function positionHandles() {
-  var img = document.getElementById('cam-img');
+  var img = document.getElementById('corner-cam-img');
+  if (!img || !img.clientWidth) return;
   var W = img.clientWidth, H = img.clientHeight;
   corners.forEach(function(c, i) {
+    if (!handles[i]) return;
     handles[i].style.left = (c.fx * W) + 'px';
     handles[i].style.top  = (c.fy * H) + 'px';
   });
 }
 
 function buildHandles() {
-  var wrap = document.getElementById('cam-canvas-wrap');
-  handles.forEach(function(h){ if(h.parentNode) h.parentNode.removeChild(h); });
+  var wrap = document.getElementById('corner-cam-wrap');
+  if (!wrap) return;
+  handles.forEach(function(h){ if(h && h.parentNode) h.parentNode.removeChild(h); });
   handles = [];
   corners.forEach(function(c, i) {
     var el = document.createElement('div');
     el.className = 'handle';
     el.style.background = CORNER_COLORS[i];
     el.textContent = CORNER_LABELS[i];
-    el.style.boxShadow = '0 0 6px rgba(0,0,0,0.8)';
     wrap.appendChild(el);
     handles.push(el);
-    el.addEventListener('mousedown', function(e) {
+    el.addEventListener('mousedown', function(e){
       e.preventDefault();
-      dragging = {index:i, startMouseX:e.clientX, startMouseY:e.clientY,
-                  startFx:corners[i].fx, startFy:corners[i].fy};
+      dragging = {index:i, startMX:e.clientX, startMY:e.clientY, startFx:c.fx, startFy:c.fy};
     });
-    el.addEventListener('touchstart', function(e) {
+    el.addEventListener('touchstart', function(e){
       e.preventDefault();
       var t = e.touches[0];
-      dragging = {index:i, startMouseX:t.clientX, startMouseY:t.clientY,
-                  startFx:corners[i].fx, startFy:corners[i].fy};
+      dragging = {index:i, startMX:t.clientX, startMY:t.clientY, startFx:c.fx, startFy:c.fy};
     }, {passive:false});
   });
   positionHandles();
@@ -739,18 +1141,18 @@ function buildHandles() {
 
 function moveDragging(clientX, clientY) {
   if (!dragging) return;
-  var img = document.getElementById('cam-img');
+  var img = document.getElementById('corner-cam-img');
+  if (!img) return;
   var W = img.clientWidth, H = img.clientHeight;
-  corners[dragging.index].fx = Math.min(1, Math.max(0,
-      dragging.startFx + (clientX - dragging.startMouseX) / W));
-  corners[dragging.index].fy = Math.min(1, Math.max(0,
-      dragging.startFy + (clientY - dragging.startMouseY) / H));
+  var i = dragging.index;
+  corners[i].fx = Math.min(1, Math.max(0, dragging.startFx + (clientX - dragging.startMX) / W));
+  corners[i].fy = Math.min(1, Math.max(0, dragging.startFy + (clientY - dragging.startMY) / H));
   positionHandles();
   updateCornerInfo();
 }
 
 document.addEventListener('mousemove', function(e){ moveDragging(e.clientX, e.clientY); });
-document.addEventListener('mouseup',   function()  { if(dragging){ dragging=null; sendCorners(); } });
+document.addEventListener('mouseup',   function(){ if(dragging){ dragging=null; sendCorners(); } });
 document.addEventListener('touchmove', function(e){
   if(!dragging) return; e.preventDefault();
   moveDragging(e.touches[0].clientX, e.touches[0].clientY);
@@ -761,9 +1163,9 @@ function updateCornerInfo() {
   var txt = corners.map(function(c,i){
     return CORNER_LABELS[i]+'('+c.fx.toFixed(3)+','+c.fy.toFixed(3)+')';
   }).join('  ');
-  document.getElementById('corner-coords').textContent = 'Corners (normalized): '+txt;
+  var el = document.getElementById('corner-coords');
+  if (el) el.textContent = 'Corners (normalized 0–1): '+txt;
 }
-
 function sendCorners() {
   var payload = corners.map(function(c){ return [c.fx, c.fy]; });
   fetch('/api/corners',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -782,160 +1184,287 @@ function loadCornersFromServer() {
     }
   });
 }
-
-document.getElementById('cam-img').addEventListener('load', function(){ buildHandles(); positionHandles(); });
+document.getElementById('corner-cam-img').addEventListener('load', function(){
+  buildHandles(); positionHandles();
+});
 window.addEventListener('resize', positionHandles);
 
-// ── Parameter controls ───────────────────────────────────────────────────────
-var curParams = {};
-var GROUPS = [
-  {t:'Lens Correction', p:[
-    {k:'undistort_k1',    l:'k1 (×100)',       mn:-80, mx:80,  st:1},
-    {k:'undistort_k2',    l:'k2 (×100)',       mn:-50, mx:50,  st:1},
-    {k:'undistort_focal', l:'Focal % width',   mn:40,  mx:130, st:1}
-  ], togs:[{k:'undistort_enable', l:'Enable lens undistortion'}]},
-  {t:'Transform', p:[
-    {k:'warp_size', l:'Warp output size (px)', mn:240, mx:800, st:40}
-  ]},
-  {t:'Overlay Options', togs:[
-    {k:'show_grid', l:'Show grid overlay'}
-  ]}
-];
+// ── Score canvas ─────────────────────────────────────────────────────────────
+var latestScores = {};
+function drawScoreGrid(scores, threshold, compensation) {
+  var canvas = document.getElementById('score-canvas');
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  var sz = canvas.width;
+  var sq = sz / 8;
 
-function buildControls(p) {
-  var grid = document.getElementById('ctrl-grid');
-  grid.innerHTML = '';
-  GROUPS.forEach(function(g) {
-    var box = document.createElement('div');
-    box.className = 'ctrl-group';
-    var html = '<div class="ctrl-group-title">'+g.t+'</div>';
-    (g.p||[]).forEach(function(pr) {
-      var raw = p[pr.k] !== undefined ? p[pr.k] : 0;
-      var display = pr.scale ? Math.round(raw * pr.scale) : raw;
-      html += '<div class="slider-row">'+
-              '<label title="'+pr.k+'">'+pr.l+'</label>'+
-              '<input type="range" id="s_'+pr.k+'" min="'+pr.mn+'" max="'+pr.mx+
-              '" step="'+pr.st+'" value="'+display+'"'+
-              ' oninput="document.getElementById(\'vb_'+pr.k+'\').textContent=this.value"'+
-              ' onchange="onSlider(\''+pr.k+'\',+this.value,'+(pr.scale||1)+')">'+
-              '<span class="vb" id="vb_'+pr.k+'">'+display+'</span></div>';
+  // Compute compensation floor
+  var vals = Object.values(scores);
+  var floor = 0;
+  if (compensation > 0 && vals.length > 0) {
+    var sorted = vals.slice().sort(function(a,b){return a-b;});
+    var mid = Math.floor(sorted.length / 2);
+    var median = sorted.length % 2 === 0
+      ? (sorted[mid-1] + sorted[mid]) / 2
+      : sorted[mid];
+    floor = median * compensation;
+  }
+  document.getElementById('median-floor').textContent =
+    floor > 0 ? floor.toFixed(1) : '0 (disabled)';
+
+  var flagged = [];
+  ctx.clearRect(0, 0, sz, sz);
+
+  for (var row = 0; row < 8; row++) {
+    for (var col = 0; col < 8; col++) {
+      var sqName = 'abcdefgh'[col] + (8 - row);
+      var raw = scores[sqName] || 0;
+      var adj = Math.max(0, raw - floor);
+      var isFlagged = adj > threshold;
+      if (isFlagged) flagged.push(sqName);
+
+      // Checkerboard base tint
+      var isDark = (row + col) % 2 === 1;
+      var baseBg = isDark ? 25 : 35;
+
+      // Score heat color: low=dark green, mid=yellow, high=red
+      var t = Math.min(1.0, adj / Math.max(1, threshold * 1.5));
+      var r, g, b;
+      if (t < 0.5) {
+        r = Math.round(t * 2 * 200);
+        g = Math.round(120 + t * 2 * (200 - 120));
+        b = baseBg;
+      } else {
+        r = 200;
+        g = Math.round(200 * (1 - (t - 0.5) * 2));
+        b = baseBg;
+      }
+      ctx.fillStyle = 'rgb('+r+','+g+','+b+')';
+      ctx.fillRect(col * sq, row * sq, sq, sq);
+
+      // Flagged: bright green outline
+      if (isFlagged) {
+        ctx.strokeStyle = '#00ff80';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(col * sq + 1.5, row * sq + 1.5, sq - 3, sq - 3);
+      }
+
+      // Adjusted score (center)
+      ctx.fillStyle = isFlagged ? '#00ff80' : (adj > threshold * 0.5 ? '#fff' : '#aaa');
+      ctx.font = 'bold ' + Math.round(sq * 0.28) + 'px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(adj.toFixed(0), col * sq + sq / 2, row * sq + sq / 2 + 2);
+
+      // Raw score (top-left, small)
+      ctx.fillStyle = '#666';
+      ctx.font = Math.round(sq * 0.18) + 'px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(raw.toFixed(0), col * sq + 2, row * sq + Math.round(sq * 0.22));
+
+      // Square name (bottom-right, small)
+      ctx.fillStyle = '#555';
+      ctx.font = Math.round(sq * 0.18) + 'px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(sqName, (col + 1) * sq - 2, (row + 1) * sq - 2);
+    }
+  }
+
+  // Threshold legend line at bottom
+  ctx.fillStyle = '#21262d';
+  ctx.fillRect(0, sz - 14, sz, 14);
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('large = adj score | small = raw | ■green = flagged (adj > '+threshold.toFixed(1)+')', 4, sz - 3);
+
+  var el = document.getElementById('flagged-squares');
+  el.textContent = flagged.length > 0 ? flagged.join(' ') : '(none)';
+}
+
+function pollScores() {
+  if (currentTab !== 'diff') return;
+  fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
+    latestScores = d.scores || {};
+    var thresh = d.display_threshold || 18;
+    var comp   = d.shift_compensation || 1.0;
+    drawScoreGrid(latestScores, thresh, comp);
+  }).catch(function(){});
+}
+
+// ── Params ───────────────────────────────────────────────────────────────────
+function onSlider(k, v) {
+  fetch('/api/params',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({[k]:v})});
+  // Immediately redraw score grid if it's a diff param
+  if (k === 'display_threshold' || k === 'shift_compensation') {
+    fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
+      latestScores = d.scores || {};
+      drawScoreGrid(latestScores, d.display_threshold || 18, d.shift_compensation || 1.0);
     });
-    (g.togs||[]).forEach(function(t) {
-      html += '<div class="tog-row">'+
-              '<input type="checkbox" id="t_'+t.k+'" '+(p[t.k]?'checked':'')+
-              ' onchange="onTog(\''+t.k+'\',this.checked)">'+
-              '<label for="t_'+t.k+'">'+t.l+'</label></div>';
-    });
-    box.innerHTML = html;
-    grid.appendChild(box);
+  }
+}
+function onTog(k, checked) {
+  fetch('/api/params',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({[k]: checked ? 1 : 0})});
+}
+
+function applyToDetector() {
+  var thresh = parseFloat(document.getElementById('s_display_threshold').value);
+  var comp   = parseFloat(document.getElementById('s_shift_compensation').value);
+  fetch('/api/detector_params',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({diff_threshold: thresh, shift_compensation: comp})
+  }).then(function(r){return r.json();}).then(function(d){
+    alert(d.ok ? '✓ ' + d.msg : '✗ ' + d.msg);
   });
 }
 
-function onSlider(k, v, scale) { var real = scale>1 ? v/scale : v; curParams[k]=real; sendParam({[k]:real}); }
-function onTog(k, c) { curParams[k]=c?1:0; sendParam({[k]:c?1:0}); }
-function sendParam(d) {
-  fetch('/api/params',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+// ── Header actions ───────────────────────────────────────────────────────────
+function clockHit() {
+  fetch('/api/clock_hit',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    if (!d.ok) { alert('Clock hit failed: '+d.msg); return; }
+    var btn = document.getElementById('clock-btn');
+    btn.classList.add('flash');
+    setTimeout(function(){ btn.classList.remove('flash'); }, 450);
+  });
 }
-function forceReprocess() { sendParam({}); }
+function captureRef() {
+  fetch('/api/capture_premove',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    if (!d.ok) alert('Capture failed: '+d.msg);
+  });
+}
 function injectFen() {
   var f = document.getElementById('inj-in').value.trim();
-  fetch('/api/fen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fen:f})});
+  fetch('/api/fen',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({fen:f})});
 }
 
-// ── Image refresh ────────────────────────────────────────────────────────────
+// ── Image refresh ─────────────────────────────────────────────────────────────
 function refreshImages() {
   var t = Date.now();
-  document.getElementById('cam-img').src  = '/api/frame?t='+t;
-  document.getElementById('warp-img').src = '/api/warp_frame?t='+t;
-  document.getElementById('cam-ts').textContent = new Date().toLocaleTimeString();
+  if (currentTab === 'live') {
+    document.getElementById('live-img').src = '/api/frame?t=' + t;
+  } else if (currentTab === 'corners') {
+    document.getElementById('corner-cam-img').src = '/api/corner_frame?t=' + t;
+    document.getElementById('warp-img').src        = '/api/warp_frame?t=' + t;
+  } else if (currentTab === 'diff') {
+    document.getElementById('diff-img').src = '/api/diff_frame?t=' + t;
+    pollScores();
+  }
 }
 
-// ── FEN poll ─────────────────────────────────────────────────────────────────
-function pollFen() {
-  fetch('/api/fen').then(function(r){return r.json();}).then(function(d){
-    var fen = d.fen || '';
-    try {
-      if (fen) chessboard.position(fen.split(' ')[0], false);
-      var parts = fen.split(' ');
-      if (parts.length >= 6) {
-        document.getElementById('gs-fullmove').textContent = 'Move '+parts[5];
-      }
-    } catch(e) {}
-    document.getElementById('fen-text').textContent = fen;
-    document.getElementById('fc').textContent = d.frame_count;
-
-    var age = d.last_updated > 0 ? (Date.now()/1000 - d.last_updated) : 9999;
-    var ae = document.getElementById('fen-age');
-    ae.textContent = age < 9999 ? age.toFixed(1) : 'never';
-    ae.className = 'stat-val '+(age<4?'ok':age<15?'warn':'err');
-
-    var dot = document.getElementById('status-dot');
-    var cs  = document.getElementById('conn-stat');
-    if (age < 4)  { dot.className='live'; cs.textContent='Live ✓'; cs.className='stat-val ok'; }
-    else if (age < 30){ dot.className=''; cs.textContent='Stale'; cs.className='stat-val warn'; }
-    else { dot.className='dead'; cs.textContent='No data'; cs.className='stat-val err'; }
-
-    document.getElementById('err-msg').textContent = d.error || '–';
-    if (d.cam_info) document.getElementById('cam-info').textContent = d.cam_info;
-  }).catch(function(){ document.getElementById('status-dot').className='dead'; });
-}
-
-// ── Game state poll ───────────────────────────────────────────────────────────
+// ── Status poll ───────────────────────────────────────────────────────────────
 var STATE_LABEL = {
   'OFFLINE':'Offline','STARTUP':'Startup','HOMING':'Homing',
-  'IDLE':'Idle — Ready','WAITING_PLAYER_MOVE':'Waiting Player',
-  'CAPTURING_BOARD':'Capturing','VALIDATING_MOVE':'Validating',
-  'CALCULATING_RESPONSE':'Thinking','EXECUTING_MOVE':'Executing',
-  'HITTING_CLOCK':'Hitting Clock','PROMOTION_WAIT':'Promotion Wait',
-  'GAME_OVER':'Game Over'
+  'IDLE':'Idle — Ready','WAITING_PLAYER_MOVE':'Waiting for Player',
+  'CAPTURING_BOARD':'Capturing Board','VALIDATING_MOVE':'Validating Move',
+  'CALCULATING_RESPONSE':'Engine Thinking','EXECUTING_MOVE':'Executing Move',
+  'HITTING_CLOCK':'Hitting Clock','PROMOTION_WAIT':'Promotion Wait','GAME_OVER':'Game Over'
 };
 
-function pollGameState() {
-  fetch('/api/game_state').then(function(r){return r.json();}).then(function(d){
-    // State badge
-    var s = (d.state || 'OFFLINE').toUpperCase();
-    var stEl = document.getElementById('gs-state');
-    stEl.textContent = STATE_LABEL[s] || s.replace(/_/g,' ');
-    stEl.className   = 'state-badge s-'+s.toLowerCase();
+function pollStatus() {
+  fetch('/api/status').then(function(r){return r.json();}).then(function(d){
+    var s = (d.game_state || 'OFFLINE').toUpperCase();
+    var lbl = STATE_LABEL[s] || s.replace(/_/g,' ');
 
-    // Turn
-    var turnEl = document.getElementById('gs-turn');
-    var t = (d.turn || '').toUpperCase();
-    if      (t === 'WHITE'){ turnEl.textContent='⬜ White'; turnEl.className='stat-val turn-white'; }
-    else if (t === 'BLACK'){ turnEl.textContent='⬛ Black'; turnEl.className='stat-val turn-black'; }
-    else { turnEl.textContent='–'; turnEl.className='stat-val'; }
+    // Header badges
+    var hdrState = document.getElementById('hdr-state');
+    hdrState.textContent = lbl;
+    hdrState.className   = 'state-badge s-' + s.toLowerCase();
+    var t = (d.game_turn || '').toUpperCase();
+    document.getElementById('hdr-turn').textContent =
+      t === 'WHITE' ? '⬜ White to move' : t === 'BLACK' ? '⬛ Black to move' : '';
 
-    // Last detected changed squares
-    var lmEl = document.getElementById('gs-lastmove');
-    if (d.last_move) {
-      lmEl.textContent = d.last_move.split(',').join(' → ');
-    } else {
-      lmEl.textContent = '–';
+    // Status bar
+    document.getElementById('sb-cam').textContent    = d.cam_info || '–';
+    document.getElementById('sb-frames').textContent  = d.frame_count || 0;
+    document.getElementById('sb-ref').textContent     = (d.ref_status || '–').substring(0, 60);
+    var sq = d.last_move;
+    document.getElementById('sb-squares').textContent = sq ? sq.split(',').join(' → ') : '–';
+    var err = d.error || '';
+    document.getElementById('sb-error').textContent   = err ? ('⚠ ' + err) : '';
+
+    var age = d.last_updated > 0 ? (Date.now()/1000 - d.last_updated) : 9999;
+    var ageEl = document.getElementById('sb-age');
+    ageEl.textContent = age < 9999 ? age.toFixed(1) + 's' : 'never';
+    ageEl.className   = age < 5 ? 'ok' : age < 20 ? 'warn' : 'err';
+
+    var dot = document.getElementById('status-dot');
+    dot.className = age < 5 ? 'live' : age < 30 ? '' : 'dead';
+
+    // Game tab stats
+    document.getElementById('gi-state').textContent = lbl;
+    document.getElementById('gi-state').className   = 'state-badge s-' + s.toLowerCase();
+    if (t==='WHITE'){ document.getElementById('gi-turn').textContent='⬜ White'; document.getElementById('gi-turn').className='stat-val turn-white'; }
+    else if(t==='BLACK'){document.getElementById('gi-turn').textContent='⬛ Black';document.getElementById('gi-turn').className='stat-val turn-black';}
+    else { document.getElementById('gi-turn').textContent='–'; document.getElementById('gi-turn').className='stat-val'; }
+
+    document.getElementById('gi-lastmove').textContent = sq ? sq.split(',').join(' → ') : '–';
+    document.getElementById('gi-cam').textContent      = d.cam_info || '–';
+    document.getElementById('gi-err').textContent      = err || '–';
+
+    var srcEl = document.getElementById('gi-source');
+    if(d.fen_source==='game_mgr'){srcEl.textContent='Game Manager ✓';srcEl.className='src-badge src-game';}
+    else{srcEl.textContent='Local (offline)';srcEl.className='src-badge src-local';}
+
+    // Ref status on diff tab
+    var rsEl = document.getElementById('ref-status-text');
+    if (rsEl) {
+      rsEl.textContent = d.ref_status || '–';
+      rsEl.style.color = (d.ref_status||'').includes('captured') ? '#3fb950' :
+                         (d.ref_status||'').includes('⚠') ? '#f85149' : '#d29922';
     }
 
-    // FEN source
-    var srcEl = document.getElementById('gs-source');
-    if (d.source === 'game_mgr') { srcEl.textContent='Game Manager ✓'; srcEl.className='src-badge src-game'; }
-    else                         { srcEl.textContent='Local (offline)'; srcEl.className='src-badge src-local'; }
+    // FEN + board
+    var fen = d.fen || '';
+    if (fen) {
+      try { chessboard.position(fen.split(' ')[0], false); } catch(e) {}
+      document.getElementById('fen-text').textContent = fen;
+      var parts = fen.split(' ');
+      if (parts.length >= 6)
+        document.getElementById('gi-fullmove').textContent = 'Move ' + parts[5];
+    }
+
+    // Pipeline step highlight
+    var stateStepMap = {
+      'WAITING_PLAYER_MOVE':'ps1,ps2','CAPTURING_BOARD':'ps5','VALIDATING_MOVE':'ps6,ps7',
+      'CALCULATING_RESPONSE':'ps7','EXECUTING_MOVE':'ps8','HITTING_CLOCK':'ps8'
+    };
+    document.querySelectorAll('.pipeline-steps div').forEach(function(el){ el.className=''; });
+    var active = stateStepMap[s] || '';
+    if (active) active.split(',').forEach(function(id){
+      var el = document.getElementById(id);
+      if (el) el.className = 'step-active';
+    });
+
   }).catch(function(){
-    var el = document.getElementById('gs-state');
-    el.textContent = 'Offline'; el.className = 'state-badge s-offline';
+    document.getElementById('status-dot').className = 'dead';
   });
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+// ── Initial params load ───────────────────────────────────────────────────────
 fetch('/api/params').then(function(r){return r.json();}).then(function(p){
-  curParams = p; buildControls(p);
+  if (p.undistort_enable) document.getElementById('t_undistort_enable').checked = true;
+  if (p.show_grid !== undefined) document.getElementById('t_show_grid').checked = !!p.show_grid;
+  ['undistort_k1','undistort_k2','undistort_focal','warp_size'].forEach(function(k){
+    var el = document.getElementById('s_'+k);
+    var vb = document.getElementById('vb_'+k);
+    if (el && p[k] !== undefined) { el.value = p[k]; if(vb) vb.textContent = p[k]; }
+  });
+  ['display_threshold','shift_compensation'].forEach(function(k){
+    var el = document.getElementById('s_'+k);
+    var vb = document.getElementById('vb_'+k);
+    if (el && p[k] !== undefined) { el.value = p[k]; if(vb) vb.textContent = parseFloat(p[k]).toFixed(k==='shift_compensation'?2:1); }
+  });
 });
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
 buildHandles();
 loadCornersFromServer();
 updateCornerInfo();
-setInterval(refreshImages,  1500);
-setInterval(pollFen,        1000);
-setInterval(pollGameState,  1000);
+setInterval(refreshImages, 800);
+setInterval(pollStatus,    1000);
 refreshImages();
-pollFen();
-pollGameState();
+pollStatus();
 </script>
 </body>
 </html>'''
@@ -943,12 +1472,13 @@ pollGameState();
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Chess Board Debug Dashboard")
     parser.add_argument("--port",   type=int, default=5000)
     parser.add_argument("--host",   default="0.0.0.0")
-    parser.add_argument("--no-ros", action="store_true")
+    parser.add_argument("--no-ros", action="store_true",
+                        help="Skip ROS init — use with --image for offline testing")
     parser.add_argument("--fen",    default=None, help="Initial FEN to display")
-    parser.add_argument("--image",  default=None, help="Static image for offline test")
+    parser.add_argument("--image",  default=None, help="Static image for offline testing")
     args = parser.parse_args()
 
     _load_corners()
@@ -958,7 +1488,6 @@ def main():
             _state["game_fen"]     = args.fen
             _state["fen_source"]   = "local"
             _state["last_updated"] = time.time()
-            _state["frame_count"]  = 1
 
     if args.image:
         frame = cv2.imread(args.image)
@@ -971,20 +1500,26 @@ def main():
 
     threading.Thread(target=_processing_loop, daemon=True).start()
 
+    global _ros_node
     if not args.no_ros:
         if not ROS_AVAILABLE:
-            print("ERROR: rclpy not found. Use --no-ros"); sys.exit(1)
+            print("ERROR: rclpy not found — run with --no-ros for offline mode")
+            sys.exit(1)
         rclpy.init()
-        ros_node = FenNode()
-        threading.Thread(target=_ros_thread_fn, args=(ros_node,), daemon=True).start()
-        print("✓ ROS subscriber started")
-        print("  Subscribing to: /perception/changed_squares, /camera/image_raw")
-        print("  Subscribing to: /game_manager/board_fen, /game_manager/state, /game_manager/turn")
+        _ros_node = FenNode()
+        threading.Thread(target=_ros_thread_fn, args=(_ros_node,), daemon=True).start()
+        print("✓ ROS node started")
+        print("  Subscribing: /camera/image_raw, /perception/piece_debug")
+        print("  Subscribing: /perception/changed_squares, /perception/square_scores")
+        print("  Subscribing: /perception/reference_status")
+        print("  Subscribing: /game_manager/{board_fen,state,turn}")
+        print("  Publishing:  /limit_switch/clock_hit")
+        print("  Service:     /perception/capture_premove")
     else:
-        print("⚠  No-ROS mode — use --image <path> or drag corners in browser")
+        print("⚠  No-ROS mode — CLOCK HIT and Capture Ref buttons will be disabled")
 
-    print(f"\nOpen browser: http://localhost:{args.port}")
-    print(f"Network URL:  http://<pi-ip>:{args.port}\n")
+    print(f"\n  Open in browser: http://localhost:{args.port}")
+    print(f"  Network URL:     http://<pi-ip>:{args.port}\n")
     app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
 
 

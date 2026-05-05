@@ -36,6 +36,7 @@ Parameters:
   detection_hz       (float) — processing rate in Hz (default 2.0)
 """
 
+import json
 import threading
 from typing import Optional
 
@@ -56,15 +57,17 @@ class PieceDetectorNode(Node):
     def __init__(self):
         super().__init__('piece_detector_node')
 
-        self.declare_parameter('diff_threshold',    18.0)
-        self.declare_parameter('premove_avg_count', 1)
-        self.declare_parameter('warp_size',         400)
-        self.declare_parameter('detection_hz',      2.0)
+        self.declare_parameter('diff_threshold',          18.0)
+        self.declare_parameter('premove_avg_count',       1)
+        self.declare_parameter('warp_size',               400)
+        self.declare_parameter('detection_hz',            2.0)
+        self.declare_parameter('global_shift_compensation', 1.0)
 
-        self._diff_threshold = float(self.get_parameter('diff_threshold').value)
-        self._premove_count  = int(self.get_parameter('premove_avg_count').value)
-        self._warp_size      = int(self.get_parameter('warp_size').value)
-        det_hz               = float(self.get_parameter('detection_hz').value)
+        self._diff_threshold     = float(self.get_parameter('diff_threshold').value)
+        self._premove_count      = int(self.get_parameter('premove_avg_count').value)
+        self._warp_size          = int(self.get_parameter('warp_size').value)
+        det_hz                   = float(self.get_parameter('detection_hz').value)
+        self._shift_compensation = float(self.get_parameter('global_shift_compensation').value)
 
         self._latest_msg:     Optional[object]      = None
         self._latest_image:   Optional[np.ndarray]  = None
@@ -86,6 +89,8 @@ class PieceDetectorNode(Node):
             Image, '/perception/piece_debug', 10)
         self._status_pub = self.create_publisher(
             String, '/perception/reference_status', 10)
+        self._scores_pub = self.create_publisher(
+            String, '/perception/square_scores', 10)
 
         self.create_service(
             Trigger, '/perception/capture_premove',
@@ -95,7 +100,9 @@ class PieceDetectorNode(Node):
 
         self.get_logger().info(
             f'Piece Detector ready — frame-diff mode '
-            f'(diff_threshold={self._diff_threshold}, detection_hz={det_hz:.1f})'
+            f'(diff_threshold={self._diff_threshold}, '
+            f'shift_compensation={self._shift_compensation}, '
+            f'detection_hz={det_hz:.1f})'
         )
 
     # ── Subscriptions ──────────────────────────────────────────────────────────
@@ -137,12 +144,29 @@ class PieceDetectorNode(Node):
             return
 
         square_scores = self._compute_square_scores(warped, premove)
-        changed = [sq for sq, score in square_scores if score > self._diff_threshold]
+
+        # Publish raw per-square scores for the debug visualizer
+        raw_map = {chess.square_name(sq): round(score, 1) for sq, score in square_scores}
+        self._scores_pub.publish(String(data=json.dumps(raw_map)))
+
+        # Global shift compensation: subtract (median × factor) from all scores.
+        # If the whole camera vibrates, all 64 squares have similar diff → median is
+        # high → after subtraction all adjusted scores ≈ 0 → no false detections.
+        # If one piece moved, that square's raw score is much higher than the rest →
+        # its adjusted score stays high and stands out clearly.
+        if self._shift_compensation > 0.0:
+            vals = [s for _, s in square_scores]
+            floor = float(np.median(vals)) * self._shift_compensation
+            adjusted = [(sq, max(0.0, s - floor)) for sq, s in square_scores]
+        else:
+            adjusted = square_scores
+
+        changed = [sq for sq, score in adjusted if score > self._diff_threshold]
 
         sq_names = ','.join(chess.square_name(sq) for sq in changed)
         self._changed_pub.publish(String(data=sq_names))
 
-        debug = self._draw_debug(warped, premove, square_scores, changed)
+        debug = self._draw_debug(warped, premove, adjusted, changed)
         self._publish_image(debug)
 
     # ── Pre-move Capture Service ───────────────────────────────────────────────
