@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- `test_clock_display.py` — TM1637 dual-display integration test via ROS topics (clock/display subtest)
+- Corner-based obstacle routing (`_route_via_corner`) in `motion_planner_node.py` — BFS on 9×9 corner grid avoids bumping adjacent pieces when carrying the magnet
+- `HomingNode`: `x_max_mm`, `steps_per_mm`, and all homing speeds now exposed as ROS parameters
+- Chess OS: Reset Position button + `/api/stepper/reset_position` endpoint
+- Chess OS: Live limit switch status with updated labels (X Home/Right, Y Home/Front)
+
+### Changed
+- **COORDINATE SYSTEM CHANGE**: Origin (0,0) is now **bottom-left** (from player's perspective).  
+  Previously origin was at bottom-right (where limit switches are). New system:
+  - **+X = rightward** toward h-file / X limit switch (right side)
+  - **+Y = backward** toward rank 8 / camera tower (away from player)
+  - **a1 ≈ (20, 20) mm**, **h1 ≈ (195, 20) mm**, **h8 ≈ (195, 195) mm**
+- **X LIMIT SWITCH POSITION**: X limit is at **X_MAX** (right side, h-file side). Homing now drives in **+X** to find it, then backs off leftward to X=0 origin. ROS topic `/limit_switch/x_min` name unchanged; UI labels updated to "X Home (Right)".
+- **Y LIMIT SWITCH POSITION**: Y limit at Y=0 (front, player's side) — unchanged, homing drives −Y.
+- `homing_node.py`: X homing direction reversed (+X approach, −X backoff), Prusa precision approach uses `batch_size_prec=4` (≤1mm overshoot), drives gantry to (0,0) after both limits found, then resets stepper driver counter via `/stepper/reset_position`
+- `motion_planner_node.py`: `_square_to_mm()` formula corrected to `x = origin_x + col * sq_size` (was `origin_x − col * sq_size`); default `board_origin_x_mm` updated from 200.0 → 20.0; `board_edge_safe_x_mm` updated from 5.0 → 230.0 (right of h-file)
+- All documentation updated to reflect new coordinate system and limit switch locations
+
+
 - `docs/features/vision-system.md` — comprehensive vision doc covering ROS perception stack, FEN visualizer (port 5000), MJPEG stream server (port 8080), calibration, and standalone scripts
 - `setup/` directory for system configuration files (sudoers rule)
 - `code/camera_stream_server.py` — MJPEG stream server consolidated into `code/`

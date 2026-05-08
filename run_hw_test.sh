@@ -3,11 +3,16 @@
 #
 # Usage: ./run_hw_test.sh [args passed to test_runner.py]
 # Example: ./run_hw_test.sh --category gantry --subtest limits
+#
+# sudo password is piped automatically. If your password differs, set:
+#   export CHESS_SUDO_PASS=yourpassword
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+SUDO_PASS="${CHESS_SUDO_PASS:-fuller}"
 
 echo "Sourcing ROS 2 humble underlay..."
 source /opt/ros/humble/setup.bash
@@ -23,10 +28,11 @@ fi
 echo "Running hardware tests with sudo (preserving environment)..."
 echo ""
 
-# Pass both PYTHONPATH and LD_LIBRARY_PATH explicitly
-# sudo doesn't preserve these even with -E, so we set them explicitly
-# Must run as root for /dev/mem access
-sudo PYTHONPATH="$PYTHONPATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+# Pass both PYTHONPATH and LD_LIBRARY_PATH explicitly.
+# Use -S to read password from stdin so this works non-interactively
+# (e.g. when launched from chess_os.py subprocess).
+echo "$SUDO_PASS" | sudo -S \
+    PYTHONPATH="$PYTHONPATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
     python3 -m chess_hw_interface.testing.test_runner "$@"
 
 exit_code=$?

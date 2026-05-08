@@ -57,7 +57,6 @@ class GantryKinematicsNode(Node):
 
         # Publishers
         self.vel_pub = self.create_publisher(Twist, '/stepper/velocity', 10)
-        self.pose_pub = self.create_publisher(Point, '/gantry/pose', 10)
 
         # Subscribers
         self.create_subscription(Point, '/gantry/pose', self._pose_cb, 10)
@@ -122,8 +121,8 @@ class GantryKinematicsNode(Node):
         Monitors /gantry/pose for actual position.
         """
         goal = goal_handle.request
-        target_x = float(goal.x_mm)
-        target_y = float(goal.y_mm)
+        target_x = float(goal.target_x_mm)
+        target_y = float(goal.target_y_mm)
         requested_speed = float(goal.speed_mm_s) if goal.speed_mm_s > 0 else self.max_speed_mm_s
         cruise_speed = min(requested_speed, self.max_speed_mm_s)
 

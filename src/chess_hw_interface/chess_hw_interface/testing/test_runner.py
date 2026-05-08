@@ -21,6 +21,7 @@ from .base_test import HardwareTest, TestResult
 from .test_display import DisplayInterface, create_display
 from .tests.test_camera import CameraTest
 from .tests.test_clock import ClockTest
+from .tests.test_clock_display import ClockDisplayTest
 from .tests.test_gantry import (
     GantryCoreXYDirectionTest,
     GantryDiagonalSyncTest,
@@ -198,6 +199,7 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
     'clock': {
         'full': ClockTest,
         'integration': ClockIntegrationTest,
+        'display': ClockDisplayTest,
     },
     'vision': {
         'full':    VisionPipelineTest,
@@ -219,6 +221,7 @@ LEGACY_TEST_ALIASES = {
     'magnet': ('magnet', 'full'),
     'clock': ('clock', 'full'),
     'clock_integration': ('clock', 'integration'),
+    'clock_display': ('clock', 'display'),
     'vision': ('vision', 'full'),
     'vision_corners': ('vision', 'corners'),
     'vision_board':   ('vision', 'board'),

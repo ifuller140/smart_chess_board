@@ -120,52 +120,51 @@ Maps chess square notation to physical X/Y coordinates.
 
 ```yaml
 # Board Coordinate Mapping
-# All coordinates in millimeters from home position (0,0)
+# Coordinate system: origin (0,0) at bottom-left (player's perspective)
+# +X = rightward toward h-file / X limit switch (right side)
+# +Y = backward toward rank 8 / camera tower (away from player)
 
 gantry_kinematics_node:
   ros__parameters:
-    # Physical board parameters
-    square_size_mm: 25.0           # Size of one square
-    board_origin_x_mm: 25.0        # X offset to a1 square center
-    board_origin_y_mm: 25.0        # Y offset to a1 square center
+    # Physical board parameters (calibrate after installation)
+    square_size_mm: 25.0           # Size of one square — measure actual board
+    board_origin_x_mm: 20.0        # X of a1 center from origin (left margin)
+    board_origin_y_mm: 20.0        # Y of a1 center from origin (front margin)
+    x_max_mm: 240.0                # X travel distance to X limit switch
     
     # Calibration
     steps_per_mm: 5.0              # Full-step baseline (calibrate on hardware)
     
 motion_planner_node:
   ros__parameters:
-    # Square coordinates (auto-calculated from square_size)
-    # These can be overridden for fine-tuning
-    square_positions:
-      a1: [25.0, 25.0]
-      a2: [25.0, 50.0]
-      a3: [25.0, 75.0]
-      a4: [25.0, 100.0]
-      a5: [25.0, 125.0]
-      a6: [25.0, 150.0]
-      a7: [25.0, 175.0]
-      a8: [25.0, 200.0]
-      b1: [50.0, 25.0]
-      # ... (remaining squares)
-      h8: [200.0, 200.0]
+    # Coordinate formula:
+    #   x = board_origin_x_mm + col_index * square_size_mm  (a=0, h=7)
+    #   y = board_origin_y_mm + rank_index * square_size_mm (rank1=0, rank8=7)
+    #
+    # Estimated square centers (calibrate with gantry/square_nav test):
+    #   a1: (20, 20)   h1: (195, 20)
+    #   a8: (20, 195)  h8: (195, 195)
     
-    # Graveyard positions for captured pieces
-    graveyard_white:
-      positions: [[230, 25], [255, 25], [280, 25],
-                  [230, 50], [255, 50], [280, 50],
-                  [230, 75], [255, 75], [280, 75]]
-    graveyard_black:
-      positions: [[230, 125], [255, 125], [280, 125],
-                  [230, 150], [255, 150], [280, 150],
-                  [230, 175], [255, 175], [280, 175]]
+    square_size_mm: 25.0
+    board_origin_x_mm: 20.0
+    board_origin_y_mm: 20.0
+    
+    # Safe routing corridor: X right of h-file (outside board, used for capture routing)
+    board_edge_safe_x_mm: 230.0
+    
+    # Graveyard: right of the board and above rank 8 (calibrate position)
+    graveyard_origin_x_mm: 230.0   # X of first slot (right of h-file)
+    graveyard_origin_y_mm: 215.0   # Y of graveyard row (above rank 8)
+    graveyard_slot_spacing_mm: 22.0
+    graveyard_cols: 8
+    # Slots fill leftward (decreasing X) from graveyard_origin_x
     
     # Motion parameters
-    z_safe_height_mm: 20.0         # Height for travel moves
-    approach_speed_mm_s: 5.0       # Slow approach to piece
-    travel_speed_mm_s: 15.0        # Fast travel between squares
+    move_speed_mm_s: 50.0          # Travel speed for piece moves
 ```
 
-<!-- USER_ATTENTION: Calibrate these positions with your actual board placement -->
+<!-- USER_ATTENTION: Calibrate board_origin_x/y_mm and x_max_mm with physical measurement.
+Run gantry/square_nav test to verify square positions after calibration. -->
 
 ---
 

@@ -145,37 +145,49 @@ Deceleration: 50 mm/s² (symmetric)
 
 ## Homing Sequence
 
-### Algorithm
+### Algorithm (Prusa-style)
 
 ```
-1. MOVE_X_NEGATIVE until X_MIN limit triggered
-2. BACK_OFF 5mm in +X direction
-3. MOVE_X_NEGATIVE slowly until X_MIN triggered again
-4. SET X_POSITION = 0
+# Y axis first — Y limit is at Y=0 (front, player side)
+1. RAISE MAGNET (servo to release position — safety)
+2. MOVE_Y_NEGATIVE (toward player) until Y_MIN limit triggered
+3. BACK_OFF backoff_steps in +Y direction (away from limit)
+4. MOVE_Y_NEGATIVE slowly (small batches) until Y_MIN triggered again
+   → Gantry is now precisely at Y=0
 
-5. MOVE_Y_NEGATIVE until Y_MIN limit triggered
-6. BACK_OFF 5mm in +Y direction
-7. MOVE_Y_NEGATIVE slowly until Y_MIN triggered again
-8. SET Y_POSITION = 0
+# X axis — X limit is at X_MAX (right side, h-file side)
+5. MOVE_X_POSITIVE (rightward) until X_MAX limit triggered
+6. BACK_OFF backoff_steps in -X direction (away from limit)
+7. MOVE_X_POSITIVE slowly (small batches) until X_MAX triggered again
+   → Gantry is now precisely at X_MAX
 
-9. GANTRY HOMED
+# Drive to coordinate origin
+8. MOVE_X_NEGATIVE by x_max_mm steps (drive leftward to X=0)
+   → Gantry is now at physical position (0,0) = bottom-left
+
+9. RESET stepper driver position counter to (0,0)
+10. PUBLISH /gantry/status = "HOMED"
 ```
 
 ### Limit Switch Positions
 
 ```
-                    ┌─────────────────────────────────┐
-                    │                                 │
-                    │                                 │
-                    │                                 │
-                    │                                 │
-                    │                                 │
-                    │                                 │
-          Y_MIN ────●               ●──── (cable exit)
-                    │                                 │
-           X_MIN ───●─────────────────────────────────┘
-                    
-                  (0,0) after homing
+  Player's LEFT side (a-file)        Player's RIGHT side (h-file)
+
+  ┌─────────────────────────────────────────────────────────┐
+  │                                          [X limit] ─●  │ ← X_MAX (right)
+  │                                                        │
+  │                  8×8 CHESS BOARD                       │
+  │   a8 ─────────────────────────────── h8                │
+  │   │                                  │                 │
+  │   │                                  │                 │
+  │   a1 ─────────────────────────────── h1                │
+  │                                                        │
+  ●─[Y limit]─────────────────────────────────────────────┘
+  ↑ Y=0, front (player sits here)
+  
+  ★ Origin (0,0) = bottom-LEFT after homing sequence completes
+    (Y limit at front, X driven back to left after touching X limit)
 ```
 
 ---
@@ -185,42 +197,55 @@ Deceleration: 50 mm/s² (symmetric)
 ### Origin and Axes
 
 ```
-        +Y (ranks 1→8)
+  (from player's perspective, player at bottom)
+
+        +Y (ranks 1→8, toward camera/back)
          ▲
          │
          │    Board Area
-         │   ┌─────────────────────┐
-         │   │ a8  b8  ...     h8  │
-         │   │  .   .           .  │
-         │   │  .   .           .  │
-         │   │ a1  b1  ...     h1  │
-         │   └─────────────────────┘
+         │   ┌─────────────────────────────┐──── X limit (right)
+         │   │ a8  b8  c8  ...  g8    h8  │     (X_MAX ≈ 240mm)
+         │   │  .   .                  .  │
+         │   │  .   .      board       .  │
+         │   │ a1  b1  c1  ...  g1    h1  │
+         │   └─────────────────────────────┘
          │
-    (0,0)└────────────────────────────────► +X (files a→h)
-         Home position
+    (0,0)└──────────────────────────────────► +X (files a→h, rightward)
+    Origin                                         (toward h-file)
+    (bottom-left)
+    ↑ Y limit here (Y=0, player's side)
 ```
+
+- **(0,0) = bottom-left** — set by homing sequence after touching both limits
+- **+X = rightward** toward h-file (and toward X limit switch at X_MAX)
+- **+Y = backward** toward rank 8 / camera tower (away from player)
+- **X limit switch** at X_MAX (right side). Homing moves in **+X** until triggered.
+- **Y limit switch** at Y=0 (front). Homing moves in **−Y** until triggered.
 
 ### Square Centers
 
 Chess squares are addressed by their center point.
+With `board_origin_x=20`, `board_origin_y=20`, `square_size=25mm`:
 
-For a 25mm square size with origin at a1 center:
-
-| Square | X (mm) | Y (mm) |
-|--------|--------|--------|
-| a1 | 25 | 25 |
-| h1 | 200 | 25 |
-| a8 | 25 | 200 |
-| h8 | 200 | 200 |
+| Square | X (mm) | Y (mm) | Notes |
+|--------|--------|--------|-------|
+| a1 | ~20 | ~20 | Near-left, player's front |
+| h1 | ~195 | ~20 | Near-right, player's front (near X limit) |
+| a8 | ~20 | ~195 | Far-left, back (Black's queen-side) |
+| h8 | ~195 | ~195 | Far-right, back (Black's king-side) |
 
 Formula:
 ```
-X_mm = board_origin_x + (file_index * square_size)
-Y_mm = board_origin_y + (rank_index * square_size)
+X_mm = board_origin_x_mm + (col_index * square_size_mm)
+Y_mm = board_origin_y_mm + (rank_index * square_size_mm)
 
-where file_index: a=0, b=1, ..., h=7
-      rank_index: 1=0, 2=1, ..., 8=7
+where col_index: a=0, b=1, ..., h=7
+      rank_index: rank1=0, rank2=1, ..., rank8=7
 ```
+
+> [!NOTE]
+> `board_origin_x_mm` and `board_origin_y_mm` default to 20.0 each and must be
+> calibrated against the physical board position after installation.
 
 ---
 
@@ -228,18 +253,28 @@ where file_index: a=0, b=1, ..., h=7
 
 ### Current Position Tracking
 
-Position is tracked in motor steps from home:
+Position is tracked in motor steps from home (stepper_driver_node):
 ```python
-self.position_a = 0  # Steps from home
-self.position_b = 0  # Steps from home
+self._pos_steps_a = 0  # Motor A step accumulator
+self._pos_steps_b = 0  # Motor B step accumulator
 
 # After any movement:
-self.position_a += delta_a
-self.position_b += delta_b
+self._pos_steps_a += steps_a
+self._pos_steps_b += steps_b
 
-# Convert to mm:
-x_mm = (self.position_a + self.position_b) / 2 / self.steps_per_mm
-y_mm = (self.position_a - self.position_b) / 2 / self.steps_per_mm
+# Forward kinematics (CoreXY):
+# +X = A+, B-   →   pos_x = (A - B) / 2
+# +Y = A+, B+   →   pos_y = (A + B) / 2
+pos_x_mm = (self._pos_steps_a - self._pos_steps_b) / 2 / steps_per_mm
+pos_y_mm = (self._pos_steps_a + self._pos_steps_b) / 2 / steps_per_mm
+```
+
+Reset after homing:
+```python
+# Called via /stepper/reset_position (Bool=True)
+self._pos_steps_a = 0
+self._pos_steps_b = 0
+# Now (0,0) = bottom-left corner
 ```
 
 ### Synchronized Motor Movement

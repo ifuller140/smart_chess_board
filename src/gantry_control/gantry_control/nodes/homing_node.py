@@ -3,28 +3,33 @@
 Homing Node for CoreXY Gantry with NEMA 11 + A4988 Drivers.
 
 Implements Prusa-style homing using pigpio DMA for step pulses:
-1. Disengage magnet (raise servo) before homing
-2. Approach limit switch at fast speed
-3. Back off slowly
-4. Re-approach at precision speed for accuracy
+  1. Disengage magnet (raise servo) before homing
+  2. Fast approach to limit switch
+  3. Back off slowly away from switch
+  4. Re-approach at precision speed with small batches for accuracy
 
-Both motors always step in the same DMA wave pulse — no inter-motor
-lag during homing moves.
+Physical coordinate system (origin at bottom-left from player's perspective):
+  - Player sits at the front (low Y side)
+  - Camera / electronics tower is at the back (high Y side)
+  - (0, 0) = bottom-left corner of the work area
+  - +X = rightward (toward h-file, toward X limit switch)
+  - +Y = backward / upward (toward rank 8, away from player)
 
-Physical Layout:
-- Motor A at bottom-left corner
-- Motor B at top-right corner
-- Origin (0,0) at bottom-left (where limit switches are)
+Limit switches:
+  - X limit: at X_MAX (rightmost point, far right from player)
+  - Y limit: at Y_MIN = 0 (frontmost point, closest to player)
 
-CoreXY Kinematics for this layout (inverted DIR pins):
-- +X (right): A CCW, B CW = OPPOSITE directions
-- +Y (up): A CCW, B CCW = SAME direction
+Homing sequence:
+  1. Home Y first (move in -Y toward player until Y limit triggers)
+  2. Home X (move in +X toward right side until X limit triggers)
+  3. After both limits found: drive X back to X=0 (origin at left)
+  4. Reset stepper driver position counter to (0, 0)
 
 Limit switches: active HIGH (pressed = 5V → GPIO reads HIGH, pull-down).
 
 Requirements:
-- pigpio library: pip install pigpio
-- pigpio daemon running: sudo pigpiod
+  - pigpio library: pip install pigpio
+  - pigpio daemon running: sudo pigpiod
 """
 import time
 import signal
@@ -44,117 +49,129 @@ class HomingNode(Node):
     small-batch moves with limit switch checks for safe homing.
     """
 
-    # A4988 Pin Configuration (BCM numbering)
-    MOTOR_A_DIR_PIN = 27
-    MOTOR_A_STEP_PIN = 22
-    MOTOR_B_DIR_PIN = 6
-    MOTOR_B_STEP_PIN = 5
-    MOTOR_ENABLE_PIN = 17
-
-    # Limit switch pins (active HIGH with pull-down)
-    X_LIMIT_PIN = 10
-    Y_LIMIT_PIN = 9
-
-    # Servo pin for magnet (Z-axis) — still uses pigpio hardware PWM
-    SERVO_PIN = 12
-    SERVO_RELEASE_DUTY = 7.5   # Raised position (disengaged)
-    SERVO_ENGAGE_DUTY = 2.5    # Lowered position (engaged)
-    SERVO_FREQ = 50            # 50Hz for servo
-
-    # Homing speed percentages (not configurable, homing-specific)
-    SPEED_FAST = 70            # Fast approach
-    SPEED_SLOW = 30            # Back off
-    SPEED_PRECISION = 15       # Final approach
-
-    # Homing parameters
-    BACKOFF_STEPS = 200        # Steps to back off after hitting limit
-    MAX_HOMING_STEPS = 50000   # Maximum steps before giving up
-    BATCH_SIZE = 25            # Steps per DMA batch during homing
+    # Default pin assignments (BCM) — overridden by pins.yaml ROS parameters
+    _DEFAULT_MOTOR_A_DIR_PIN  = 27
+    _DEFAULT_MOTOR_A_STEP_PIN = 22
+    _DEFAULT_MOTOR_B_DIR_PIN  = 6
+    _DEFAULT_MOTOR_B_STEP_PIN = 5
+    _DEFAULT_MOTOR_ENABLE_PIN = 17
+    _DEFAULT_X_LIMIT_PIN      = 10
+    _DEFAULT_Y_LIMIT_PIN      = 9
+    _DEFAULT_SERVO_PIN        = 12
 
     def __init__(self):
         super().__init__('homing_node')
 
-        # Declare parameters
-        self.declare_parameter('motorA_dir_pin', self.MOTOR_A_DIR_PIN)
-        self.declare_parameter('motorA_step_pin', self.MOTOR_A_STEP_PIN)
-        self.declare_parameter('motorB_dir_pin', self.MOTOR_B_DIR_PIN)
-        self.declare_parameter('motorB_step_pin', self.MOTOR_B_STEP_PIN)
-        self.declare_parameter('motor_enable_pin', self.MOTOR_ENABLE_PIN)
-        self.declare_parameter('x_limit_pin', self.X_LIMIT_PIN)
-        self.declare_parameter('y_limit_pin', self.Y_LIMIT_PIN)
-        self.declare_parameter('servo_pin', self.SERVO_PIN)
-        self.declare_parameter('backoff_steps', self.BACKOFF_STEPS)
+        # ── Motor / pin parameters ─────────────────────────────────────────
+        self.declare_parameter('motorA_dir_pin',    self._DEFAULT_MOTOR_A_DIR_PIN)
+        self.declare_parameter('motorA_step_pin',   self._DEFAULT_MOTOR_A_STEP_PIN)
+        self.declare_parameter('motorB_dir_pin',    self._DEFAULT_MOTOR_B_DIR_PIN)
+        self.declare_parameter('motorB_step_pin',   self._DEFAULT_MOTOR_B_STEP_PIN)
+        self.declare_parameter('motor_enable_pin',  self._DEFAULT_MOTOR_ENABLE_PIN)
+        self.declare_parameter('x_limit_pin',       self._DEFAULT_X_LIMIT_PIN)
+        self.declare_parameter('y_limit_pin',       self._DEFAULT_Y_LIMIT_PIN)
+        self.declare_parameter('servo_pin',         self._DEFAULT_SERVO_PIN)
 
-        # Timing/speed parameters (shared with stepper_driver via pins.yaml)
-        self.declare_parameter('dir_setup_us', 5)
-        self.declare_parameter('step_pulse_us', 10)
-        self.declare_parameter('max_speed', 800)
-        self.declare_parameter('min_speed', 150)
-        self.declare_parameter('accel_ramp_steps', 60)
+        # ── Timing / speed parameters ──────────────────────────────────────
+        self.declare_parameter('dir_setup_us',      5)
+        self.declare_parameter('step_pulse_us',     10)
+        self.declare_parameter('max_speed',         800)
+        self.declare_parameter('min_speed',         150)
+        self.declare_parameter('accel_ramp_steps',  60)
 
-        # Get parameters
-        self.motorA_dir = self.get_parameter('motorA_dir_pin').get_parameter_value().integer_value
-        self.motorA_step = self.get_parameter('motorA_step_pin').get_parameter_value().integer_value
-        self.motorB_dir = self.get_parameter('motorB_dir_pin').get_parameter_value().integer_value
-        self.motorB_step = self.get_parameter('motorB_step_pin').get_parameter_value().integer_value
-        self.motor_enable = self.get_parameter('motor_enable_pin').get_parameter_value().integer_value
-        self.x_limit_pin = self.get_parameter('x_limit_pin').get_parameter_value().integer_value
-        self.y_limit_pin = self.get_parameter('y_limit_pin').get_parameter_value().integer_value
-        self.servo_pin = self.get_parameter('servo_pin').get_parameter_value().integer_value
-        self.backoff_steps = self.get_parameter('backoff_steps').get_parameter_value().integer_value
+        # ── Homing behaviour parameters ────────────────────────────────────
+        self.declare_parameter('speed_fast_pct',    70)    # % for fast approach
+        self.declare_parameter('speed_slow_pct',    30)    # % for back-off
+        self.declare_parameter('speed_prec_pct',    12)    # % for precision approach
+        self.declare_parameter('backoff_steps',     200)   # steps to retreat after first contact
+        self.declare_parameter('max_homing_steps',  50000) # fail-safe step limit
+        self.declare_parameter('batch_size_fast',   25)    # steps per batch during fast approach
+        self.declare_parameter('batch_size_prec',   4)     # steps per batch during precision (≈1mm)
 
-        # Timing/speed
-        self.dir_setup_us = self.get_parameter('dir_setup_us').get_parameter_value().integer_value
-        self.step_pulse_us = self.get_parameter('step_pulse_us').get_parameter_value().integer_value
-        self.max_speed = self.get_parameter('max_speed').get_parameter_value().integer_value
-        self.min_speed = self.get_parameter('min_speed').get_parameter_value().integer_value
-        self.accel_ramp_steps = self.get_parameter('accel_ramp_steps').get_parameter_value().integer_value
+        # ── Coordinate parameters ──────────────────────────────────────────
+        # x_max_mm: physical X travel from origin (bottom-left) to X limit switch
+        self.declare_parameter('x_max_mm',          240.0)
+        self.declare_parameter('steps_per_mm',      5.0)
 
-        # State
-        self.is_homed = False
+        # ── Read all parameters ────────────────────────────────────────────
+        self.motorA_dir    = self.get_parameter('motorA_dir_pin').value
+        self.motorA_step   = self.get_parameter('motorA_step_pin').value
+        self.motorB_dir    = self.get_parameter('motorB_dir_pin').value
+        self.motorB_step   = self.get_parameter('motorB_step_pin').value
+        self.motor_enable  = self.get_parameter('motor_enable_pin').value
+        self.x_limit_pin   = self.get_parameter('x_limit_pin').value
+        self.y_limit_pin   = self.get_parameter('y_limit_pin').value
+        self.servo_pin     = self.get_parameter('servo_pin').value
+
+        self.dir_setup_us      = self.get_parameter('dir_setup_us').value
+        self.step_pulse_us     = self.get_parameter('step_pulse_us').value
+        self.max_speed         = self.get_parameter('max_speed').value
+        self.min_speed         = self.get_parameter('min_speed').value
+        self.accel_ramp_steps  = self.get_parameter('accel_ramp_steps').value
+
+        self.SPEED_FAST   = self.get_parameter('speed_fast_pct').value
+        self.SPEED_SLOW   = self.get_parameter('speed_slow_pct').value
+        self.SPEED_PREC   = self.get_parameter('speed_prec_pct').value
+        self.backoff_steps     = self.get_parameter('backoff_steps').value
+        self.MAX_HOMING_STEPS  = self.get_parameter('max_homing_steps').value
+        self.BATCH_FAST        = self.get_parameter('batch_size_fast').value
+        self.BATCH_PREC        = self.get_parameter('batch_size_prec').value
+
+        self._x_max_mm    = self.get_parameter('x_max_mm').value
+        self._steps_per_mm = self.get_parameter('steps_per_mm').value
+
+        # ── State ──────────────────────────────────────────────────────────
+        self.is_homed      = False
         self.emergency_stop = False
 
-        # Connect to pigpio daemon
+        # ── pigpio connection ──────────────────────────────────────────────
         self.pi = pigpio.pi()
         if not self.pi.connected:
             self.get_logger().fatal(
-                "Cannot connect to pigpiod daemon. "
-                "Start it with: sudo pigpiod"
-            )
+                "Cannot connect to pigpiod daemon. Start it with: sudo pigpiod")
             raise RuntimeError("pigpiod not running")
 
         self._setup_gpio()
 
-        # Create service
-        self.home_service = self.create_service(Trigger, '/gantry/home', self.home_callback)
+        # ── ROS interfaces ─────────────────────────────────────────────────
+        self.home_service = self.create_service(
+            Trigger, '/gantry/home', self.home_callback)
 
-        # Publisher for status
         self.status_pub = self.create_publisher(String, '/gantry/status', 10)
 
-        # Subscribe to emergency stop
-        self.estop_sub = self.create_subscription(Bool, '/emergency_stop', self.estop_callback, 10)
+        # Publish Bool True here to reset stepper driver position counter to (0,0)
+        self._reset_pos_pub = self.create_publisher(
+            Bool, '/stepper/reset_position', 10)
 
-        # Signal handling
+        self.estop_sub = self.create_subscription(
+            Bool, '/emergency_stop', self.estop_callback, 10)
+
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
         self.get_logger().info('Homing Node initialized (pigpio DMA)')
-        self.get_logger().info(f'Motor A (bottom-left): DIR={self.motorA_dir}, STEP={self.motorA_step}')
-        self.get_logger().info(f'Motor B (top-right): DIR={self.motorB_dir}, STEP={self.motorB_step}')
-        self.get_logger().info(f'Motor enable (active LOW): EN={self.motor_enable}')
-        self.get_logger().info(f'Limits (active HIGH): X={self.x_limit_pin}, Y={self.y_limit_pin}')
-        self.get_logger().info(f'Servo (magnet): PIN={self.servo_pin}')
-        self.get_logger().info('Service available: /gantry/home')
+        self.get_logger().info(
+            f'  Motor A: DIR={self.motorA_dir} STEP={self.motorA_step}  '
+            f'Motor B: DIR={self.motorB_dir} STEP={self.motorB_step}  '
+            f'EN={self.motor_enable}')
+        self.get_logger().info(
+            f'  X limit (at X_MAX, right): GPIO{self.x_limit_pin}  '
+            f'Y limit (at Y=0, front): GPIO{self.y_limit_pin}')
+        self.get_logger().info(
+            f'  x_max_mm={self._x_max_mm:.0f}  steps_per_mm={self._steps_per_mm}')
+        self.get_logger().info('  Service: /gantry/home')
+
+    # ──────────────────────────────────────────────────────────────────────
+    # GPIO setup
+    # ──────────────────────────────────────────────────────────────────────
 
     def _setup_gpio(self):
-        """Initialize GPIO pins via pigpio."""
-        # Motor pins as outputs
         for pin in [self.motorA_dir, self.motorA_step,
                     self.motorB_dir, self.motorB_step, self.motor_enable]:
             self.pi.set_mode(pin, pigpio.OUTPUT)
             self.pi.write(pin, 0)
 
-        # Disable motors initially (A4988 ENABLE is active LOW)
+        # Motors start disabled (A4988 ENABLE is active LOW)
         self.pi.write(self.motor_enable, 1)
 
         # Limit switches: active HIGH with pull-down
@@ -162,58 +179,63 @@ class HomingNode(Node):
             self.pi.set_mode(pin, pigpio.INPUT)
             self.pi.set_pull_up_down(pin, pigpio.PUD_DOWN)
 
-        # Servo: use pigpio hardware PWM (no jitter)
         self.pi.set_mode(self.servo_pin, pigpio.OUTPUT)
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Cleanup / signals
+    # ──────────────────────────────────────────────────────────────────────
+
     def _signal_handler(self, sig, frame):
-        """Handle shutdown signals."""
         self.get_logger().info('Shutdown signal received')
         self._cleanup()
 
     def _cleanup(self):
-        """Clean up GPIO on shutdown."""
         if getattr(self, 'pi', None) is None:
             return
-            
         try:
             try:
                 self.pi.wave_tx_stop()
             except Exception:
                 pass
-            
             self.pi.write(self.motor_enable, 1)
             self.pi.write(self.motorA_step, 0)
             self.pi.write(self.motorB_step, 0)
-            # Stop servo PWM
             self.pi.set_servo_pulsewidth(self.servo_pin, 0)
-            
             try:
                 self.pi.wave_clear()
             except Exception:
                 pass
-                
             if self.pi.connected:
                 self.pi.stop()
         except Exception as e:
-            self.get_logger().debug(f'Ignored exception during pi cleanup: {e}')
+            self.get_logger().debug(f'Ignored exception during cleanup: {e}')
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Servo (magnet safety)
+    # ──────────────────────────────────────────────────────────────────────
 
     def _disengage_magnet(self):
-        """Raise the magnet (disengage) before homing using pigpio hardware servo."""
-        self.get_logger().info('Disengaging magnet (raising servo)...')
-        # SG90 servo: 500-2500µs pulse width at 50Hz
-        # Release position ~ 1500µs (neutral/raised)
+        """Raise the magnet (release position) before homing."""
+        self.get_logger().info('  Disengaging magnet (raising servo)...')
         self.pi.set_servo_pulsewidth(self.servo_pin, 1500)
         time.sleep(0.5)
-        # Stop sending pulses to avoid jitter
         self.pi.set_servo_pulsewidth(self.servo_pin, 0)
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Limit switch readers
+    # ──────────────────────────────────────────────────────────────────────
+
     def _read_x_limit(self) -> bool:
-        """Read X limit switch (active HIGH — pressed = 5V)."""
+        """X limit is at X_MAX (right side). active HIGH."""
         return self.pi.read(self.x_limit_pin) == 1
 
     def _read_y_limit(self) -> bool:
-        """Read Y limit switch (active HIGH — pressed = 5V)."""
+        """Y limit is at Y=0 (front/closest to player). active HIGH."""
         return self.pi.read(self.y_limit_pin) == 1
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Motor enable
+    # ──────────────────────────────────────────────────────────────────────
 
     def _enable_motors(self):
         self.pi.write(self.motor_enable, 0)
@@ -222,16 +244,16 @@ class HomingNode(Node):
     def _disable_motors(self):
         self.pi.write(self.motor_enable, 1)
 
-    # ------------------------------------------------------------------
-    # DMA wave chain helpers (same approach as stepper_driver_node)
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
+    # DMA wave chain
+    # ──────────────────────────────────────────────────────────────────────
 
     def _calculate_speed_profile(self, total_steps, speed_percent):
-        """Calculate trapezoidal speed profile."""
         if total_steps <= 0:
             return []
 
-        target_speed = int(self.min_speed + (speed_percent / 100.0) * (self.max_speed - self.min_speed))
+        target_speed = int(
+            self.min_speed + (speed_percent / 100.0) * (self.max_speed - self.min_speed))
 
         accel = min(self.accel_ramp_steps, total_steps // 3)
         if total_steps <= accel * 2:
@@ -256,15 +278,11 @@ class HomingNode(Node):
         return profile
 
     def _step_both(self, steps_a: int, steps_b: int, speed_percent: int):
-        """
-        Step both motors simultaneously via DMA wave chain.
-
-        Both motors' step edges are in the same pulse.
-        """
+        """Step both motors simultaneously via DMA wave chain."""
         if steps_a == 0 and steps_b == 0:
             return
 
-        # INVERTED DIR pins — positive steps → DIR LOW for this hardware
+        # Positive steps → DIR LOW (inverted per this hardware)
         self.pi.write(self.motorA_dir, 0 if steps_a >= 0 else 1)
         self.pi.write(self.motorB_dir, 0 if steps_b >= 0 else 1)
         time.sleep(self.dir_setup_us / 1_000_000)
@@ -277,12 +295,11 @@ class HomingNode(Node):
 
         profile = self._calculate_speed_profile(max_steps, speed_percent)
 
-        # Flatten
         per_step_delays = []
         for cnt, delay in profile:
             per_step_delays.extend([delay] * cnt)
 
-        # Bresenham
+        # Bresenham interleave
         step_plan = []
         err_a = 0
         err_b = 0
@@ -303,7 +320,7 @@ class HomingNode(Node):
         if not step_plan:
             return
 
-        # Group
+        # Group consecutive identical patterns
         groups = []
         cur = (step_plan[0][0], step_plan[0][1], step_plan[0][2])
         cnt = 1
@@ -317,7 +334,6 @@ class HomingNode(Node):
                 cnt = 1
         groups.append((cur, cnt))
 
-        # Build waves
         wave_ids = []
         p2w = {}
 
@@ -345,7 +361,7 @@ class HomingNode(Node):
                 ])
                 wid = self.pi.wave_create()
                 if wid < 0:
-                    raise RuntimeError(f"wave_create failed ({wid})")
+                    raise RuntimeError(f'wave_create failed ({wid})')
                 p2w[pattern] = wid
                 wave_ids.append(wid)
 
@@ -371,184 +387,236 @@ class HomingNode(Node):
                 except Exception:
                     pass
 
-    # ------------------------------------------------------------------
-    # CoreXY motion (small-batch with limit checks for homing)
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
+    # CoreXY motion helpers (small-batch with limit checks)
+    # ──────────────────────────────────────────────────────────────────────
 
-    def _move_x(self, steps: int, speed_percent: int) -> bool:
+    def _move_x(self, steps: int, speed_percent: int, batch_size: int = None) -> bool:
         """
-        Move in X direction using CoreXY kinematics in small batches.
+        Move in the X direction in small batches, checking X limit each batch.
 
-        +X (right): A+, B-
+        CoreXY kinematics:
+          +X (rightward, toward X limit): Motor A positive, Motor B negative
+          -X (leftward, toward origin):   Motor A negative, Motor B positive
 
-        Returns True if completed, False if limit triggered or e-stop.
+        X limit switch is at X_MAX (right side).
+        Stops WITHOUT error when limit is triggered while moving in +X direction.
+        Returns True if all steps completed, False if limit triggered or e-stop.
         """
+        if batch_size is None:
+            batch_size = self.BATCH_FAST
+
         sign = 1 if steps > 0 else -1
         remaining = abs(steps)
 
         self._enable_motors()
         try:
             while remaining > 0 and not self.emergency_stop:
-                if self._read_x_limit() and sign < 0:
+                # Stop gracefully when hitting X limit while moving toward it (+X)
+                if self._read_x_limit() and sign > 0:
                     return False
-                batch = min(self.BATCH_SIZE, remaining)
+                batch = min(batch_size, remaining)
                 dx = sign * batch
-                a = dx
-                b = -dx
-                self._step_both(a, b, speed_percent)
+                # CoreXY: +X → A=+dx, B=-dx
+                self._step_both(dx, -dx, speed_percent)
                 remaining -= batch
         finally:
             self._disable_motors()
 
         return not self.emergency_stop
 
-    def _move_y(self, steps: int, speed_percent: int) -> bool:
+    def _move_y(self, steps: int, speed_percent: int, batch_size: int = None) -> bool:
         """
-        Move in Y direction using CoreXY kinematics in small batches.
+        Move in the Y direction in small batches, checking Y limit each batch.
 
-        +Y (up): A+, B+
+        CoreXY kinematics:
+          +Y (backward/away from player, toward rank 8): Motor A positive, Motor B positive
+          -Y (forward/toward player, toward Y limit):    Motor A negative, Motor B negative
 
-        Returns True if completed, False if limit triggered or e-stop.
+        Y limit switch is at Y=0 (front, closest to player).
+        Stops WITHOUT error when limit is triggered while moving in -Y direction.
+        Returns True if all steps completed, False if limit triggered or e-stop.
         """
+        if batch_size is None:
+            batch_size = self.BATCH_FAST
+
         sign = 1 if steps > 0 else -1
         remaining = abs(steps)
 
         self._enable_motors()
         try:
             while remaining > 0 and not self.emergency_stop:
+                # Stop gracefully when hitting Y limit while moving toward it (-Y)
                 if self._read_y_limit() and sign < 0:
                     return False
-                batch = min(self.BATCH_SIZE, remaining)
+                batch = min(batch_size, remaining)
                 dy = sign * batch
-                a = dy
-                b = dy
-                self._step_both(a, b, speed_percent)
+                # CoreXY: +Y → A=+dy, B=+dy
+                self._step_both(dy, dy, speed_percent)
                 remaining -= batch
         finally:
             self._disable_motors()
 
         return not self.emergency_stop
 
-    # ------------------------------------------------------------------
-    # Homing sequences
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
+    # Prusa-style homing for each axis
+    # ──────────────────────────────────────────────────────────────────────
 
     def _home_x(self) -> bool:
         """
-        Home X axis using Prusa-style homing.
+        Home X axis (Prusa-style).
 
-        Move in -X direction until limit triggered, back off, precision approach.
+        X limit switch is at X_MAX (rightmost position).
+        Approach from the left (+X direction) until switch triggers.
+        Back off, then precision approach.
+        After homing, gantry is at X = X_MAX.
         """
-        self.get_logger().info('Homing X axis (moving left toward origin)...')
+        self.get_logger().info('  Homing X (moving RIGHT toward X limit)...')
 
-        # Phase 1: Fast approach
-        self.get_logger().info('  Phase 1: Fast approach')
+        # ── Phase 1: fast approach ────────────────────────────────────────
+        self.get_logger().info('    Phase 1: fast approach')
         if not self._read_x_limit():
-            self._move_x(-self.MAX_HOMING_STEPS, self.SPEED_FAST)
+            self._move_x(self.MAX_HOMING_STEPS, self.SPEED_FAST)
 
         if not self._read_x_limit():
-            self.get_logger().error('  X limit switch not triggered after max steps')
+            self.get_logger().error('    X limit not triggered after max steps — check wiring!')
+            return False
+        self.get_logger().info('    X limit triggered (fast)')
+
+        # ── Phase 2: back off ─────────────────────────────────────────────
+        self.get_logger().info('    Phase 2: backing off')
+        self._move_x(-self.backoff_steps, self.SPEED_SLOW)
+
+        # If still triggered (backoff wasn't enough), back off more
+        if self._read_x_limit():
+            self.get_logger().info('    Still triggered — backing off further')
+            self._move_x(-self.backoff_steps, self.SPEED_SLOW)
+
+        if self._read_x_limit():
+            self.get_logger().error('    X limit still triggered after double backoff — hardware issue?')
             return False
 
-        self.get_logger().info('  X limit triggered')
-
-        # Phase 2: Back off
-        self.get_logger().info('  Phase 2: Backing off')
-        self._move_x(self.backoff_steps, self.SPEED_SLOW)
-
-        if self._read_x_limit():
-            self._move_x(self.backoff_steps, self.SPEED_SLOW)
-
-        # Phase 3: Precision approach
-        self.get_logger().info('  Phase 3: Precision approach')
-        self._move_x(-self.MAX_HOMING_STEPS, self.SPEED_PRECISION)
+        # ── Phase 3: precision approach ───────────────────────────────────
+        self.get_logger().info('    Phase 3: precision approach (small batches)')
+        self._move_x(self.MAX_HOMING_STEPS, self.SPEED_PREC,
+                     batch_size=self.BATCH_PREC)
 
         if self._read_x_limit():
-            self.get_logger().info('  X homing complete')
+            self.get_logger().info('    X homed successfully (at X_MAX)')
             return True
         else:
-            self.get_logger().error('  X precision homing failed')
+            self.get_logger().error('    X precision approach did not re-trigger limit')
             return False
 
     def _home_y(self) -> bool:
         """
-        Home Y axis using Prusa-style homing.
+        Home Y axis (Prusa-style).
 
-        Move in -Y direction until limit triggered, back off, precision approach.
+        Y limit switch is at Y=0 (frontmost position, closest to player).
+        Approach from the back (-Y direction) until switch triggers.
+        Back off, then precision approach.
+        After homing, gantry is at Y = 0.
         """
-        self.get_logger().info('Homing Y axis (moving down toward origin)...')
+        self.get_logger().info('  Homing Y (moving FORWARD toward Y limit at front)...')
 
-        # Phase 1: Fast approach
-        self.get_logger().info('  Phase 1: Fast approach')
+        # ── Phase 1: fast approach ────────────────────────────────────────
+        self.get_logger().info('    Phase 1: fast approach')
         if not self._read_y_limit():
             self._move_y(-self.MAX_HOMING_STEPS, self.SPEED_FAST)
 
         if not self._read_y_limit():
-            self.get_logger().error('  Y limit switch not triggered after max steps')
+            self.get_logger().error('    Y limit not triggered after max steps — check wiring!')
             return False
+        self.get_logger().info('    Y limit triggered (fast)')
 
-        self.get_logger().info('  Y limit triggered')
-
-        # Phase 2: Back off
-        self.get_logger().info('  Phase 2: Backing off')
+        # ── Phase 2: back off ─────────────────────────────────────────────
+        self.get_logger().info('    Phase 2: backing off')
         self._move_y(self.backoff_steps, self.SPEED_SLOW)
 
         if self._read_y_limit():
+            self.get_logger().info('    Still triggered — backing off further')
             self._move_y(self.backoff_steps, self.SPEED_SLOW)
 
-        # Phase 3: Precision approach
-        self.get_logger().info('  Phase 3: Precision approach')
-        self._move_y(-self.MAX_HOMING_STEPS, self.SPEED_PRECISION)
-
         if self._read_y_limit():
-            self.get_logger().info('  Y homing complete')
-            return True
-        else:
-            self.get_logger().error('  Y precision homing failed')
+            self.get_logger().error('    Y limit still triggered after double backoff — hardware issue?')
             return False
 
+        # ── Phase 3: precision approach ───────────────────────────────────
+        self.get_logger().info('    Phase 3: precision approach (small batches)')
+        self._move_y(-self.MAX_HOMING_STEPS, self.SPEED_PREC,
+                     batch_size=self.BATCH_PREC)
+
+        if self._read_y_limit():
+            self.get_logger().info('    Y homed successfully (at Y=0)')
+            return True
+        else:
+            self.get_logger().error('    Y precision approach did not re-trigger limit')
+            return False
+
+    def _drive_to_origin(self):
+        """
+        After homing, gantry is at (X_MAX, 0).
+        Drive X back to 0 (bottom-left corner = logical origin).
+        """
+        x_steps = int(self._x_max_mm * self._steps_per_mm)
+        self.get_logger().info(
+            f'  Driving to origin: moving -{x_steps} steps in X '
+            f'({self._x_max_mm:.0f} mm leftward)...')
+        self._move_x(-x_steps, self.SPEED_SLOW)
+        self.get_logger().info('  At origin (0, 0)')
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Service callback
+    # ──────────────────────────────────────────────────────────────────────
+
     def home_callback(self, request, response):
-        """Handle homing service request."""
-        self.get_logger().info('Homing request received')
+        self.get_logger().info('=== Homing sequence started ===')
 
-        status_msg = String()
-        status_msg.data = 'HOMING_STARTED'
-        self.status_pub.publish(status_msg)
-
+        self._pub_status('HOMING_STARTED')
         self.emergency_stop = False
 
-        # SAFETY: Disengage magnet before homing
+        # Safety: raise magnet before any movement
         self._disengage_magnet()
 
-        # Home X first, then Y
-        x_success = self._home_x()
-        if not x_success:
+        # ── Home Y first (front limit, closest to player) ─────────────────
+        self.get_logger().info('Step 1/3: Home Y axis')
+        if not self._home_y():
+            self._pub_status('HOMING_FAILED')
             response.success = False
-            response.message = 'X homing failed'
-            status_msg.data = 'HOMING_FAILED'
-            self.status_pub.publish(status_msg)
+            response.message = 'Y homing failed — limit not reached'
             return response
 
-        y_success = self._home_y()
-        if not y_success:
+        # ── Home X (right-side limit) ─────────────────────────────────────
+        self.get_logger().info('Step 2/3: Home X axis')
+        if not self._home_x():
+            self._pub_status('HOMING_FAILED')
             response.success = False
-            response.message = 'Y homing failed'
-            status_msg.data = 'HOMING_FAILED'
-            self.status_pub.publish(status_msg)
+            response.message = 'X homing failed — limit not reached'
             return response
+
+        # ── Drive to coordinate origin (0, 0) = bottom-left ──────────────
+        # We're currently at (X_MAX, 0). Drive X leftward to X=0.
+        self.get_logger().info('Step 3/3: Drive to coordinate origin')
+        self._drive_to_origin()
+
+        # ── Reset stepper driver step counter ─────────────────────────────
+        # Gantry is now physically at (0, 0). Tell stepper driver.
+        self._reset_pos_pub.publish(Bool(data=True))
+        time.sleep(0.05)   # let the stepper driver process the reset
 
         self.is_homed = True
+        self._pub_status('HOMED')
+        self.get_logger().info('=== Homing complete — origin (0, 0) set ===')
+
         response.success = True
-        response.message = 'Homing complete'
-
-        status_msg.data = 'HOMED'
-        self.status_pub.publish(status_msg)
-
-        self.get_logger().info('Homing sequence complete!')
+        response.message = 'Homing complete. Gantry at (0, 0).'
         return response
 
+    def _pub_status(self, status: str):
+        self.status_pub.publish(String(data=status))
+
     def estop_callback(self, msg):
-        """Handle emergency stop."""
         if msg.data:
             self.get_logger().warn('Emergency stop triggered!')
             self.emergency_stop = True

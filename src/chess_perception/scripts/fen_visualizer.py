@@ -100,6 +100,8 @@ _params = {
     # Diff display thresholds (diff tab — preview only in visualizer)
     "display_threshold":   18.0,
     "shift_compensation":   1.0,
+    "clump_enable":          0,
+    "clump_keep_per_group":  1,
 }
 
 _processed = {"raw": None, "warp": None}
@@ -334,13 +336,21 @@ class FenNode(Node):
             if self._detector_param_client.service_is_ready():
                 req = SetParameters.Request()
                 type_map = {
-                    "diff_threshold":          ParameterType.PARAMETER_DOUBLE,
+                    "diff_threshold":            ParameterType.PARAMETER_DOUBLE,
                     "global_shift_compensation": ParameterType.PARAMETER_DOUBLE,
+                    "clump_enable":              ParameterType.PARAMETER_BOOL,
+                    "clump_keep_per_group":      ParameterType.PARAMETER_INTEGER,
                 }
                 for name, value in params.items():
                     pv = ParameterValue()
-                    pv.type = type_map.get(name, ParameterType.PARAMETER_DOUBLE)
-                    pv.double_value = float(value)
+                    ptype = type_map.get(name, ParameterType.PARAMETER_DOUBLE)
+                    pv.type = ptype
+                    if ptype == ParameterType.PARAMETER_DOUBLE:
+                        pv.double_value = float(value)
+                    elif ptype == ParameterType.PARAMETER_BOOL:
+                        pv.bool_value = bool(value)
+                    elif ptype == ParameterType.PARAMETER_INTEGER:
+                        pv.integer_value = int(value)
                     p = Parameter()
                     p.name = name
                     p.value = pv
@@ -367,10 +377,12 @@ class FenNode(Node):
         with _lock:
             _state["ref_status"] = "Capture requested…"
 
-    def request_detector_params(self, threshold, compensation):
+    def request_detector_params(self, threshold, compensation, clump_enable=False, clump_keep=1):
         self._pending_detector_params = {
             "diff_threshold":            threshold,
             "global_shift_compensation": compensation,
+            "clump_enable":              clump_enable,
+            "clump_keep_per_group":      clump_keep,
         }
 
     # ── Camera image ──────────────────────────────────────────────────────────
@@ -536,6 +548,8 @@ def api_square_scores():
             "scores":            dict(_state.get("square_scores", {})),
             "display_threshold": _params.get("display_threshold", 18.0),
             "shift_compensation": _params.get("shift_compensation", 1.0),
+            "clump_enable":      int(_params.get("clump_enable", 0)),
+            "clump_keep_per_group": int(_params.get("clump_keep_per_group", 1)),
         })
 
 
@@ -600,14 +614,17 @@ def api_capture_premove():
 
 @app.route("/api/detector_params", methods=["POST"])
 def api_detector_params():
-    """Push threshold + compensation values to piece_detector_node via ROS set_parameters."""
+    """Push threshold, compensation, and clump settings to piece_detector_node."""
     data = freq.get_json(silent=True) or {}
-    thresh = float(data.get("diff_threshold", 18.0))
-    comp   = float(data.get("shift_compensation", 1.0))
+    thresh       = float(data.get("diff_threshold", 18.0))
+    comp         = float(data.get("shift_compensation", 1.0))
+    clump_enable = bool(data.get("clump_enable", False))
+    clump_keep   = int(data.get("clump_keep_per_group", 1))
     if _ros_node and _RCL_PARAMS_AVAILABLE:
-        _ros_node.request_detector_params(thresh, comp)
+        _ros_node.request_detector_params(thresh, comp, clump_enable, clump_keep)
         return jsonify({"ok": True,
-                        "msg": f"Applied threshold={thresh}, compensation={comp} to piece_detector_node"})
+                        "msg": f"Applied threshold={thresh}, compensation={comp}, "
+                               f"clump={clump_enable}(keep={clump_keep}) to piece_detector_node"})
     elif _ros_node and not _RCL_PARAMS_AVAILABLE:
         return jsonify({"ok": False,
                         "msg": "rcl_interfaces not available — cannot set parameters remotely"}), 503
@@ -937,8 +954,10 @@ code{font-family:monospace;font-size:.9em;background:#161b22;padding:1px 4px;bor
     Use <b>Capture Ref</b> in the header to take a fresh reference frame before testing.
   </div>
   <div class="diff-layout">
-    <!-- Left: heatmap from ROS -->
+    <!-- Left: local warped board + heatmap from ROS -->
     <div>
+      <div class="sec-lbl">Current Warped Board (local — matches what detector sees)</div>
+      <img id="warp-diff-img" src="/api/warp_frame" style="width:100%;display:block;border-radius:4px;border:1px solid #21262d;margin-bottom:8px;image-rendering:pixelated" alt="warped board">
       <div class="sec-lbl">Piece Detector Heatmap (live from ROS)</div>
       <img id="diff-img" src="/api/diff_frame" alt="diff heatmap">
       <div class="ref-row">
@@ -986,12 +1005,22 @@ code{font-family:monospace;font-size:.9em;background:#161b22;padding:1px 4px;bor
                  oninput="onSlider('shift_compensation',+this.value);document.getElementById('vb_shift_compensation').textContent=(+this.value).toFixed(2)">
           <span class="vb" id="vb_shift_compensation">1.00</span>
         </div>
+        <div class="tog-row">
+          <input type="checkbox" id="t_clump_enable" onchange="onTog('clump_enable',this.checked)">
+          <label for="t_clump_enable" title="Group adjacent flagged squares and keep only the hottest per cluster. Reduces false positives when a far-end piece bleeds across multiple dewarped squares. NOTE: castling touches 4 adjacent squares — set Keep ≥ 4 or disable clump mode during castling.">Clump mode (reduce perspective bleed)</label>
+        </div>
+        <div class="slider-row">
+          <label title="How many squares to keep per clump. Use 1 for tightest filtering. Use 2-4 if castling is needed.">Keep per clump</label>
+          <input type="range" id="s_clump_keep_per_group" min="1" max="4" step="1" value="1"
+                 oninput="onSlider('clump_keep_per_group',+this.value);document.getElementById('vb_clump_keep').textContent=this.value">
+          <span class="vb" id="vb_clump_keep">1</span>
+        </div>
         <button class="btn blue" onclick="applyToDetector()" style="margin-top:8px">
           ⚙ Apply to Actual Detector
         </button>
         <div class="apply-note">
-          Pushes <code>diff_threshold</code> and <code>global_shift_compensation</code>
-          to <code>piece_detector_node</code> via ROS set_parameters service.
+          Pushes <code>diff_threshold</code>, <code>global_shift_compensation</code>,
+          and <code>clump_enable</code> to <code>piece_detector_node</code> via ROS set_parameters.
           The heatmap (left) will reflect the new values after the next detection cycle.
         </div>
       </div>
@@ -1098,10 +1127,10 @@ function showTab(id) {
 // ── Corner drag handles ──────────────────────────────────────────────────────
 var corners = [{fx:0.10,fy:0.10},{fx:0.90,fy:0.10},{fx:0.90,fy:0.90},{fx:0.10,fy:0.90}];
 var CORNER_LABELS = ['TL','TR','BR','BL'];
-// BGR → CSS color: TL=#5050ff TR=#50ff50 BR=#ff5050 BL=#50ddff
 var CORNER_COLORS = ['#5050ff','#50ff50','#ff5050','#50ddff'];
 var handles = [];
-var dragging = null;
+var dragging = null;       // integer index (0–3) or null — NOT an object
+var handlesBuilt = false;  // only create DOM elements once; survive image reloads
 
 function positionHandles() {
   var img = document.getElementById('corner-cam-img');
@@ -1115,49 +1144,54 @@ function positionHandles() {
 }
 
 function buildHandles() {
+  // Guard: build handle DOM elements only once.
+  // refreshImages() reloads the image src every 800 ms, firing the 'load' event
+  // each time.  Without this guard each reload destroys and recreates the handles,
+  // interrupting any drag in progress.
+  if (handlesBuilt) { positionHandles(); return; }
   var wrap = document.getElementById('corner-cam-wrap');
   if (!wrap) return;
-  handles.forEach(function(h){ if(h && h.parentNode) h.parentNode.removeChild(h); });
-  handles = [];
-  corners.forEach(function(c, i) {
-    var el = document.createElement('div');
-    el.className = 'handle';
-    el.style.background = CORNER_COLORS[i];
-    el.textContent = CORNER_LABELS[i];
-    wrap.appendChild(el);
-    handles.push(el);
-    el.addEventListener('mousedown', function(e){
-      e.preventDefault();
-      dragging = {index:i, startMX:e.clientX, startMY:e.clientY, startFx:c.fx, startFy:c.fy};
-    });
-    el.addEventListener('touchstart', function(e){
-      e.preventDefault();
-      var t = e.touches[0];
-      dragging = {index:i, startMX:t.clientX, startMY:t.clientY, startFx:c.fx, startFy:c.fy};
-    }, {passive:false});
-  });
+  for (var i = 0; i < 4; i++) {
+    (function(idx) {
+      var el = document.createElement('div');
+      el.className = 'handle';
+      el.style.background = CORNER_COLORS[idx];
+      el.textContent = CORNER_LABELS[idx];
+      wrap.appendChild(el);
+      handles.push(el);
+      el.addEventListener('mousedown', function(e) {
+        e.preventDefault(); e.stopPropagation(); dragging = idx;
+      });
+      el.addEventListener('touchstart', function(e) {
+        e.preventDefault(); dragging = idx;
+      }, {passive:false});
+    })(i);
+  }
+  handlesBuilt = true;
   positionHandles();
 }
 
 function moveDragging(clientX, clientY) {
-  if (!dragging) return;
+  if (dragging === null) return;
   var img = document.getElementById('corner-cam-img');
   if (!img) return;
-  var W = img.clientWidth, H = img.clientHeight;
-  var i = dragging.index;
-  corners[i].fx = Math.min(1, Math.max(0, dragging.startFx + (clientX - dragging.startMX) / W));
-  corners[i].fy = Math.min(1, Math.max(0, dragging.startFy + (clientY - dragging.startMY) / H));
+  // Use absolute cursor position within the image element.
+  // getBoundingClientRect() is stable throughout the drag regardless of image
+  // reload or layout reflow, making this more reliable than delta-based tracking.
+  var rect = img.getBoundingClientRect();
+  corners[dragging].fx = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  corners[dragging].fy = Math.min(1, Math.max(0, (clientY - rect.top)  / rect.height));
   positionHandles();
   updateCornerInfo();
 }
 
 document.addEventListener('mousemove', function(e){ moveDragging(e.clientX, e.clientY); });
-document.addEventListener('mouseup',   function(){ if(dragging){ dragging=null; sendCorners(); } });
+document.addEventListener('mouseup',   function(){ if(dragging !== null){ dragging=null; sendCorners(); } });
 document.addEventListener('touchmove', function(e){
-  if(!dragging) return; e.preventDefault();
+  if(dragging === null) return; e.preventDefault();
   moveDragging(e.touches[0].clientX, e.touches[0].clientY);
 }, {passive:false});
-document.addEventListener('touchend', function(){ if(dragging){ dragging=null; sendCorners(); } });
+document.addEventListener('touchend', function(){ if(dragging !== null){ dragging=null; sendCorners(); } });
 
 function updateCornerInfo() {
   var txt = corners.map(function(c,i){
@@ -1184,14 +1218,66 @@ function loadCornersFromServer() {
     }
   });
 }
-document.getElementById('corner-cam-img').addEventListener('load', function(){
-  buildHandles(); positionHandles();
+document.getElementById('corner-cam-img').addEventListener('load', function() {
+  // On first load build the handles; on subsequent reloads just reposition.
+  if (!handlesBuilt) { buildHandles(); } else { positionHandles(); }
 });
 window.addEventListener('resize', positionHandles);
 
 // ── Score canvas ─────────────────────────────────────────────────────────────
 var latestScores = {};
-function drawScoreGrid(scores, threshold, compensation) {
+
+// BFS 8-connected components over a set of square names (e.g. ["e2","e3"]).
+// Returns array of arrays, each inner array is one clump.
+function findClumps(flaggedArr) {
+  var remaining = {};
+  flaggedArr.forEach(function(sq){ remaining[sq] = true; });
+  var clumps = [];
+  while (Object.keys(remaining).length > 0) {
+    var keys = Object.keys(remaining);
+    var start = keys[0];
+    var clump = [], queue = [start];
+    while (queue.length > 0) {
+      var sq = queue.shift();
+      if (!remaining[sq]) continue;
+      delete remaining[sq];
+      clump.push(sq);
+      var col = sq.charCodeAt(0) - 97;   // 'a'=0
+      var row = parseInt(sq[1]);          // 1–8
+      for (var dc = -1; dc <= 1; dc++) {
+        for (var dr = -1; dr <= 1; dr++) {
+          if (dc === 0 && dr === 0) continue;
+          var nc = col + dc, nr = row + dr;
+          if (nc >= 0 && nc < 8 && nr >= 1 && nr <= 8) {
+            var nsq = 'abcdefgh'[nc] + nr;
+            if (remaining[nsq]) queue.push(nsq);
+          }
+        }
+      }
+    }
+    clumps.push(clump);
+  }
+  return clumps;
+}
+
+// Build a map of: repSet (squares kept as representative) and clumpIdMap.
+// adjScores: {sqName: adjustedScore}  clumpKeep: how many to keep per clump.
+function buildClumpMap(flaggedArr, adjScores, clumpKeep) {
+  var clumps = findClumps(flaggedArr);
+  var repSet = {}, clumpIdMap = {};
+  clumps.forEach(function(clump, ci) {
+    var sorted = clump.slice().sort(function(a, b) {
+      return (adjScores[b] || 0) - (adjScores[a] || 0);
+    });
+    sorted.forEach(function(sq, rank) {
+      clumpIdMap[sq] = ci;
+      if (rank < clumpKeep) repSet[sq] = true;
+    });
+  });
+  return { repSet: repSet, clumpIdMap: clumpIdMap };
+}
+
+function drawScoreGrid(scores, threshold, compensation, clumpEnable, clumpKeep) {
   var canvas = document.getElementById('score-canvas');
   if (!canvas) return;
   var ctx = canvas.getContext('2d');
@@ -1212,22 +1298,38 @@ function drawScoreGrid(scores, threshold, compensation) {
   document.getElementById('median-floor').textContent =
     floor > 0 ? floor.toFixed(1) : '0 (disabled)';
 
-  var flagged = [];
+  // Compute adjusted scores for all squares and build flagged list
+  var adjScores = {}, flagged = [];
+  Object.keys(scores).forEach(function(sqn) {
+    var adj = Math.max(0, (scores[sqn] || 0) - floor);
+    adjScores[sqn] = adj;
+    if (adj > threshold) flagged.push(sqn);
+  });
+
+  // Clump analysis
+  var repSet = null, effectiveFlagged = flagged;
+  if (clumpEnable && flagged.length > 0) {
+    var cm = buildClumpMap(flagged, adjScores, clumpKeep || 1);
+    repSet = cm.repSet;
+    effectiveFlagged = Object.keys(repSet);
+  }
+
   ctx.clearRect(0, 0, sz, sz);
 
   for (var row = 0; row < 8; row++) {
     for (var col = 0; col < 8; col++) {
       var sqName = 'abcdefgh'[col] + (8 - row);
       var raw = scores[sqName] || 0;
-      var adj = Math.max(0, raw - floor);
+      var adj = adjScores[sqName] || 0;
       var isFlagged = adj > threshold;
-      if (isFlagged) flagged.push(sqName);
+      var isRep  = repSet ? !!repSet[sqName]       : isFlagged;
+      var isSat  = isFlagged && repSet && !repSet[sqName]; // suppressed by clump
 
       // Checkerboard base tint
       var isDark = (row + col) % 2 === 1;
       var baseBg = isDark ? 25 : 35;
 
-      // Score heat color: low=dark green, mid=yellow, high=red
+      // Score heat color: low=dark-green, mid=yellow, high=red
       var t = Math.min(1.0, adj / Math.max(1, threshold * 1.5));
       var r, g, b;
       if (t < 0.5) {
@@ -1242,15 +1344,20 @@ function drawScoreGrid(scores, threshold, compensation) {
       ctx.fillStyle = 'rgb('+r+','+g+','+b+')';
       ctx.fillRect(col * sq, row * sq, sq, sq);
 
-      // Flagged: bright green outline
-      if (isFlagged) {
+      // Outlines: green=representative/normal-flagged, orange=satellite suppressed by clump
+      if (isSat) {
+        ctx.strokeStyle = '#ff8c00';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(col * sq + 1.5, row * sq + 1.5, sq - 3, sq - 3);
+      } else if (isRep && isFlagged) {
         ctx.strokeStyle = '#00ff80';
         ctx.lineWidth = 3;
         ctx.strokeRect(col * sq + 1.5, row * sq + 1.5, sq - 3, sq - 3);
       }
 
       // Adjusted score (center)
-      ctx.fillStyle = isFlagged ? '#00ff80' : (adj > threshold * 0.5 ? '#fff' : '#aaa');
+      var lblColor = (isRep && isFlagged) ? '#00ff80' : isSat ? '#ff8c00' : (adj > threshold * 0.5 ? '#fff' : '#aaa');
+      ctx.fillStyle = lblColor;
       ctx.font = 'bold ' + Math.round(sq * 0.28) + 'px monospace';
       ctx.textAlign = 'center';
       ctx.fillText(adj.toFixed(0), col * sq + sq / 2, row * sq + sq / 2 + 2);
@@ -1266,28 +1373,46 @@ function drawScoreGrid(scores, threshold, compensation) {
       ctx.font = Math.round(sq * 0.18) + 'px monospace';
       ctx.textAlign = 'right';
       ctx.fillText(sqName, (col + 1) * sq - 2, (row + 1) * sq - 2);
+
+      // Star mark on representative square when clump mode is active
+      if (clumpEnable && isRep && isFlagged) {
+        ctx.fillStyle = '#ffe066';
+        ctx.font = Math.round(sq * 0.22) + 'px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText('★', (col + 1) * sq - 2, row * sq + Math.round(sq * 0.28));
+      }
     }
   }
 
-  // Threshold legend line at bottom
+  // Legend bar
   ctx.fillStyle = '#21262d';
   ctx.fillRect(0, sz - 14, sz, 14);
   ctx.fillStyle = '#8b949e';
   ctx.font = '10px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText('large = adj score | small = raw | ■green = flagged (adj > '+threshold.toFixed(1)+')', 4, sz - 3);
+  var legend = clumpEnable
+    ? '■green=representative  ■orange=clump-suppressed  ★=kept  thr='+threshold.toFixed(1)
+    : 'large=adj  small=raw  ■green=flagged (adj > '+threshold.toFixed(1)+')';
+  ctx.fillText(legend, 4, sz - 3);
 
   var el = document.getElementById('flagged-squares');
-  el.textContent = flagged.length > 0 ? flagged.join(' ') : '(none)';
+  el.textContent = effectiveFlagged.length > 0 ? effectiveFlagged.join(' ') : '(none)';
+}
+
+function _clumpKeepVal() {
+  var el = document.getElementById('s_clump_keep_per_group');
+  return el ? parseInt(el.value) || 1 : 1;
 }
 
 function pollScores() {
   if (currentTab !== 'diff') return;
   fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
     latestScores = d.scores || {};
-    var thresh = d.display_threshold || 18;
-    var comp   = d.shift_compensation || 1.0;
-    drawScoreGrid(latestScores, thresh, comp);
+    var thresh      = d.display_threshold || 18;
+    var comp        = d.shift_compensation || 1.0;
+    var clumpEnable = !!d.clump_enable;
+    var clumpKeep   = d.clump_keep_per_group || _clumpKeepVal();
+    drawScoreGrid(latestScores, thresh, comp, clumpEnable, clumpKeep);
   }).catch(function(){});
 }
 
@@ -1295,24 +1420,35 @@ function pollScores() {
 function onSlider(k, v) {
   fetch('/api/params',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({[k]:v})});
-  // Immediately redraw score grid if it's a diff param
-  if (k === 'display_threshold' || k === 'shift_compensation') {
+  if (k === 'display_threshold' || k === 'shift_compensation' || k === 'clump_keep_per_group') {
     fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
       latestScores = d.scores || {};
-      drawScoreGrid(latestScores, d.display_threshold || 18, d.shift_compensation || 1.0);
+      drawScoreGrid(latestScores, d.display_threshold || 18, d.shift_compensation || 1.0,
+                    !!d.clump_enable, _clumpKeepVal());
     });
   }
 }
 function onTog(k, checked) {
   fetch('/api/params',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({[k]: checked ? 1 : 0})});
+    body:JSON.stringify({[k]: checked ? 1 : 0})}).then(function() {
+    if (k === 'clump_enable') {
+      fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
+        latestScores = d.scores || {};
+        drawScoreGrid(latestScores, d.display_threshold || 18, d.shift_compensation || 1.0,
+                      checked, _clumpKeepVal());
+      });
+    }
+  });
 }
 
 function applyToDetector() {
   var thresh = parseFloat(document.getElementById('s_display_threshold').value);
   var comp   = parseFloat(document.getElementById('s_shift_compensation').value);
+  var clumpEl = document.getElementById('t_clump_enable');
+  var clumpEnable = clumpEl ? clumpEl.checked : false;
   fetch('/api/detector_params',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({diff_threshold: thresh, shift_compensation: comp})
+    body:JSON.stringify({diff_threshold: thresh, shift_compensation: comp,
+                         clump_enable: clumpEnable, clump_keep_per_group: _clumpKeepVal()})
   }).then(function(r){return r.json();}).then(function(d){
     alert(d.ok ? '✓ ' + d.msg : '✗ ' + d.msg);
   });
@@ -1348,6 +1484,8 @@ function refreshImages() {
     document.getElementById('warp-img').src        = '/api/warp_frame?t=' + t;
   } else if (currentTab === 'diff') {
     document.getElementById('diff-img').src = '/api/diff_frame?t=' + t;
+    var wdi = document.getElementById('warp-diff-img');
+    if (wdi) wdi.src = '/api/warp_frame?t=' + t;
     pollScores();
   }
 }
@@ -1455,6 +1593,14 @@ fetch('/api/params').then(function(r){return r.json();}).then(function(p){
     var vb = document.getElementById('vb_'+k);
     if (el && p[k] !== undefined) { el.value = p[k]; if(vb) vb.textContent = parseFloat(p[k]).toFixed(k==='shift_compensation'?2:1); }
   });
+  var clumpChk = document.getElementById('t_clump_enable');
+  if (clumpChk && p.clump_enable !== undefined) clumpChk.checked = !!p.clump_enable;
+  var clumpKpEl = document.getElementById('s_clump_keep_per_group');
+  var clumpKpVb = document.getElementById('vb_clump_keep');
+  if (clumpKpEl && p.clump_keep_per_group !== undefined) {
+    clumpKpEl.value = p.clump_keep_per_group;
+    if (clumpKpVb) clumpKpVb.textContent = p.clump_keep_per_group;
+  }
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

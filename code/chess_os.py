@@ -39,8 +39,9 @@ except ImportError:
 try:
     import rclpy
     from rclpy.node import Node
-    from std_msgs.msg import String
+    from std_msgs.msg import String, Bool, Float32
     from sensor_msgs.msg import Image
+    from geometry_msgs.msg import Point as RosPoint, Twist
     from std_srvs.srv import Trigger
     HAS_ROS = True
 except ImportError:
@@ -60,17 +61,24 @@ TEST_CATALOGUE: Dict[str, List[str]] = {
     "servo":  ["full"],
     "camera": ["full"],
     "magnet": ["full"],
-    "clock":  ["full", "integration"],
+    "clock":  ["full", "integration", "display"],
     "vision": ["full", "corners", "board", "pieces", "squares", "fen"],
 }
 
-# ── Gantry workspace constants (from CONTEXT.md) ──────────────────────────────
-_BOARD_ORIGIN_X = 200.0   # mm from home to file-a
-_BOARD_ORIGIN_Y = 20.0    # mm from home to rank-1
+# ── Gantry workspace constants ────────────────────────────────────────────────
+# Coordinate system: origin (0,0) at bottom-left (player's perspective)
+# +X = rightward toward h-file / X limit switch (at X_MAX on right side)
+# +Y = backward toward rank 8 / camera tower
+_BOARD_ORIGIN_X = 20.0    # mm: X of a1 center from origin (left margin)
+_BOARD_ORIGIN_Y = 20.0    # mm: Y of rank-1 center from origin (front margin)
 _SQUARE_MM      = 25.0    # mm per chess square
 _STEPS_PER_MM   = 5.0     # full-step mode, 20T pulley
+_X_MAX_MM       = 240.0   # mm: X limit switch position (right side, X home)
 
 def square_to_mm(sq: str):
+    """Convert a square name (e.g. 'e4') to gantry XY in mm.
+    +X = rightward (a=left, h=right), +Y = backward (rank1=front, rank8=back).
+    """
     sq = sq.lower().strip()
     if len(sq) != 2:
         return None, None
@@ -93,25 +101,56 @@ _state = {
     "corners":        [[0.10,0.10],[0.90,0.10],[0.90,0.90],[0.10,0.90]],
     "pieces64":       [""] * 64,
     "detected_fen":   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-    "last_move":      "",    # last detected changed squares e.g. "e2,e4"
+    "last_move":      "",
     # Game manager
     "game_fen":       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "game_state":     "OFFLINE",
     "game_turn":      "",
     "fen_source":     "local",
     "move_history":   [],
+    # Chess clock
+    "white_time":     600.0,
+    "black_time":     600.0,
     # Gantry
     "gantry_x":       0.0,
     "gantry_y":       0.0,
     "gantry_homed":   False,
+    "gantry_status":  "UNKNOWN",
+    "stepper_status": "UNKNOWN",
     # Hardware
     "magnet_engaged": False,
     "limit_x":        False,
     "limit_y":        False,
     "limit_clock":    False,
+    "estop_active":   False,
     # System
     "ros_connected":  False,
 }
+
+# ── Jog state — background thread publishes velocity to /stepper/velocity ───────
+_jog: dict = {"dx": 0.0, "dy": 0.0, "speed": 50.0, "active": False}
+_jog_lock = threading.Lock()
+
+def _jog_loop():
+    """20 Hz loop: publish velocity to /stepper/velocity while jog is active."""
+    while True:
+        time.sleep(0.05)
+        with _jog_lock:
+            if not _jog["active"]:
+                continue
+            dx, dy, spd = _jog["dx"], _jog["dy"], _jog["speed"]
+        node = _ros_node
+        if node is None:
+            continue
+        MAX_VEL = 600.0
+        try:
+            if HAS_ROS:
+                msg = Twist()
+                msg.linear.x = float(dx * MAX_VEL * spd / 100.0)
+                msg.linear.y = float(dy * MAX_VEL * spd / 100.0)
+                node.vel_pub.publish(msg)
+        except Exception:
+            pass
 
 _params = {
     "white_thresh":       200,
@@ -410,20 +449,38 @@ if HAS_ROS:
     class _RosNode(Node):
         def __init__(self):
             super().__init__("chess_os")
-            self.create_subscription(
-                Image, "/camera/image_raw", self._on_img, 10)
-            self.create_subscription(
-                String, "/game_manager/board_fen", self._on_fen, 10)
-            self.create_subscription(
-                String, "/game_manager/state", self._on_state, 10)
-            self.create_subscription(
-                String, "/game_manager/turn", self._on_turn, 10)
-            self.create_subscription(
-                String, "/perception/changed_squares", self._on_changed_squares, 10)
-            self._svc_engage  = self.create_client(Trigger, "/servo/engage")
-            self._svc_release = self.create_client(Trigger, "/servo/release")
-            self._svc_home    = self.create_client(Trigger, "/gantry/home")
-            self._svc_clock   = self.create_client(Trigger, "/clock/hit")
+
+            # ── Subscriptions ──────────────────────────────────────────
+            self.create_subscription(Image,   "/camera/image_raw",           self._on_img,            10)
+            self.create_subscription(String,  "/game_manager/board_fen",     self._on_fen,            10)
+            self.create_subscription(String,  "/game_manager/state",         self._on_state,          10)
+            self.create_subscription(String,  "/game_manager/turn",          self._on_turn,           10)
+            self.create_subscription(String,  "/perception/changed_squares", self._on_changed_squares,10)
+            self.create_subscription(Bool,    "/limit_switch/x_min",         self._on_lim_x,          10)
+            self.create_subscription(Bool,    "/limit_switch/y_min",         self._on_lim_y,          10)
+            self.create_subscription(Bool,    "/limit_switch/clock_hit",     self._on_lim_clock,      10)
+            self.create_subscription(RosPoint,"/gantry/pose",                self._on_gantry_pose,    10)
+            self.create_subscription(String,  "/servo/state",                self._on_servo_state,    10)
+            self.create_subscription(String,  "/gantry/status",              self._on_gantry_status,  10)
+            self.create_subscription(String,  "/stepper/status",             self._on_stepper_status, 10)
+            self.create_subscription(Float32, "/clock/white_time",           self._on_white_time,     10)
+            self.create_subscription(Float32, "/clock/black_time",           self._on_black_time,     10)
+
+            # ── Publishers ─────────────────────────────────────────────
+            self.vel_pub       = self.create_publisher(Twist,    "/stepper/velocity",       10)
+            self.cmd_pub       = self.create_publisher(RosPoint, "/stepper/command",        10)
+            self.estop_pub     = self.create_publisher(Bool,     "/emergency_stop",         10)
+            self.reset_pos_pub = self.create_publisher(Bool,     "/stepper/reset_position", 10)
+
+            # ── Service clients ────────────────────────────────────────
+            self._svc_engage       = self.create_client(Trigger, "/servo/engage")
+            self._svc_release      = self.create_client(Trigger, "/servo/release")
+            self._svc_home         = self.create_client(Trigger, "/gantry/home")
+            self._svc_clock        = self.create_client(Trigger, "/clock/hit")
+            self._svc_clock_reset  = self.create_client(Trigger, "/clock/reset")
+            self._svc_clock_pause  = self.create_client(Trigger, "/clock/pause")
+            self._svc_clock_resume = self.create_client(Trigger, "/clock/resume")
+
             with _lock:
                 _state["ros_connected"] = True
             self.get_logger().info("ChessOS ROS2 node ready")
@@ -480,6 +537,39 @@ if HAS_ROS:
                 _state["last_move"]    = raw
                 _state["last_updated"] = time.time()
                 _state["frame_count"] += 1
+
+        def _on_lim_x(self, msg):
+            with _lock: _state["limit_x"] = msg.data
+
+        def _on_lim_y(self, msg):
+            with _lock: _state["limit_y"] = msg.data
+
+        def _on_lim_clock(self, msg):
+            with _lock: _state["limit_clock"] = msg.data
+
+        def _on_gantry_pose(self, msg):
+            with _lock:
+                _state["gantry_x"] = msg.x
+                _state["gantry_y"] = msg.y
+
+        def _on_servo_state(self, msg):
+            with _lock:
+                _state["magnet_engaged"] = (msg.data == "engaged")
+
+        def _on_gantry_status(self, msg):
+            with _lock:
+                _state["gantry_status"] = msg.data
+                if msg.data == "HOMED":
+                    _state["gantry_homed"] = True
+
+        def _on_stepper_status(self, msg):
+            with _lock: _state["stepper_status"] = msg.data
+
+        def _on_white_time(self, msg):
+            with _lock: _state["white_time"] = msg.data
+
+        def _on_black_time(self, msg):
+            with _lock: _state["black_time"] = msg.data
 
         def call_svc(self, client, timeout: float = 2.0):
             if not client.wait_for_service(timeout_sec=0.5):
@@ -592,13 +682,18 @@ def api_status():
             "game_turn":      _state["game_turn"],
             "last_move":      _state["last_move"],
             "move_history":   _state["move_history"],
+            "white_time":     _state["white_time"],
+            "black_time":     _state["black_time"],
             "limit_x":        _state["limit_x"],
             "limit_y":        _state["limit_y"],
             "limit_clock":    _state["limit_clock"],
             "gantry_x":       _state["gantry_x"],
             "gantry_y":       _state["gantry_y"],
             "gantry_homed":   _state["gantry_homed"],
+            "gantry_status":  _state["gantry_status"],
+            "stepper_status": _state["stepper_status"],
             "magnet_engaged": _state["magnet_engaged"],
+            "estop_active":   _state["estop_active"],
             "ros_connected":  _state["ros_connected"],
         })
 
@@ -708,6 +803,54 @@ def api_gantry_home():
 def api_clock_hit():
     return _call_svc("_svc_clock")
 
+@app.route("/api/clock/reset", methods=["POST"])
+def api_clock_reset():
+    return _call_svc("_svc_clock_reset")
+
+@app.route("/api/clock/pause", methods=["POST"])
+def api_clock_pause():
+    return _call_svc("_svc_clock_pause")
+
+@app.route("/api/clock/resume", methods=["POST"])
+def api_clock_resume():
+    return _call_svc("_svc_clock_resume")
+
+@app.route("/api/hw/estop", methods=["POST"])
+def api_estop():
+    with _lock:
+        _state["estop_active"] = True
+    with _jog_lock:
+        _jog["active"] = False
+    if _ros_node is not None:
+        try:
+            if HAS_ROS:
+                _ros_node.estop_pub.publish(Bool(data=True))
+                _ros_node.vel_pub.publish(Twist())
+        except Exception as e:
+            return jsonify({"ok": False, "msg": str(e)}), 500
+    return jsonify({"ok": True, "msg": "EMERGENCY STOP sent"})
+
+@app.route("/api/hw/estop/clear", methods=["POST"])
+def api_estop_clear():
+    with _lock:
+        _state["estop_active"] = False
+    return jsonify({"ok": True})
+
+@app.route("/api/stepper/reset_position", methods=["POST"])
+def api_stepper_reset_position():
+    """Reset stepper position counter to (0,0). Call after manual homing or calibration."""
+    if _ros_node is None:
+        return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+    try:
+        if HAS_ROS:
+            _ros_node.reset_pos_pub.publish(Bool(data=True))
+        with _lock:
+            _state["gantry_x"] = 0.0
+            _state["gantry_y"] = 0.0
+        return jsonify({"ok": True, "msg": "Position reset to (0, 0)"})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
 @app.route("/api/capture_premove", methods=["POST"])
 def api_capture_premove():
     """Call /perception/capture_premove service to snapshot the current board."""
@@ -730,17 +873,50 @@ def api_capture_premove():
         return jsonify({"ok": False, "message": str(e)}), 500
 
 # ── Gantry jog routes ─────────────────────────────────────────────────────────
-@app.route("/api/gantry/jog", methods=["POST"])
-def api_gantry_jog():
-    data = request.get_json(silent=True) or {}
-    dx   = float(data.get("dx", 0))
-    dy   = float(data.get("dy", 0))
-    with _lock:
-        nx = max(0.0, min(400.0, _state["gantry_x"] + dx))
-        ny = max(0.0, min(400.0, _state["gantry_y"] + dy))
-        _state["gantry_x"] = nx
-        _state["gantry_y"] = ny
-    return jsonify({"ok": True, "x": nx, "y": ny})
+@app.route("/api/gantry/jog/start", methods=["POST"])
+def api_gantry_jog_start():
+    """Start continuous jog. Background thread publishes velocity at 20 Hz."""
+    data  = request.get_json(silent=True) or {}
+    dx    = float(data.get("dx", 0))
+    dy    = float(data.get("dy", 0))
+    speed = float(data.get("speed", 50))
+    with _jog_lock:
+        _jog["dx"]     = max(-1.0, min(1.0, dx))
+        _jog["dy"]     = max(-1.0, min(1.0, dy))
+        _jog["speed"]  = max(5.0, min(100.0, speed))
+        _jog["active"] = True
+    return jsonify({"ok": True})
+
+@app.route("/api/gantry/jog/stop", methods=["POST"])
+def api_gantry_jog_stop():
+    """Stop jogging and send a zero-velocity command immediately."""
+    with _jog_lock:
+        _jog["active"] = False
+    if _ros_node is not None and HAS_ROS:
+        try:
+            _ros_node.vel_pub.publish(Twist())
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+
+@app.route("/api/gantry/step", methods=["POST"])
+def api_gantry_step():
+    """Send a direct point-to-point step command to the stepper driver."""
+    data     = request.get_json(silent=True) or {}
+    steps_a  = int(data.get("steps_a", 0))
+    steps_b  = int(data.get("steps_b", 0))
+    speed    = float(data.get("speed", 50))
+    if _ros_node is None:
+        return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+    try:
+        msg   = RosPoint()
+        msg.x = float(steps_a)
+        msg.y = float(steps_b)
+        msg.z = float(speed)
+        _ros_node.cmd_pub.publish(msg)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
 
 @app.route("/api/gantry/goto", methods=["POST"])
 def api_gantry_goto():
@@ -861,6 +1037,15 @@ a{color:inherit;text-decoration:none}
   transition:color .12s;white-space:nowrap;
 }
 .hbtn:hover{color:var(--text)}
+.estop-btn{
+  background:#6b0a0a;color:#ff6060;border:2px solid #ff3030;
+  padding:5px 14px;border-radius:5px;cursor:pointer;font-size:.72em;
+  font-weight:800;letter-spacing:.08em;white-space:nowrap;
+  transition:all .1s;text-transform:uppercase;
+}
+.estop-btn:hover{background:#900;color:#fff;border-color:#ff0000;box-shadow:0 0 12px #ff000066}
+.estop-btn.fired{background:#ff0000;color:#fff;animation:estop-pulse .4s infinite alternate}
+@keyframes estop-pulse{0%{box-shadow:0 0 6px #ff0000}100%{box-shadow:0 0 20px #ff0000}}
 
 /* ── Layout: debug vs showcase ────────────────────────────────────── */
 #showcase-view{display:none;flex:1;overflow:hidden}
@@ -993,6 +1178,22 @@ body.showcase #debug-view{display:none}
 .btn.warn:hover{background:#3a1e00}
 .btn-row{display:flex;gap:6px;flex-wrap:wrap;padding:4px 0}
 
+/* ── Chess clock ──────────────────────────────────────────────────── */
+.clock-wrap{display:flex;gap:8px;padding:10px 12px 4px;align-items:stretch}
+.clock-side{
+  flex:1;border-radius:6px;padding:10px 8px;text-align:center;
+  border:1px solid var(--border);background:var(--surf2);
+}
+.clock-side.active-clock{border-color:var(--accent);box-shadow:0 0 10px #5ba3ff33}
+.clock-side.low-time{border-color:var(--err);box-shadow:0 0 10px #ff406033;animation:lblink 1s infinite alternate}
+@keyframes lblink{0%{border-color:var(--err)}100%{border-color:#ff8090}}
+.clock-label{font-size:.6em;text-transform:uppercase;letter-spacing:.1em;
+             color:var(--dim);font-weight:700;margin-bottom:6px}
+.clock-time{font-family:monospace;font-size:1.7em;font-weight:700;letter-spacing:.06em;color:#eee}
+.clock-w .clock-time{color:#f5f0d8}
+.clock-b .clock-time{color:#a8a8cc}
+.clock-controls{display:flex;flex-direction:column;justify-content:center;gap:6px;flex-shrink:0}
+
 /* ── FEN inject ───────────────────────────────────────────────────── */
 .fen-row{display:flex;gap:6px;padding:8px 10px}
 .fen-row input{
@@ -1041,7 +1242,7 @@ body.showcase #debug-view{display:none}
   border-radius:4px;padding:5px 8px;font-size:1.1em;font-family:monospace;
   text-align:center;text-transform:lowercase;
 }
-#gantry-canvas{border:1px solid var(--border);border-radius:4px;background:#030308;display:block;margin:auto}
+#gantry-canvas{border:1px solid var(--border);border-radius:4px;background:#030308;display:block;margin:auto;max-width:100%}
 .canvas-wrap{display:flex;justify-content:center;padding:8px 0}
 
 /* ── Hardware ─────────────────────────────────────────────────────── */
@@ -1105,6 +1306,7 @@ body.showcase #debug-view{display:none}
   <button class="hbtn" onclick="triggerReprocess()">&#8635; Reprocess</button>
   <button class="hbtn" onclick="saveCorners()">&#128204; Corners</button>
   <a href="/api/snapshot" class="hbtn">&#128247; Snap</a>
+  <button class="estop-btn" id="estop-btn" onclick="doEstop()">&#9760; E-STOP</button>
 </div>
 
 <!-- ═══════════════ SHOWCASE MODE ═════════════════════════════════ -->
@@ -1251,6 +1453,27 @@ body.showcase #debug-view{display:none}
               </div>
             </div>
           </div>
+
+          <div class="card">
+            <div class="card-hdr">Chess Clock
+              <span style="font-size:.85em;font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)" id="clock-state-lbl"></span>
+            </div>
+            <div class="clock-wrap">
+              <div class="clock-side clock-w" id="clock-white">
+                <div class="clock-label">&#9633; White</div>
+                <div class="clock-time" id="white-time-disp">10:00</div>
+              </div>
+              <div class="clock-controls">
+                <button class="btn" style="font-size:.63em;padding:3px 8px" onclick="clockAct('reset')">Reset</button>
+                <button class="btn" style="font-size:.63em;padding:3px 8px" onclick="clockAct('pause')">Pause</button>
+                <button class="btn" style="font-size:.63em;padding:3px 8px" onclick="clockAct('resume')">Resume</button>
+              </div>
+              <div class="clock-side clock-b" id="clock-black">
+                <div class="clock-label">&#9632; Black</div>
+                <div class="clock-time" id="black-time-disp">10:00</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div><!-- /tab-game -->
@@ -1292,6 +1515,10 @@ body.showcase #debug-view{display:none}
         </div>
       </div>
       <div class="card">
+        <div class="card-hdr">Overlay Toggles</div>
+        <div class="card-body" id="overlay-togs"></div>
+      </div>
+      <div class="card">
         <div class="card-hdr">Warp &amp; Lens Parameters</div>
         <div class="card-body">
           <div class="pg-grid" id="pg-grid"></div>
@@ -1314,38 +1541,42 @@ body.showcase #debug-view{display:none}
             <div class="card-body">
               <div class="pos-readout" id="gantry-pos">X: 0.0 mm &nbsp;|&nbsp; Y: 0.0 mm</div>
               <div class="dpad">
-                <button class="dpad-btn" id="dpad-nw" onmousedown="startJog(-1,1)"
-                  onmouseup="stopJog()" ontouchstart="startJog(-1,1)" ontouchend="stopJog()">&#8598;</button>
-                <button class="dpad-btn" id="dpad-n"  onmousedown="startJog(0,1)"
-                  onmouseup="stopJog()" ontouchstart="startJog(0,1)" ontouchend="stopJog()">&#8593;</button>
-                <button class="dpad-btn" id="dpad-ne" onmousedown="startJog(1,1)"
-                  onmouseup="stopJog()" ontouchstart="startJog(1,1)" ontouchend="stopJog()">&#8599;</button>
-                <button class="dpad-btn" id="dpad-w"  onmousedown="startJog(-1,0)"
-                  onmouseup="stopJog()" ontouchstart="startJog(-1,0)" ontouchend="stopJog()">&#8592;</button>
-                <div class="dpad-btn dpad-center">&#9547;</div>
-                <button class="dpad-btn" id="dpad-e"  onmousedown="startJog(1,0)"
-                  onmouseup="stopJog()" ontouchstart="startJog(1,0)" ontouchend="stopJog()">&#8594;</button>
-                <button class="dpad-btn" id="dpad-sw" onmousedown="startJog(-1,-1)"
-                  onmouseup="stopJog()" ontouchstart="startJog(-1,-1)" ontouchend="stopJog()">&#8601;</button>
-                <button class="dpad-btn" id="dpad-s"  onmousedown="startJog(0,-1)"
-                  onmouseup="stopJog()" ontouchstart="startJog(0,-1)" ontouchend="stopJog()">&#8595;</button>
-                <button class="dpad-btn" id="dpad-se" onmousedown="startJog(1,-1)"
-                  onmouseup="stopJog()" ontouchstart="startJog(1,-1)" ontouchend="stopJog()">&#8600;</button>
-              </div>
-              <div class="sl-row">
-                <label>Step size (mm)</label>
-                <input type="range" id="jog-step" min="1" max="50" value="5"
-                  oninput="document.getElementById('jog-sv').textContent=this.value">
-                <span class="sv" id="jog-sv">5</span>
+                <button class="dpad-btn" id="dpad-nw"
+                  onmousedown="startJog(-1,1)"  onmouseup="stopJog()"
+                  ontouchstart="startJog(-1,1)" ontouchend="stopJog()">&#8598;</button>
+                <button class="dpad-btn" id="dpad-n"
+                  onmousedown="startJog(0,1)"   onmouseup="stopJog()"
+                  ontouchstart="startJog(0,1)"  ontouchend="stopJog()">&#8593;</button>
+                <button class="dpad-btn" id="dpad-ne"
+                  onmousedown="startJog(1,1)"   onmouseup="stopJog()"
+                  ontouchstart="startJog(1,1)"  ontouchend="stopJog()">&#8599;</button>
+                <button class="dpad-btn" id="dpad-w"
+                  onmousedown="startJog(-1,0)"  onmouseup="stopJog()"
+                  ontouchstart="startJog(-1,0)" ontouchend="stopJog()">&#8592;</button>
+                <div class="dpad-btn dpad-center" onclick="stopJog()">&#9632;</div>
+                <button class="dpad-btn" id="dpad-e"
+                  onmousedown="startJog(1,0)"   onmouseup="stopJog()"
+                  ontouchstart="startJog(1,0)"  ontouchend="stopJog()">&#8594;</button>
+                <button class="dpad-btn" id="dpad-sw"
+                  onmousedown="startJog(-1,-1)" onmouseup="stopJog()"
+                  ontouchstart="startJog(-1,-1)" ontouchend="stopJog()">&#8601;</button>
+                <button class="dpad-btn" id="dpad-s"
+                  onmousedown="startJog(0,-1)"  onmouseup="stopJog()"
+                  ontouchstart="startJog(0,-1)" ontouchend="stopJog()">&#8595;</button>
+                <button class="dpad-btn" id="dpad-se"
+                  onmousedown="startJog(1,-1)"  onmouseup="stopJog()"
+                  ontouchstart="startJog(1,-1)" ontouchend="stopJog()">&#8600;</button>
               </div>
               <div class="sl-row">
                 <label>Speed (%)</label>
-                <input type="range" id="jog-speed" min="5" max="100" value="50"
+                <input type="range" id="jog-speed" min="5" max="100" value="30"
                   oninput="document.getElementById('jog-spv').textContent=this.value">
-                <span class="sv" id="jog-spv">50</span>
+                <span class="sv" id="jog-spv">30</span>
               </div>
               <div class="btn-row" style="margin-top:8px">
                 <button class="btn warn" onclick="doHome()">&#8962; Home Gantry</button>
+                <button class="btn" onclick="resetPos()" title="Reset step counter to (0,0)">
+                  &#8635; Reset Pos</button>
                 <span id="home-badge"
                   style="font-size:.72em;color:var(--dim);align-self:center">Not homed</span>
               </div>
@@ -1362,26 +1593,27 @@ body.showcase #debug-view{display:none}
                 <button class="btn primary" onclick="gotoSquare()">Go to Square</button>
               </div>
               <div style="font-size:.68em;color:var(--dim);margin-top:8px;line-height:1.8">
-                a1&ndash;h8 &nbsp;&bull;&nbsp; a1 = (200, 20) mm &nbsp;&bull;&nbsp; step = 25 mm/sq
+                a1&ndash;h8 &nbsp;&bull;&nbsp; a1&approx;(20, 20)mm &nbsp;&bull;&nbsp;
+                +X=right(h-file) &nbsp;&bull;&nbsp; +Y=back(rank8)
               </div>
             </div>
           </div>
           <div class="card">
             <div class="card-hdr">Workspace Visualizer</div>
             <div class="canvas-wrap">
-              <canvas id="gantry-canvas" width="250" height="250"></canvas>
+              <canvas id="gantry-canvas" width="320" height="320"></canvas>
             </div>
           </div>
           <div class="card">
-            <div class="card-hdr">Limit Switches</div>
+            <div class="card-hdr">Limit Switches — Live Status</div>
             <div class="card-body">
-              <div class="stat"><span class="stat-lbl">X Min</span>
+              <div class="stat"><span class="stat-lbl">X Home (Right&nbsp;/&nbsp;X&#8209;Max)</span>
                 <span class="stat-val">
                   <span class="indicator" id="lim-x"></span>
                   <span id="lim-x-t">&#8212;</span>
                 </span>
               </div>
-              <div class="stat"><span class="stat-lbl">Y Min</span>
+              <div class="stat"><span class="stat-lbl">Y Home (Front&nbsp;/&nbsp;Y&#8209;Min)</span>
                 <span class="stat-val">
                   <span class="indicator" id="lim-y"></span>
                   <span id="lim-y-t">&#8212;</span>
@@ -1392,6 +1624,10 @@ body.showcase #debug-view{display:none}
                   <span class="indicator" id="lim-c"></span>
                   <span id="lim-c-t">&#8212;</span>
                 </span>
+              </div>
+              <div style="font-size:.6em;color:var(--dim);margin-top:8px;line-height:1.6">
+                X Home triggers when gantry reaches rightmost position (h-file side).<br>
+                Y Home triggers when gantry reaches frontmost position (player side).
               </div>
             </div>
           </div>
@@ -1437,24 +1673,69 @@ body.showcase #debug-view{display:none}
           <div class="hw-msg" id="hw-home-msg">&#8212;</div>
         </div>
 
+        <div class="hw-block">
+          <div class="hw-title">Stepper Status</div>
+          <div style="font-family:monospace;font-size:.9em;margin:8px 0">
+            <span id="hw-stepper-status" class="badge b-offline">UNKNOWN</span>
+          </div>
+          <div style="font-size:.65em;color:var(--dim);margin-top:6px">
+            Gantry: <span id="hw-gantry-status" style="color:var(--text)">—</span>
+          </div>
+          <div style="font-size:.65em;color:var(--dim);margin-top:2px">
+            Homed: <span id="hw-homed-status" class="ok">—</span>
+          </div>
+        </div>
+
         <div class="hw-block" style="grid-column:1/-1">
-          <div class="hw-title">Limit Switches (Live)</div>
+          <div class="hw-title">Limit Switches — Live</div>
           <div class="lim-row">
             <div class="lim-item">
               <div class="indicator" id="hw-lim-x"
                 style="width:20px;height:20px;margin:0 auto"></div>
-              <div class="lbl">X Min</div>
+              <div class="lbl">X Home</div>
+              <div style="font-size:.6em;color:var(--dim)">Right / X-Max</div>
             </div>
             <div class="lim-item">
               <div class="indicator" id="hw-lim-y"
                 style="width:20px;height:20px;margin:0 auto"></div>
-              <div class="lbl">Y Min</div>
+              <div class="lbl">Y Home</div>
+              <div style="font-size:.6em;color:var(--dim)">Front / Y-Min</div>
             </div>
             <div class="lim-item">
               <div class="indicator" id="hw-lim-c"
                 style="width:20px;height:20px;margin:0 auto"></div>
               <div class="lbl">Clock Hit</div>
+              <div style="font-size:.6em;color:var(--dim)">Button sensor</div>
             </div>
+          </div>
+        </div>
+
+        <div class="hw-block" style="grid-column:1/-1">
+          <div class="hw-title">Direct Stepper Command (Debug)</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;margin-top:8px">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+              <span style="font-size:.62em;color:var(--dim)">Steps A</span>
+              <input id="step-a" type="number" value="100" step="50"
+                style="width:72px;background:#040408;color:var(--text);border:1px solid var(--border);
+                       border-radius:4px;padding:4px 6px;font-family:monospace;font-size:.8em;text-align:center">
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+              <span style="font-size:.62em;color:var(--dim)">Steps B</span>
+              <input id="step-b" type="number" value="100" step="50"
+                style="width:72px;background:#040408;color:var(--text);border:1px solid var(--border);
+                       border-radius:4px;padding:4px 6px;font-family:monospace;font-size:.8em;text-align:center">
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+              <span style="font-size:.62em;color:var(--dim)">Speed %</span>
+              <input id="step-spd" type="number" value="35" min="5" max="100"
+                style="width:56px;background:#040408;color:var(--text);border:1px solid var(--border);
+                       border-radius:4px;padding:4px 6px;font-family:monospace;font-size:.8em;text-align:center">
+            </div>
+            <button class="btn primary" onclick="sendStep()" style="margin-top:12px">&#9654; Send</button>
+            <button class="btn" onclick="sendStep(0,0)" style="margin-top:12px">&#9632; Stop</button>
+          </div>
+          <div style="font-size:.62em;color:var(--dim);margin-top:8px;line-height:1.5;text-align:center">
+            Raw motor A/B steps. CoreXY: +X = A+,B&minus; &nbsp;|&nbsp; +Y = A+,B+
           </div>
         </div>
 
@@ -1517,7 +1798,7 @@ var handles    = [];
 var dragging   = null;
 var curParams  = {};
 var heldKeys   = {};
-var jogTimer   = null;
+var jogTimer   = null;  // unused — kept for legacy safety
 var jogDx      = 0;
 var jogDy      = 0;
 var testSSE    = null;
@@ -1525,8 +1806,9 @@ var catalogue  = {};
 var board      = null;
 var scBoard    = null;
 
-// Workspace constants (must match Python)
-var BO_X = 200, BO_Y = 20, SQ = 25;
+// Workspace constants — origin at bottom-left, +X=rightward, +Y=backward
+// a1 = (BO_X, BO_Y), h8 = (BO_X+7*SQ, BO_Y+7*SQ)
+var BO_X = 20, BO_Y = 20, SQ = 25, X_MAX = 240;
 
 // ── Mode ──────────────────────────────────────────────────────────
 function setMode(m) {
@@ -1744,29 +2026,18 @@ function capturePreMove() {
 }
 
 // ── Gantry controls ───────────────────────────────────────────────
-function getStep() { return +document.getElementById('jog-step').value; }
+function getJogSpeed() { return +document.getElementById('jog-speed').value; }
 
-function sendJog(dx, dy) {
-  var step = getStep();
-  fetch('/api/gantry/jog',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({dx:dx*step, dy:dy*step})
-  }).then(function(r){return r.json();}).then(function(d){
-    if (d.ok) setGantryPos(d.x, d.y);
-  });
-}
-
-// Joystick button hold: press starts timer, release stops
 function startJog(dx, dy) {
   jogDx = dx; jogDy = dy;
-  sendJog(dx, dy);
-  if (!jogTimer) {
-    jogTimer = setInterval(function(){ sendJog(jogDx, jogDy); }, 150);
-  }
+  fetch('/api/gantry/jog/start', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dx: dx, dy: dy, speed: getJogSpeed()})
+  });
 }
 function stopJog() {
-  if (jogTimer) { clearInterval(jogTimer); jogTimer = null; }
   jogDx = 0; jogDy = 0;
+  fetch('/api/gantry/jog/stop', {method:'POST'});
 }
 
 // Arrow key hold-to-jog
@@ -1777,7 +2048,6 @@ document.addEventListener('keydown', function(e) {
   e.preventDefault();
   if (heldKeys[e.key]) return;
   heldKeys[e.key] = true;
-  // Compute combined direction
   var dx = (heldKeys.ArrowRight ? 1 : 0) - (heldKeys.ArrowLeft ? 1 : 0);
   var dy = (heldKeys.ArrowUp    ? 1 : 0) - (heldKeys.ArrowDown ? 1 : 0);
   startJog(dx, dy);
@@ -1785,9 +2055,7 @@ document.addEventListener('keydown', function(e) {
 document.addEventListener('keyup', function(e) {
   if (!heldKeys[e.key]) return;
   delete heldKeys[e.key];
-  if (Object.keys(heldKeys).length === 0) {
-    stopJog();
-  }
+  if (Object.keys(heldKeys).length === 0) stopJog();
 });
 document.addEventListener('blur', function() { heldKeys = {}; stopJog(); });
 
@@ -1804,6 +2072,9 @@ function gotoSquare() {
 }
 
 function doHome() {
+  var badge = document.getElementById('home-badge');
+  badge.textContent = '⟳ Homing…';
+  badge.style.color = 'var(--warn)';
   fetch('/api/hw/gantry/home',{method:'POST'})
     .then(function(r){return r.json();})
     .then(function(d){
@@ -1811,9 +2082,24 @@ function doHome() {
       document.getElementById('hw-home-msg').textContent = msg;
       if (d.ok) {
         setGantryPos(0, 0);
-        document.getElementById('home-badge').textContent = '✓ Homed';
-        document.getElementById('home-badge').style.color = 'var(--ok)';
+        badge.textContent = '✓ Homed';
+        badge.style.color = 'var(--ok)';
+      } else {
+        badge.textContent = '✗ Failed';
+        badge.style.color = 'var(--err)';
       }
+    }).catch(function(){
+      badge.textContent = '✗ Error';
+      badge.style.color = 'var(--err)';
+    });
+}
+
+function resetPos() {
+  fetch('/api/stepper/reset_position', {method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if (d.ok) { setGantryPos(0, 0); }
+      else { alert('Reset failed: '+(d.msg||'unknown')); }
     }).catch(function(){});
 }
 
@@ -1824,31 +2110,52 @@ function setGantryPos(x, y) {
 }
 
 // ── Gantry workspace canvas ───────────────────────────────────────
+// Coordinate system: origin bottom-left, +X right, +Y up
+// Canvas maps mm→px: px = pad + mm*sc, py = H-pad - mm*sc
 function drawCanvas(gx, gy) {
   var canvas = document.getElementById('gantry-canvas');
   if (!canvas) return;
   var ctx = canvas.getContext('2d');
-  var W = 250, H = 250, pad = 22;
-  var ws = 200; // workspace mm
-  var sc = (W - 2*pad) / ws;
+  var W = 320, H = 320, pad = 30;
+  // Scale: workspace is X_MAX mm wide (full travel)
+  var sc = (W - 2*pad) / X_MAX;
 
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#020206';
   ctx.fillRect(0, 0, W, H);
 
+  // Workspace border (full travel area)
+  ctx.strokeStyle = '#1a1a2e';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(pad, pad, W-2*pad, H-2*pad);
+
+  // X limit indicator (right side = X home)
+  ctx.fillStyle = '#1e0a0a';
+  ctx.fillRect(W-pad-2, pad, 2, H-2*pad);
+  ctx.fillStyle = '#ff4060';
+  ctx.font = '7px monospace';
+  ctx.fillText('X HOME', W-pad+3, pad+12);
+
+  // Y limit indicator (bottom = Y home)
+  ctx.fillStyle = '#0a1e0a';
+  ctx.fillRect(pad, H-pad, W-2*pad, 2);
+  ctx.fillStyle = '#3fca6e';
+  ctx.font = '7px monospace';
+  ctx.fillText('Y HOME', pad+2, H-pad+10);
+
   // Chess square grid
   var sqpx = SQ * sc;
   for (var r = 0; r < 8; r++) {
     for (var c = 0; c < 8; c++) {
-      var px = pad + BO_X*sc + c*sqpx;
-      var py = H - pad - BO_Y*sc - (r+1)*sqpx;
+      var px = pad + (BO_X + c*SQ)*sc;
+      var py = H - pad - (BO_Y + (r+1)*SQ)*sc;
       ctx.fillStyle = (r+c)%2===0 ? '#1a1a3e' : '#0d0d1e';
       ctx.fillRect(px, py, sqpx, sqpx);
     }
   }
 
   // Board border
-  ctx.strokeStyle = '#2a2a5a';
+  ctx.strokeStyle = '#3a3a7a';
   ctx.lineWidth = 1.5;
   ctx.strokeRect(
     pad + BO_X*sc,
@@ -1856,16 +2163,21 @@ function drawCanvas(gx, gy) {
     8*sqpx, 8*sqpx
   );
 
-  // Corner labels
-  ctx.fillStyle = '#30305a';
-  ctx.font = '8px monospace';
+  // Corner square labels
+  ctx.fillStyle = '#40407a';
+  ctx.font = '7px monospace';
   ctx.fillText('a1', pad+BO_X*sc+2, H-pad-BO_Y*sc-2);
-  ctx.fillText('h8', pad+(BO_X+7*SQ)*sc+2, H-pad-(BO_Y+7*SQ)*sc-2);
+  ctx.fillText('h8', pad+(BO_X+7*SQ)*sc+2, H-pad-(BO_Y+7*SQ)*sc-12);
 
-  // Workspace border
-  ctx.strokeStyle = '#1e1e38';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(pad, pad, W-2*pad, H-2*pad);
+  // Axis tick labels (0, X_MAX)
+  ctx.fillStyle = '#30305a';
+  ctx.font = '7px monospace';
+  ctx.fillText('0', pad-6, H-pad+10);
+  ctx.fillText(X_MAX+'mm', W-pad-16, H-pad+10);
+
+  // Origin marker
+  ctx.fillStyle = '#3a3a6a';
+  ctx.fillRect(pad-1, H-pad-1, 3, 3);
 
   // Current position dot + crosshair
   if (gx === undefined) {
@@ -1874,18 +2186,56 @@ function drawCanvas(gx, gy) {
   }
   var cx = pad + gx*sc;
   var cy = H - pad - gy*sc;
+
+  // Clamp to canvas
+  cx = Math.max(pad, Math.min(W-pad, cx));
+  cy = Math.max(pad, Math.min(H-pad, cy));
+
   ctx.strokeStyle = '#00d4aa';
   ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(cx-9,cy); ctx.lineTo(cx+9,cy); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx,cy-9); ctx.lineTo(cx,cy+9); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx-10,cy); ctx.lineTo(cx+10,cy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx,cy-10); ctx.lineTo(cx,cy+10); ctx.stroke();
   ctx.fillStyle = '#00d4aa';
-  ctx.beginPath(); ctx.arc(cx, cy, 3.5, 0, 2*Math.PI); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 2*Math.PI); ctx.fill();
 
-  // Axes labels
-  ctx.fillStyle = '#2a2a4a';
+  // Position readout on canvas
+  ctx.fillStyle = '#00d4aa';
   ctx.font = '9px monospace';
-  ctx.fillText('X', W-pad+2, H-pad);
-  ctx.fillText('Y', pad, pad-4);
+  ctx.fillText('('+gx.toFixed(0)+', '+gy.toFixed(0)+')', pad+2, pad-6);
+}
+
+// ── Emergency stop ────────────────────────────────────────────────
+function doEstop() {
+  fetch('/api/hw/estop', {method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var btn = document.getElementById('estop-btn');
+      if (d.ok) {
+        btn.classList.add('fired');
+        btn.textContent = '⚠ STOPPED';
+        setTimeout(function(){
+          btn.classList.remove('fired');
+          btn.textContent = '☠ E-STOP';
+          fetch('/api/hw/estop/clear', {method:'POST'});
+        }, 3000);
+      }
+    }).catch(function(){});
+}
+
+// ── Clock controls ────────────────────────────────────────────────
+function clockAct(action) {
+  fetch('/api/clock/'+action, {method:'POST'}).catch(function(){});
+}
+
+// ── Direct step command ───────────────────────────────────────────
+function sendStep(a, b) {
+  var sa = a !== undefined ? a : +document.getElementById('step-a').value;
+  var sb = b !== undefined ? b : +document.getElementById('step-b').value;
+  var sp = +document.getElementById('step-spd').value;
+  fetch('/api/gantry/step', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({steps_a: sa, steps_b: sb, speed: sp})
+  }).catch(function(){});
 }
 
 // ── Hardware buttons ──────────────────────────────────────────────
@@ -2127,10 +2477,63 @@ function pollStatus() {
     var mt = document.getElementById('hw-magnet-t');
     if (mt) mt.textContent = d.magnet_engaged ? 'Engaged' : 'Released';
 
+    // Stepper / gantry status
+    var ssEl = document.getElementById('hw-stepper-status');
+    if (ssEl) {
+      ssEl.textContent = d.stepper_status || 'UNKNOWN';
+      ssEl.className = 'badge ' + (d.stepper_status==='MOVING' ? 'b-executing_move' :
+                                   d.stepper_status==='IDLE'   ? 'b-idle' : 'b-offline');
+    }
+    var gsEl = document.getElementById('hw-gantry-status');
+    if (gsEl) gsEl.textContent = d.gantry_status || '—';
+    var hoEl = document.getElementById('hw-homed-status');
+    if (hoEl) {
+      hoEl.textContent = d.gantry_homed ? '✓ Yes' : '✗ No';
+      hoEl.className   = d.gantry_homed ? 'ok' : 'warn';
+    }
+
+    // Chess clock
+    updateClock(d.white_time, d.black_time, d.game_turn, d.game_state);
+
+    // E-stop visual state
+    if (d.estop_active) {
+      document.getElementById('estop-btn').classList.add('fired');
+    }
+
   }).catch(function(){
     setPill('pill-cam', false);
     setPill('pill-ros', false);
   });
+}
+
+function fmtTime(s) {
+  if (s === undefined || s === null) return '--:--';
+  var t = Math.max(0, Math.round(s));
+  var m = Math.floor(t / 60);
+  var sec = t % 60;
+  return (m < 10 ? '0' : '') + m + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+function updateClock(wt, bt, turn, state) {
+  var wEl  = document.getElementById('white-time-disp');
+  var bEl  = document.getElementById('black-time-disp');
+  var wBox = document.getElementById('clock-white');
+  var bBox = document.getElementById('clock-black');
+  var lbl  = document.getElementById('clock-state-lbl');
+  if (!wEl) return;
+
+  wEl.textContent = fmtTime(wt);
+  bEl.textContent = fmtTime(bt);
+
+  var wActive = (turn||'').toUpperCase() === 'WHITE' && state !== 'STOPPED' && state !== 'IDLE' && state !== 'OFFLINE';
+  var bActive = (turn||'').toUpperCase() === 'BLACK' && state !== 'STOPPED' && state !== 'IDLE' && state !== 'OFFLINE';
+
+  wBox.classList.toggle('active-clock', wActive);
+  bBox.classList.toggle('active-clock', bActive);
+  wBox.classList.toggle('low-time', wt !== undefined && wt < 30 && wActive);
+  bBox.classList.toggle('low-time', bt !== undefined && bt < 30 && bActive);
+
+  if (lbl) lbl.textContent = (state && state !== 'OFFLINE') ? '— ' + state : '';
 }
 
 function setPill(id, live) {
@@ -2195,8 +2598,9 @@ def main():
         else:
             print(f"  ⚠  Cannot load: {args.image}")
 
-    # Vision processing loop (always)
+    # Background threads
     threading.Thread(target=_vision_loop, daemon=True).start()
+    threading.Thread(target=_jog_loop,    daemon=True).start()
 
     # ROS2 or OpenCV camera
     if not args.no_ros:

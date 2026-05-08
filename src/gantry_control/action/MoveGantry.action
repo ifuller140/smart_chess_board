@@ -1,6 +1,6 @@
 # Goal
-float32 x_mm
-float32 y_mm
+float32 target_x_mm
+float32 target_y_mm
 float32 speed_mm_s
 bool engage_magnet  # if true, lower magnet and pick
 bool release_magnet # release after move

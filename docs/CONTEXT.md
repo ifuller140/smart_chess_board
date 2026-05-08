@@ -64,24 +64,31 @@ Build an automated chess board that can:
 │  │                                           │  │
 │  └───────────────────────────────────────────┘  │
 │                                                  │
-│  [Y-MIN limit]                     [X-MIN limit] │
-│   (bottom of rail)                 (right side)  │
+│  [Y home limit]                    [X home limit] │
+│   (front, Y=0, player side)        (right, X_MAX) │
 └─────────────────────────────────────────────────┘
      ↑ Camera mounted above (looking down)
      ↑ Chess clock nearby with clock-hit limit switch
 ```
 
+**Player sits at the FRONT (bottom). Camera/electronics tower is at the BACK (top).**
+**a-file is on the player's LEFT. h-file is on the player's RIGHT.**
+
 ### Coordinate System
 
-- **Origin (0,0)**: Bottom-**right** corner after homing — this is where BOTH limit switches are triggered (X-MIN at far right, Y-MIN at bottom of rail)
-- **+X direction**: LEFT (toward a-file / rank column a). The gantry moves LEFT when X increases.
-- **+Y direction**: UP / BACKWARD (toward Black's side, rank 8). The gantry moves toward the back of the board when Y increases.
+- **Origin (0,0)**: Bottom-**left** corner — the logical home position after homing sequence completes
+- **+X direction**: RIGHT (toward h-file). X increases moving right away from the a-file.
+- **+Y direction**: BACKWARD / UP (toward Black's side, rank 8). Y increases moving away from the player.
 - **Z-axis**: Servo arm raises and lowers the **permanent magnet** below the board
 
+**Limit switches:**
+- **X limit** (`/limit_switch/x_min`): at **X_MAX** (far right, h-file side). Homing drives in **+X** until this triggers. After contact, gantry backs off and creeps to confirm position, then drives back LEFT to X=0 (origin).
+- **Y limit** (`/limit_switch/y_min`): at **Y=0** (front/bottom, player's side). Homing drives in **−Y** until this triggers.
+
 > [!IMPORTANT]
-> The X-MIN limit switch is at the FAR RIGHT (motor A side). This means after homing, the
-> gantry is in the corner at (0,0) and must move POSITIVE X to reach square h1, then more
-> positive X to reach a1. Square a1 is approximately **(200mm, 20mm)** from homed origin.
+> After homing, the gantry is physically at (X_MAX, 0) — right side, front. It then drives
+> leftward to X=0 to establish the bottom-left origin. Square **a1 ≈ (20mm, 20mm)** from
+> origin. Square **h1 ≈ (195mm, 20mm)**. Board spans X: 20→195mm, Y: 20→195mm.
 
 ## Game Flow State Machine
 
@@ -129,17 +136,17 @@ Each chess square maps to physical X/Y coordinates:
 
 | Square | X (mm) | Y (mm) | Notes |
 |--------|--------|--------|-------|
-| a1 | 200 | 20 | Closest to white's left; 200mm from origin |
-| h1 | 25 | 20 | Near origin (right side); first rank |
-| a8 | 200 | 195 | Far left, far back (Black's queen side) |
-| h8 | 25 | 195 | Near X-origin, far back (Black's king side) |
+| a1 | ~20 | ~20 | Player's near-left corner; closest to origin |
+| h1 | ~195 | ~20 | Player's near-right corner; near X limit |
+| a8 | ~20 | ~195 | Far-left back corner (Black's queen-side rook) |
+| h8 | ~195 | ~195 | Far-right back corner (Black's king-side rook) |
 | Square size | 25mm | 25mm | **Must verify with physical measurement** |
 
 > [!NOTE]
-> These values are based on user-measured estimates (a1 ≈ 200mm X, 20mm Y from origin).
-> Run the hardware `gantry/square_navigation` test to verify each square.
-> Formula: `square_x = 200 - (col_index * 25)`, `square_y = 20 + (rank_index * 25)`
+> These values are estimated. Run the hardware `gantry/square_navigation` test to verify.
+> Formula: `square_x = board_origin_x + (col_index * 25)`, `square_y = board_origin_y + (rank_index * 25)`
 > where col a=0, b=1...h=7 and rank 1=0, 2=1...8=7.
+> The defaults (board_origin_x=20, board_origin_y=20) need calibration on the physical board.
 
 **Graveyard positions** (behind black's pieces, rank 8 side):
 - All captured pieces (white and black): behind rank 8, Y ≈ 215mm

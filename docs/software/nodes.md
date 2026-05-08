@@ -415,8 +415,8 @@
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `square_size_mm` | float | 25.0 | Board square width in mm |
-| `board_origin_x_mm` | float | 200.0 | X of a1 square center (mm) |
-| `board_origin_y_mm` | float | 20.0 | Y of a1 square center (mm) |
+| `board_origin_x_mm` | float | 20.0 | X of a1 square center from origin (mm) — calibrate on hardware |
+| `board_origin_y_mm` | float | 20.0 | Y of a1 square center from origin (mm) — calibrate on hardware |
 | `graveyard_origin_x_mm` | float | 210.0 | Graveyard zone X origin |
 | `graveyard_origin_y_mm` | float | 215.0 | Graveyard zone Y origin |
 | `graveyard_slot_spacing_mm` | float | 22.0 | Spacing between graveyard slots |
@@ -425,7 +425,7 @@
 
 ### homing_node
 
-**Purpose**: Home the gantry to the bottom-right origin (X-min + Y-min limit switches).
+**Purpose**: Home the gantry to the bottom-left origin (0,0). Sequence: home Y (front limit at Y=0), home X (right limit at X_MAX), drive X back to X=0, reset stepper position counter.
 
 | Property | Value |
 |----------|-------|

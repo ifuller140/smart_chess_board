@@ -48,6 +48,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CompressedImage
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from rcl_interfaces.msg import SetParametersResult
 
 from chess_interfaces.msg import BoardState
 
@@ -62,12 +63,16 @@ class PieceDetectorNode(Node):
         self.declare_parameter('warp_size',               400)
         self.declare_parameter('detection_hz',            2.0)
         self.declare_parameter('global_shift_compensation', 1.0)
+        self.declare_parameter('clump_enable',              False)
+        self.declare_parameter('clump_keep_per_group',      1)
 
         self._diff_threshold     = float(self.get_parameter('diff_threshold').value)
         self._premove_count      = int(self.get_parameter('premove_avg_count').value)
         self._warp_size          = int(self.get_parameter('warp_size').value)
         det_hz                   = float(self.get_parameter('detection_hz').value)
         self._shift_compensation = float(self.get_parameter('global_shift_compensation').value)
+        self._clump_enable       = bool(self.get_parameter('clump_enable').value)
+        self._clump_keep         = int(self.get_parameter('clump_keep_per_group').value)
 
         self._latest_msg:     Optional[object]      = None
         self._latest_image:   Optional[np.ndarray]  = None
@@ -96,12 +101,14 @@ class PieceDetectorNode(Node):
             Trigger, '/perception/capture_premove',
             self._srv_capture_premove)
 
+        self.add_on_set_parameters_callback(self._on_params_changed)
         self.create_timer(1.0 / det_hz, self._detect_tick)
 
         self.get_logger().info(
             f'Piece Detector ready — frame-diff mode '
             f'(diff_threshold={self._diff_threshold}, '
             f'shift_compensation={self._shift_compensation}, '
+            f'clump_enable={self._clump_enable}, '
             f'detection_hz={det_hz:.1f})'
         )
 
@@ -162,6 +169,8 @@ class PieceDetectorNode(Node):
             adjusted = square_scores
 
         changed = [sq for sq, score in adjusted if score > self._diff_threshold]
+        if self._clump_enable and changed:
+            changed = self._apply_clump_filter(changed, adjusted)
 
         sq_names = ','.join(chess.square_name(sq) for sq in changed)
         self._changed_pub.publish(String(data=sq_names))
@@ -207,6 +216,63 @@ class PieceDetectorNode(Node):
         response.message = msg
         self.get_logger().info(msg)
         return response
+
+    # ── Parameter callback ─────────────────────────────────────────────────────
+
+    def _on_params_changed(self, params):
+        for p in params:
+            if p.name == 'diff_threshold':
+                self._diff_threshold = float(p.value)
+            elif p.name == 'global_shift_compensation':
+                self._shift_compensation = float(p.value)
+            elif p.name == 'clump_enable':
+                self._clump_enable = bool(p.value)
+            elif p.name == 'clump_keep_per_group':
+                self._clump_keep = int(p.value)
+        return SetParametersResult(successful=True)
+
+    # ── Clump Filter ───────────────────────────────────────────────────────────
+
+    def _apply_clump_filter(self, changed: list, scores: list) -> list:
+        """Group adjacent flagged squares; keep only top _clump_keep per group.
+
+        Perspective warp causes a piece at the far end of the board to bleed
+        across multiple vertically-adjacent squares.  BFS 8-connectivity groups
+        these into a single clump and keeps only the highest-scoring squares,
+        dramatically reducing false detections from bleed while preserving
+        isolated moves.  NOTE: castling spans 4 adjacent squares so it forms
+        one clump — set clump_keep >= 4 or disable clump mode when castling
+        detection is required.
+        """
+        score_map = {sq: score for sq, score in scores}
+        remaining = set(changed)
+        clumps = []
+        while remaining:
+            start = next(iter(remaining))
+            clump, queue, seen = [], [start], set()
+            while queue:
+                sq = queue.pop(0)
+                if sq in seen:
+                    continue
+                seen.add(sq)
+                remaining.discard(sq)
+                clump.append(sq)
+                f, r = chess.square_file(sq), chess.square_rank(sq)
+                for df in (-1, 0, 1):
+                    for dr in (-1, 0, 1):
+                        if df == 0 and dr == 0:
+                            continue
+                        nf, nr = f + df, r + dr
+                        if 0 <= nf < 8 and 0 <= nr < 8:
+                            nsq = chess.square(nf, nr)
+                            if nsq in remaining:
+                                queue.append(nsq)
+            clumps.append(clump)
+        result = []
+        for clump in clumps:
+            sorted_clump = sorted(clump, key=lambda sq: score_map.get(sq, 0.0), reverse=True)
+            result.extend(sorted_clump[:self._clump_keep])
+        return result
 
     # ── Warp ──────────────────────────────────────────────────────────────────
 

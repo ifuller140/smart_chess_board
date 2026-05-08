@@ -26,12 +26,20 @@
 ## 📋 Comprehensive To-Do List
 
 ### 🤖 Hardware Agent (Focus: `chess_hw_interface`, `gantry_control`)
-- [ ] **Steppers**: Implement `stepper_driver_node.py` (Currently `pass`)
-- [ ] **Servos**: Implement `servo_node.py`
-- [ ] **Limits**: Implement `limit_switch_node.py`
-- [ ] **Kinematics**: Implement `gantry_kinematics_node.py` (CoreXY math)
-- [ ] **Motion**: Implement `motion_planner_node.py` (Path planning)
-- [ ] **Config**: verify `pins.yaml` against actual hardware
+- [x] **Steppers**: `stepper_driver_node.py` — pigpio DMA wave chains, velocity + point-to-point modes
+- [x] **Servos**: `servo_node.py` — engage/release magnet, hardware PWM via pigpio
+- [x] **Limits**: `limit_switch_node.py` — active-HIGH debounced, publishes to `/limit_switch/*`
+- [x] **Kinematics**: `gantry_kinematics_node.py` — CoreXY, trapezoidal velocity profile, action server
+- [x] **Motion**: `motion_planner_node.py` — BFS corner routing, captures, castling, en passant, promotion
+- [x] **Homing**: `homing_node.py` — Prusa-style (fast→backoff→precision), drives to origin (0,0), resets stepper counter
+- [x] **Clock servo**: `clock_servo_node.py` — pigpio PWM, `/clock/hit` service
+- [x] **Clock display**: `clock_display_node.py` — dual TM1637, 2Hz refresh
+- [x] **Config**: `pins.yaml` verified against wiring; BCM pin numbers confirmed
+- [ ] **Calibration**: Measure and set `x_max_mm`, `board_origin_x/y_mm` on physical hardware
+- [ ] **Corner routing**: Test on actual board with pieces — verify BFS fallback behavior
+
+> **Coordinate system (2026-05-08)**: Origin (0,0) = bottom-left. +X = rightward (a→h). +Y = backward (rank1→rank8).  
+> X limit at X_MAX (right/h-file side). Y limit at Y=0 (front/player side).
 
 ### 🧠 Logic Agent (Focus: `chess_logic`, `chess_engine`)
 - [ ] **Game Manager**:
@@ -59,7 +67,7 @@
 |------|---------|
 | `src/chess_logic/.../game_manager_node.py` | `In a real app, we'd compare this msg.fen...` |
 | `src/chess_logic/.../game_manager_node.py` | `In reality, we'd use the NEW FEN from perception` |
-| `src/gantry_control/.../homing_node.py` | `pass` (Empty implementation) |
+| `src/gantry_control/.../homing_node.py` | ✅ Fully implemented — Prusa-style homing with corrected X direction |
 | `All package.xml files` | `TODO: License declaration` |
 
 ---
@@ -71,4 +79,4 @@ To start working on an area, adopt a **Persona**:
 - **"I am the Hardware Agent"**: I will ignore game logic and focus purely on making motors spin and reading sensors.
 - **"I am the Logic Agent"**: I will mock hardware and focus on chess rules and state machines.
 
-_Last Updated: 2026-01-21_
+_Last Updated: 2026-05-08_

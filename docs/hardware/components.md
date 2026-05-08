@@ -330,9 +330,14 @@ When switch is released: GPIO reads LOW (pulled down)
 ### Positions
 | Switch | Location | Purpose |
 |--------|----------|---------|
-| X-MIN | **Far right** of X rail | X-axis home (origin is at right, +X goes left) |
-| Y-MIN | **Bottom** of Y rail (nearest player) | Y-axis home (origin is at bottom, +Y goes backward toward black) |
+| X-HOME | **Far right** of X rail (h-file side) | X-axis homing reference. Limit is at X_MAX. Homing drives +X (rightward) until triggered; origin (X=0) is at far LEFT (a-file side). |
+| Y-HOME | **Front/bottom** of Y rail (player's side) | Y-axis homing reference. Limit is at Y=0 (minimum). Homing drives −Y (toward player) until triggered. |
 | CLOCK | Near chess clock | Detect player has completed move |
+
+> [!NOTE]
+> Coordinate origin (0,0) is at **bottom-left** (a-file side, player's side) — NOT at the
+> limit switch corner. After homing touches both limits, the gantry drives leftward to X=0
+> to establish the logical origin at bottom-left.
 
 ---
 
