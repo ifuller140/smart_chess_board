@@ -4,13 +4,35 @@ An automated chess board that plays physical chess against a human opponent usin
 
 > **Agents / Claude Code**: Start with [`CLAUDE.md`](CLAUDE.md) for project context and guidelines.
 
+## Chess OS — Main Interface
+
+**Chess OS** is the primary control interface for the board. It's a Flask web app that runs on the Pi and exposes everything through a browser UI:
+
+```bash
+# Start Chess OS (from project root on the Pi)
+python3 code/chess_os.py
+
+# Then open in any browser on the same network:
+# http://<pi-ip>:5000
+```
+
+| Tab | What it does |
+|-----|-------------|
+| **Game** | Live FEN board, game start/stop, Stockfish moves, chess clock |
+| **Gantry** | Jog controls, homing, board calibration, square navigation, canvas visualizer |
+| **Hardware** | Servo (magnet), limit switch indicators, stepper commands, emergency stop |
+| **Perception** | Live camera stream, board corners, vision parameters, overlay toggles |
+| **Tests** | Run any hardware test category directly from the browser |
+
+> **Always launch Chess OS when working with the board.** It is the single pane of glass for gantry control, calibration, vision, hardware state, and test execution.
+
 ## Features
 
 - **Automated piece movement** via CoreXY gantry with permanent magnet
 - **Computer vision** for board state detection (FEN output)
 - **Stockfish integration** for move calculation
 - **ROS 2 architecture** for modular, reliable operation
-- **Live web interfaces**: FEN visualizer (port 5000) and camera stream (port 8080)
+- **Chess OS** web dashboard (port 5000) — unified control for everything
 
 ## Documentation
 
@@ -68,17 +90,29 @@ source install/setup.bash
 # Hardware only (motors, servos, limit switches)
 ros2 launch chess_hw_interface hw_interface_launch.py
 
-# Perception only (camera + board detection, web viewer on port 5000)
+# Perception only (camera + board detection)
 ros2 launch chess_perception perception_launch.py use_picamera2:=True
 
-# Full system
+# Full system (all ROS nodes)
 ros2 launch src/launch/full_system_launch.py
 ```
 
-### 4. Test Hardware
+### 4. Open Chess OS
 
 ```bash
-# From project root on Pi
+# In a second terminal — start the web UI
+python3 code/chess_os.py
+
+# Open http://<pi-ip>:5000 in your browser
+```
+
+Chess OS connects to ROS automatically if nodes are running. It also works standalone (no ROS) for vision-only or UI development.
+
+### 5. Test Hardware
+
+Use the **Tests tab** in Chess OS to run any hardware test from the browser, or from the command line:
+
+```bash
 ./run_hw_test.sh --category gantry --subtest manual
 ```
 

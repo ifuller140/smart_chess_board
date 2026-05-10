@@ -199,10 +199,33 @@ pip3 install RPi.GPIO python-chess opencv-python numpy
 - `geometry_msgs` - Geometry message types
 - `sensor_msgs` - Sensor message types (for images)
 
+## Chess OS — Primary User Interface
+
+`code/chess_os.py` is the master control web app. Run it in a second terminal after launching ROS nodes:
+
+```bash
+python3 code/chess_os.py        # → http://<pi-ip>:5000
+python3 code/chess_os.py --no-ros  # offline / vision-only mode
+```
+
+| Tab | Purpose |
+|-----|---------|
+| **Game** | FEN board display, game start/stop, move history, chess clock |
+| **Gantry** | Jog (WASD+servo), homing, board calibration workflow, square goto, canvas |
+| **Hardware** | Servo/magnet, limit switch live status, stepper step, E-stop |
+| **Perception** | Live MJPEG stream, board corners, CV params, overlay toggles |
+| **Tests** | Run any `test_runner.py` test category/subtest from the browser |
+
+Chess OS connects to ROS automatically if `rclpy` is importable and the ROS nodes are running. All state is available via `GET /api/status`.
+
+**Board calibration** is done entirely from the Gantry tab — no CLI required. See the workflow card in that tab.
+
 ## File Locations Reference
 
 | Purpose | Path |
 |---------|------|
+| **Chess OS (main UI)** | `code/chess_os.py` |
+| Board calibration data | `board_calibration.json` (project root, created by Chess OS) |
 | GPIO pin config | `src/chess_hw_interface/config/pins.yaml` |
 | CV parameters | `src/chess_perception/config/cv_params.yaml` |
 | Board coordinates | `src/gantry_control/config/board_map.yaml` |

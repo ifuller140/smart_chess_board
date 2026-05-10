@@ -4,6 +4,78 @@
 
 ---
 
+## Chess OS — Web Interface (`code/chess_os.py`)
+
+Chess OS is not a ROS node — it's a Flask web application that acts as the **master control UI**. It runs as a standalone Python process and connects to the live ROS graph via rclpy.
+
+**Start**: `python3 code/chess_os.py` → open `http://<pi-ip>:5000`
+
+**ROS subscriptions** (reads live state):
+
+| Topic | Type | Used for |
+|-------|------|----------|
+| `/gantry/pose` | `geometry_msgs/Point` | Live X/Y position on canvas |
+| `/stepper/status` | `std_msgs/String` | Stepper health badge |
+| `/gantry/status` | `std_msgs/String` | Gantry state badge |
+| `/servo/state` | `std_msgs/String` | Magnet engaged/released |
+| `/limit_switch/x_min` | `std_msgs/Bool` | X limit indicator |
+| `/limit_switch/y_min` | `std_msgs/Bool` | Y limit indicator |
+| `/limit_switch/clock_hit` | `std_msgs/Bool` | Clock button indicator |
+| `/clock/white_time` | `std_msgs/Float32` | White clock MM:SS |
+| `/clock/black_time` | `std_msgs/Float32` | Black clock MM:SS |
+| `/camera/image_raw` | `sensor_msgs/Image` | Live MJPEG stream |
+
+**ROS publishers**:
+
+| Topic | Type | Used for |
+|-------|------|----------|
+| `/stepper/velocity` | `geometry_msgs/Twist` | Jog (20 Hz while key held) |
+| `/stepper/command` | `geometry_msgs/Point` | Direct step command |
+| `/emergency_stop` | `std_msgs/Bool` | E-stop button |
+
+**ROS service clients**:
+
+| Service | Used for |
+|---------|---------|
+| `/gantry/home` | Home button |
+| `/servo/engage` | Magnet engage |
+| `/servo/release` | Magnet release |
+| `/clock/reset`, `/clock/pause`, `/clock/resume` | Clock controls |
+
+**ROS action client**:
+
+| Action | Used for |
+|--------|---------|
+| `/gantry/move` (`MoveGantry`) | Square goto / calibration moves (fire-and-forget) |
+
+**Key API endpoints** (all JSON):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/status` | Full system state snapshot |
+| `GET /api/stream/raw` | Raw camera MJPEG stream |
+| `GET /api/stream/warp` | Warped board MJPEG stream |
+| `POST /api/gantry/jog/start` | Start continuous jog `{dir, speed}` |
+| `POST /api/gantry/jog/stop` | Stop jog |
+| `POST /api/gantry/goto` | Move to square `{square}` or `{x_mm, y_mm}` |
+| `POST /api/gantry/calibration/save_a1` | Save current pos as a1 |
+| `POST /api/gantry/calibration/save_h8` | Save current pos as h8 |
+| `POST /api/gantry/calibration/apply` | Compute sq_x/sq_y, write `board_calibration.json` |
+| `POST /api/hw/estop` | Publish emergency stop |
+| `POST /api/tests/run` | Launch a test `{category, subtest}` |
+| `GET /api/tests/stream` | SSE stream of test stdout |
+
+**Flags**:
+
+| Flag | Effect |
+|------|--------|
+| `--no-ros` | Disable ROS; UI-only mode |
+| `--port N` | Change listen port (default 5000) |
+| `--camera N` | OpenCV camera device index |
+| `--mode showcase` | Showcase display mode |
+
+---
+
 ## chess_hw_interface Package
 
 ### stepper_driver_node

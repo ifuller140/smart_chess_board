@@ -6,6 +6,8 @@
 
 ```mermaid
 graph TB
+    COS["Chess OS\n(code/chess_os.py)\nFlask :5000"]
+
     subgraph HW["Hardware Interface (chess_hw_interface)"]
         SD[stepper_driver_node]
         SV[servo_node]
@@ -31,20 +33,27 @@ graph TB
         HM[homing_node]
     end
 
+    COS -->|HTTP / ROS| HW
+    COS -->|HTTP / ROS| PERC
+    COS -->|HTTP / ROS| LOGIC
+    COS -->|HTTP / ROS| MOTION
+
     GM -->|RequestMove| CE
     GM -->|capture| CAM
     CAM -->|image| BD
     BD -->|geometry| PD
     PD -->|board_state| GM
-    
+
     GM -->|execute_move| MP
     MP -->|MoveGantry| GK
     GK -->|command| SD
     GK -->|engage/release| SV
-    
+
     LS -->|state| GK
     LS -->|clock_hit| GM
 ```
+
+> **Chess OS is the primary user interface.** Open `http://<pi-ip>:5000` after launching ROS nodes. It subscribes to all key topics, publishes jog velocity and E-stop commands, and spawns hardware tests as subprocesses.
 
 ## Data Flow
 
@@ -198,28 +207,34 @@ chess_perception        gantry_control
 ## Launch Architecture
 
 ```
-full_system_launch.py
-    ├── hw_interface_launch.py
-    │       ├── stepper_driver_node
-    │       ├── servo_node
-    │       ├── limit_switch_node
-    │       ├── clock_display_node
-    │       └── gpio_watchdog_node
-    │
-    ├── perception_launch.py
-    │       ├── camera_node
-    │       ├── board_detector_node
-    │       └── piece_detector_node
-    │
-    ├── gantry_launch.py
-    │       ├── gantry_kinematics_node
-    │       ├── motion_planner_node
-    │       └── homing_node
-    │
-    └── logic_launch.py
-            ├── game_manager_node
-            └── chess_engine_node
+Terminal 1 — ROS nodes
+  ros2 launch src/launch/full_system_launch.py
+      ├── hw_interface_launch.py
+      │       ├── stepper_driver_node
+      │       ├── servo_node
+      │       ├── limit_switch_node
+      │       ├── clock_display_node
+      │       └── gpio_watchdog_node
+      │
+      ├── perception_launch.py
+      │       ├── camera_node
+      │       ├── board_detector_node
+      │       └── piece_detector_node
+      │
+      ├── gantry_launch.py
+      │       ├── gantry_kinematics_node
+      │       ├── motion_planner_node
+      │       └── homing_node
+      │
+      └── logic_launch.py
+              ├── game_manager_node
+              └── chess_engine_node
+
+Terminal 2 — Chess OS (web UI)
+  python3 code/chess_os.py        # → http://<pi-ip>:5000
 ```
+
+Chess OS is a separate process — it connects to the running ROS graph via rclpy. It can also run without ROS (`--no-ros`) for vision-only or offline development.
 
 ---
 
