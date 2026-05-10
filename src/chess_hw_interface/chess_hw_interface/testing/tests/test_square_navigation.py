@@ -8,19 +8,21 @@ interactively engage and release the servo (permanent magnet) to test
 piece pickup at each square.
 
 Coordinate System:
-  Origin (0,0): Bottom-RIGHT corner where both limit switches trigger
-  +X direction: LEFT (toward a-file)
-  +Y direction: UP/BACK (toward rank 8 / black's side)
+  Origin (0,0): Bottom-LEFT corner (a-file side, player's side)
+  +X direction: RIGHTWARD toward h-file / X limit switch (right side)
+  +Y direction: BACKWARD toward rank 8 / camera tower
 
 Square Mapping (from board_map.yaml):
-  board_origin_x_mm = 200  (center of a1, X component)
-  board_origin_y_mm = 20   (center of a1, Y component)
+  board_origin_x_mm = 20   (center of a1, X from left margin)
+  board_origin_y_mm = 20   (center of a1, Y from front margin)
   square_size_mm    = 25
 
-  square_x = board_origin_x_mm - (col_index * square_size_mm)
+  square_x = board_origin_x_mm + (col_index * square_size_mm)
              where a=0, b=1, ..., h=7
   square_y = board_origin_y_mm + (rank_index * square_size_mm)
              where rank 1=0, rank 2=1, ..., rank 8=7
+
+If board_calibration.json exists, those coordinates override the defaults.
 
 Requires:
   ROS nodes running: stepper_driver_node, homing_node, servo_node,
@@ -28,8 +30,10 @@ Requires:
   Start with: ros2 launch chess_hw_interface hw_interface_launch.py
 """
 
+import json
 import threading
 import time
+from pathlib import Path
 from typing import List, Optional
 
 import rclpy
@@ -50,22 +54,40 @@ from ..base_test import HardwareTest, TestStep
 
 
 # -------------------------------------------------------------------------
-# Board geometry constants (must match board_map.yaml)
+# Board geometry constants — defaults; overridden by board_calibration.json
 # -------------------------------------------------------------------------
-BOARD_ORIGIN_X_MM = 200.0   # X of square a1 center from home (mm)
-BOARD_ORIGIN_Y_MM = 20.0    # Y of square a1 center from home (mm)
-SQUARE_SIZE_MM = 25.0       # Distance between square centers (mm)
+_DEFAULT_ORIGIN_X = 20.0   # X of a1 center (mm from left/origin)
+_DEFAULT_ORIGIN_Y = 20.0   # Y of a1 center (mm from front/origin)
+_DEFAULT_SQ_SIZE  = 25.0   # Square size (mm)
+
+# Project root: src/chess_hw_interface/chess_hw_interface/testing/tests/ → 5 levels up
+_PROJECT_ROOT = Path(__file__).parents[5]
+_CALIB_FILE   = _PROJECT_ROOT / "board_calibration.json"
+
+
+def _load_geometry() -> tuple:
+    """Return (origin_x, origin_y, sq_x, sq_y) from calibration file or defaults."""
+    if _CALIB_FILE.exists():
+        try:
+            c = json.loads(_CALIB_FILE.read_text())
+            print(f'  [NAV] Using calibration: a1=({c["a1_x"]:.1f},{c["a1_y"]:.1f})'
+                  f' sq=({c["sq_x"]:.1f}x{c["sq_y"]:.1f})mm')
+            return float(c['a1_x']), float(c['a1_y']), float(c['sq_x']), float(c['sq_y'])
+        except Exception as e:
+            print(f'  [NAV] Calibration load failed ({e}), using defaults.')
+    return _DEFAULT_ORIGIN_X, _DEFAULT_ORIGIN_Y, _DEFAULT_SQ_SIZE, _DEFAULT_SQ_SIZE
+
 
 FILE_MAP = {'a': 0, 'b': 1, 'c': 2, 'd': 3,
             'e': 4, 'f': 5, 'g': 6, 'h': 7}
 
 
-def square_to_mm(square: str) -> tuple:
-    """
-    Convert a chess square notation (e.g. 'e4') to gantry XY coordinates in mm.
-
-    Returns (x_mm, y_mm) in gantry coordinates.
-    """
+def square_to_mm(square: str,
+                 origin_x: float = _DEFAULT_ORIGIN_X,
+                 origin_y: float = _DEFAULT_ORIGIN_Y,
+                 sq_x: float = _DEFAULT_SQ_SIZE,
+                 sq_y: float = _DEFAULT_SQ_SIZE) -> tuple:
+    """Convert chess square notation (e.g. 'e4') to gantry XY in mm."""
     if len(square) != 2:
         raise ValueError(f'Invalid square: {square!r}')
     file_char = square[0].lower()
@@ -76,14 +98,13 @@ def square_to_mm(square: str) -> tuple:
     if rank < 1 or rank > 8:
         raise ValueError(f'Invalid rank: {rank!r}')
 
-    col = FILE_MAP[file_char]       # a=0 … h=7
-    row = rank - 1                  # rank 1=0 … rank 8=7
+    col = FILE_MAP[file_char]   # a=0 … h=7
+    row = rank - 1              # rank 1=0 … rank 8=7
 
-    # +X goes LEFT (toward a-file), so a1 has more X than h1
-    x_mm = BOARD_ORIGIN_X_MM - col * SQUARE_SIZE_MM
-
-    # +Y goes UP (toward rank 8)
-    y_mm = BOARD_ORIGIN_Y_MM + row * SQUARE_SIZE_MM
+    # +X = rightward (a-file at low X, h-file at high X)
+    x_mm = origin_x + col * sq_x
+    # +Y = backward (rank 1 at low Y, rank 8 at high Y)
+    y_mm = origin_y + row * sq_y
 
     return x_mm, y_mm
 
@@ -210,6 +231,7 @@ class GantrySquareNavigationTest(HardwareTest):
         super().__init__(gpio_interface, display_interface)
         self._node: Optional[SquareNavNode] = None
         self._spin_thread: Optional[threading.Thread] = None
+        self._origin_x, self._origin_y, self._sq_x, self._sq_y = _load_geometry()
 
     def setup(self) -> bool:
         try:
@@ -292,11 +314,15 @@ class GantrySquareNavigationTest(HardwareTest):
         print()
 
         # Print the square → mm mapping for reference
+        print(f'  Geometry: origin=({self._origin_x:.1f},{self._origin_y:.1f})mm '
+              f' sq=({self._sq_x:.1f}x{self._sq_y:.1f})mm')
         print('  Reference:')
         for rank in [8, 1]:
             row = []
             for file in 'abcdefgh':
-                x, y = square_to_mm(f'{file}{rank}')
+                x, y = square_to_mm(f'{file}{rank}',
+                                    self._origin_x, self._origin_y,
+                                    self._sq_x, self._sq_y)
                 row.append(f'{file}{rank}=({x:.0f},{y:.0f})')
             print(f'    Rank {rank}: ' + '  '.join(row))
         print()
@@ -325,7 +351,8 @@ class GantrySquareNavigationTest(HardwareTest):
 
             # Try to parse as square
             try:
-                x_mm, y_mm = square_to_mm(raw)
+                x_mm, y_mm = square_to_mm(raw, self._origin_x, self._origin_y,
+                                           self._sq_x, self._sq_y)
             except ValueError as e:
                 print(f'  [ERROR] {e}')
                 print('  Valid squares: a1-h8  (e.g. e4, d7, a1, h8)')

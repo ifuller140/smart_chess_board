@@ -41,6 +41,7 @@ from .tests.test_magnet import MagnetTest
 from .tests.test_manual_gantry import ManualGantryTest
 from .tests.test_raw_motor import RawMotorTest
 from .tests.test_servo import ServoTest
+from .tests.test_board_calibration import BoardCalibrationTest
 from .tests.test_square_navigation import GantrySquareNavigationTest
 from .tests.test_timing_sweep import TimingSweepTest
 from .tests.test_vision import VisionPipelineTest
@@ -186,6 +187,7 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
         'raw_motor': RawMotorTest,
         'timing_sweep': TimingSweepTest,
         'square_nav': GantrySquareNavigationTest,
+        'calibrate': BoardCalibrationTest,
     },
     'servo': {
         'full': ServoTest,
@@ -216,6 +218,7 @@ LEGACY_TEST_ALIASES = {
     'gantry': ('gantry', 'full'),
     'manual_gantry': ('gantry', 'manual'),
     'square_nav': ('gantry', 'square_nav'),
+    'calibrate':  ('gantry', 'calibrate'),
     'servo': ('servo', 'full'),
     'camera': ('camera', 'full'),
     'magnet': ('magnet', 'full'),

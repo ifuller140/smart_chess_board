@@ -50,6 +50,7 @@ except ImportError:
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _ROOT         = Path(__file__).parent.parent
 _CORNERS_FILE = _ROOT / "board_corners.json"
+_CALIB_FILE   = _ROOT / "board_calibration.json"
 _TEST_SCRIPT  = _ROOT / "run_hw_test.sh"
 
 # ── Test catalogue ────────────────────────────────────────────────────────────
@@ -57,7 +58,7 @@ TEST_CATALOGUE: Dict[str, List[str]] = {
     "gantry": ["full","limits","pulse","motor_a","motor_b","corexy",
                "speed_sweep","repeatability","enable_hold","homing",
                "manual","lockstep","diagonal_sync","square_return",
-               "raw_motor","timing_sweep","square_nav"],
+               "raw_motor","timing_sweep","square_nav","calibrate"],
     "servo":  ["full"],
     "camera": ["full"],
     "magnet": ["full"],
@@ -77,15 +78,26 @@ _X_MAX_MM       = 240.0   # mm: X limit switch position (right side, X home)
 
 def square_to_mm(sq: str):
     """Convert a square name (e.g. 'e4') to gantry XY in mm.
+    Uses board_calibration.json when applied; falls back to defaults.
     +X = rightward (a=left, h=right), +Y = backward (rank1=front, rank8=back).
     """
     sq = sq.lower().strip()
     if len(sq) != 2:
         return None, None
     fi = ord(sq[0]) - ord('a')
-    ri = int(sq[1]) - 1
+    try:
+        ri = int(sq[1]) - 1
+    except ValueError:
+        return None, None
     if not (0 <= fi < 8 and 0 <= ri < 8):
         return None, None
+    with _lock:
+        a1x = _state.get("calib_a1_x")
+        a1y = _state.get("calib_a1_y")
+        sqx = _state.get("calib_sq_x")
+        sqy = _state.get("calib_sq_y")
+    if a1x is not None and sqx is not None and sqy is not None:
+        return round(a1x + fi * sqx, 2), round(a1y + ri * sqy, 2)
     return _BOARD_ORIGIN_X + fi * _SQUARE_MM, _BOARD_ORIGIN_Y + ri * _SQUARE_MM
 
 # ── Shared state ──────────────────────────────────────────────────────────────
@@ -125,6 +137,14 @@ _state = {
     "estop_active":   False,
     # System
     "ros_connected":  False,
+    # Board calibration
+    "calib_a1_x":    None,
+    "calib_a1_y":    None,
+    "calib_h8_x":    None,
+    "calib_h8_y":    None,
+    "calib_sq_x":    None,
+    "calib_sq_y":    None,
+    "calib_applied": False,
 }
 
 # ── Jog state — background thread publishes velocity to /stepper/velocity ───────
@@ -151,6 +171,28 @@ def _jog_loop():
                 node.vel_pub.publish(msg)
         except Exception:
             pass
+
+def _load_calibration():
+    """Load board_calibration.json into _state at startup."""
+    if not _CALIB_FILE.exists():
+        return
+    try:
+        c = json.loads(_CALIB_FILE.read_text())
+        sq_x = float(c["sq_x"])
+        sq_y = float(c["sq_y"])
+        with _lock:
+            _state["calib_a1_x"]    = float(c["a1_x"])
+            _state["calib_a1_y"]    = float(c["a1_y"])
+            _state["calib_h8_x"]    = float(c["h8_x"])
+            _state["calib_h8_y"]    = float(c["h8_y"])
+            _state["calib_sq_x"]    = sq_x
+            _state["calib_sq_y"]    = sq_y
+            _state["calib_applied"] = True
+        print(f"  ✓ Board calibration: a1=({c['a1_x']:.1f},{c['a1_y']:.1f})"
+              f" sq=({sq_x:.1f}×{sq_y:.1f}mm)")
+    except Exception as e:
+        print(f"  ⚠  Calibration load failed: {e}")
+
 
 _params = {
     "white_thresh":       200,
@@ -481,9 +523,37 @@ if HAS_ROS:
             self._svc_clock_pause  = self.create_client(Trigger, "/clock/pause")
             self._svc_clock_resume = self.create_client(Trigger, "/clock/resume")
 
+            # ── Action client for point-to-point gantry moves ─────────
+            try:
+                from chess_interfaces.action import MoveGantry as _MGA
+                from rclpy.action import ActionClient as _AClient
+                self._move_ac = _AClient(self, _MGA, '/gantry/move')
+                self._has_move_action = True
+            except ImportError:
+                self._move_ac = None
+                self._has_move_action = False
+
             with _lock:
                 _state["ros_connected"] = True
             self.get_logger().info("ChessOS ROS2 node ready")
+
+        def send_goto(self, x_mm: float, y_mm: float, speed: float = 40.0) -> dict:
+            """Fire-and-forget MoveGantry action. Position updates via /gantry/pose."""
+            if not self._has_move_action or self._move_ac is None:
+                return {"ok": False, "msg": "chess_interfaces not installed"}
+            if not self._move_ac.wait_for_server(timeout_sec=1.0):
+                return {"ok": False, "msg": "/gantry/move action server not running"}
+            try:
+                from chess_interfaces.action import MoveGantry as _MGA
+                goal = _MGA.Goal()
+                goal.target_x_mm   = float(x_mm)
+                goal.target_y_mm   = float(y_mm)
+                goal.speed_mm_s    = float(speed)
+                goal.engage_magnet = False
+                self._move_ac.send_goal_async(goal)
+                return {"ok": True, "msg": f"Moving to ({x_mm:.1f}, {y_mm:.1f}) mm"}
+            except Exception as e:
+                return {"ok": False, "msg": str(e)}
 
         def _on_img(self, msg):
             try:
@@ -695,6 +765,13 @@ def api_status():
             "magnet_engaged": _state["magnet_engaged"],
             "estop_active":   _state["estop_active"],
             "ros_connected":  _state["ros_connected"],
+            "calib_applied":  _state["calib_applied"],
+            "calib_a1_x":     _state["calib_a1_x"],
+            "calib_a1_y":     _state["calib_a1_y"],
+            "calib_h8_x":     _state["calib_h8_x"],
+            "calib_h8_y":     _state["calib_h8_y"],
+            "calib_sq_x":     _state["calib_sq_x"],
+            "calib_sq_y":     _state["calib_sq_y"],
         })
 
 @app.route("/api/snapshot")
@@ -929,10 +1006,101 @@ def api_gantry_goto():
     else:
         x = float(data.get("x", 0))
         y = float(data.get("y", 0))
+    speed = float(data.get("speed", 40.0))
+    # Attempt physical move via action server
+    moved = False
+    move_msg = "ROS not connected"
+    if _ros_node is not None:
+        r = _ros_node.send_goto(x, y, speed)
+        moved    = r["ok"]
+        move_msg = r.get("msg", "")
+    # Always update local display state
     with _lock:
         _state["gantry_x"] = x
         _state["gantry_y"] = y
+    return jsonify({"ok": True, "x": x, "y": y, "moved": moved, "msg": move_msg})
+
+
+# ── Board calibration routes ───────────────────────────────────────────────────
+
+@app.route("/api/gantry/calibration", methods=["GET"])
+def api_calib_get():
+    with _lock:
+        return jsonify({
+            "applied": _state["calib_applied"],
+            "a1_x":    _state["calib_a1_x"],
+            "a1_y":    _state["calib_a1_y"],
+            "h8_x":    _state["calib_h8_x"],
+            "h8_y":    _state["calib_h8_y"],
+            "sq_x":    _state["calib_sq_x"],
+            "sq_y":    _state["calib_sq_y"],
+        })
+
+@app.route("/api/gantry/calibration/save_a1", methods=["POST"])
+def api_calib_save_a1():
+    with _lock:
+        x = _state["gantry_x"]
+        y = _state["gantry_y"]
+        _state["calib_a1_x"] = x
+        _state["calib_a1_y"] = y
+        _state["calib_applied"] = False  # require re-apply
     return jsonify({"ok": True, "x": x, "y": y})
+
+@app.route("/api/gantry/calibration/save_h8", methods=["POST"])
+def api_calib_save_h8():
+    with _lock:
+        x = _state["gantry_x"]
+        y = _state["gantry_y"]
+        _state["calib_h8_x"] = x
+        _state["calib_h8_y"] = y
+        _state["calib_applied"] = False
+    return jsonify({"ok": True, "x": x, "y": y})
+
+@app.route("/api/gantry/calibration/apply", methods=["POST"])
+def api_calib_apply():
+    with _lock:
+        a1x = _state["calib_a1_x"]
+        a1y = _state["calib_a1_y"]
+        h8x = _state["calib_h8_x"]
+        h8y = _state["calib_h8_y"]
+    if None in (a1x, a1y, h8x, h8y):
+        return jsonify({"ok": False, "msg": "Save both a1 and h8 first"}), 400
+    sq_x = (h8x - a1x) / 7.0
+    sq_y = (h8y - a1y) / 7.0
+    if sq_x < 5.0 or sq_y < 5.0:
+        return jsonify({"ok": False,
+                        "msg": f"Square size too small ({sq_x:.1f}×{sq_y:.1f}mm). "
+                               "Check that a1 and h8 are the correct corners."}), 400
+    with _lock:
+        _state["calib_sq_x"]    = sq_x
+        _state["calib_sq_y"]    = sq_y
+        _state["calib_applied"] = True
+    try:
+        _CALIB_FILE.write_text(json.dumps({
+            "a1_x": a1x, "a1_y": a1y,
+            "h8_x": h8x, "h8_y": h8y,
+            "sq_x": sq_x, "sq_y": sq_y,
+            "calibrated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }, indent=2))
+    except Exception as e:
+        return jsonify({"ok": True, "sq_x": sq_x, "sq_y": sq_y,
+                        "a1_x": a1x, "a1_y": a1y, "h8_x": h8x, "h8_y": h8y,
+                        "warn": f"Saved in memory; file write failed: {e}"})
+    return jsonify({"ok": True, "sq_x": sq_x, "sq_y": sq_y,
+                    "a1_x": a1x, "a1_y": a1y, "h8_x": h8x, "h8_y": h8y})
+
+@app.route("/api/gantry/calibration/clear", methods=["POST"])
+def api_calib_clear():
+    with _lock:
+        for k in ("calib_a1_x","calib_a1_y","calib_h8_x","calib_h8_y",
+                  "calib_sq_x","calib_sq_y"):
+            _state[k] = None
+        _state["calib_applied"] = False
+    try:
+        _CALIB_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return jsonify({"ok": True})
 
 @app.route("/api/gantry/position")
 def api_gantry_pos():
@@ -1582,6 +1750,22 @@ body.showcase #debug-view{display:none}
               </div>
             </div>
           </div>
+
+          <div class="card">
+            <div class="card-hdr">Magnet (Z-axis Servo)</div>
+            <div class="card-body">
+              <div class="btn-row" style="justify-content:center">
+                <button class="btn success"
+                  onclick="hwPost('/api/hw/servo/engage','magnet-gantry-msg')">
+                  &#11015; Engage</button>
+                <button class="btn warn"
+                  onclick="hwPost('/api/hw/servo/release','magnet-gantry-msg')">
+                  &#11014; Release</button>
+              </div>
+              <div id="magnet-gantry-msg"
+                style="text-align:center;font-size:.75em;color:var(--dim);margin-top:6px">&#8212;</div>
+            </div>
+          </div>
         </div>
 
         <div>
@@ -1590,11 +1774,61 @@ body.showcase #debug-view{display:none}
             <div class="card-body">
               <div class="sq-row">
                 <input id="sq-input" type="text" maxlength="2" placeholder="e4">
-                <button class="btn primary" onclick="gotoSquare()">Go to Square</button>
+                <button class="btn primary" onclick="gotoSquare()">&#8594; Go</button>
               </div>
-              <div style="font-size:.68em;color:var(--dim);margin-top:8px;line-height:1.8">
-                a1&ndash;h8 &nbsp;&bull;&nbsp; a1&approx;(20, 20)mm &nbsp;&bull;&nbsp;
-                +X=right(h-file) &nbsp;&bull;&nbsp; +Y=back(rank8)
+              <div id="sq-nav-msg"
+                style="font-size:.7em;color:var(--dim);margin-top:6px">
+                Uses calibrated coordinates when applied, otherwise defaults.
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Board Calibration ─────────────────────────────────────── -->
+          <div class="card">
+            <div class="card-hdr">Board Calibration</div>
+            <div class="card-body">
+              <div style="font-size:.68em;color:var(--dim);margin-bottom:8px;line-height:1.8">
+                <b>Workflow:</b>
+                Engage magnet &rarr; place piece &rarr;
+                jog to <b>a1</b> center &rarr; <kbd>Save a1</kbd> &rarr;
+                jog to <b>h8</b> center &rarr; <kbd>Save h8</kbd> &rarr; <kbd>Apply</kbd>
+              </div>
+              <div class="btn-row">
+                <button class="btn primary" onclick="calibSaveA1()"
+                  title="Save current gantry position as a1 (bottom-left corner)">
+                  &#128204; Save a1</button>
+                <button class="btn primary" onclick="calibSaveH8()"
+                  title="Save current gantry position as h8 (top-right corner)">
+                  &#128204; Save h8</button>
+                <button class="btn success" onclick="calibApply()"
+                  title="Compute square size and save board_calibration.json">
+                  &#10003; Apply</button>
+                <button class="btn danger" onclick="calibClear()"
+                  title="Clear calibration and delete file">&#10005;</button>
+              </div>
+              <div id="calib-status"
+                style="font-size:.72em;margin-top:8px;color:var(--dim);min-height:2.2em;
+                       line-height:1.5;padding:4px 6px;background:#0a0a18;border-radius:4px">
+                No calibration loaded
+              </div>
+              <div style="margin-top:8px;font-size:.7em;color:var(--dim);margin-bottom:4px">
+                Verify — move to square using calibrated coords:
+              </div>
+              <div class="sq-row" style="gap:4px">
+                <input id="calib-verify-sq" type="text" maxlength="2" placeholder="e4"
+                  style="width:52px">
+                <button class="btn" onclick="calibGoto()"
+                  title="Go to typed square using calibrated coordinates">&#8594; Goto</button>
+                <select id="calib-sq-sel" onchange="calibGotoSel(this)"
+                  style="font-size:.8em;flex:1;min-width:0">
+                  <option value="">Quick&hellip;</option>
+                </select>
+              </div>
+              <div style="margin-top:6px">
+                <button class="btn" style="width:100%;font-size:.72em"
+                  onclick="quickRun('gantry','calibrate')"
+                  title="Run CLI calibration verification test">
+                  &#9654; Run Calibration Verify Test</button>
               </div>
             </div>
           </div>
@@ -1809,6 +2043,10 @@ var scBoard    = null;
 // Workspace constants — origin at bottom-left, +X=rightward, +Y=backward
 // a1 = (BO_X, BO_Y), h8 = (BO_X+7*SQ, BO_Y+7*SQ)
 var BO_X = 20, BO_Y = 20, SQ = 25, X_MAX = 240;
+
+// Board calibration state (loaded from /api/gantry/calibration on init)
+var calibState = {applied:false, a1_x:null, a1_y:null,
+                  h8_x:null, h8_y:null, sq_x:null, sq_y:null};
 
 // ── Mode ──────────────────────────────────────────────────────────
 function setMode(m) {
@@ -2061,13 +2299,129 @@ document.addEventListener('blur', function() { heldKeys = {}; stopJog(); });
 
 function gotoSquare() {
   var sq = document.getElementById('sq-input').value.trim().toLowerCase();
-  if (!sq) return;
-  fetch('/api/gantry/goto',{method:'POST',
+  if (sq) _gotoSquareMM(sq);
+}
+
+// Shared: send goto to server (updates canvas + triggers physical move if action up)
+function _gotoSquareMM(sq) {
+  fetch('/api/gantry/goto', {method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({square:sq})
+    body: JSON.stringify({square: sq})
   }).then(function(r){return r.json();}).then(function(d){
-    if (d.ok) setGantryPos(d.x, d.y);
-    else alert('Invalid square: '+sq);
+    if (d.ok) {
+      setGantryPos(d.x, d.y);
+      var msg = document.getElementById('sq-nav-msg');
+      if (msg) msg.textContent = sq.toUpperCase()+' → ('+d.x.toFixed(1)+', '+d.y.toFixed(1)+') mm'
+        + (d.moved ? ' ✓ moving' : ' (display only — start action server to move)');
+    } else {
+      alert('Invalid square: '+sq);
+    }
+  });
+}
+
+// ── Board calibration ──────────────────────────────────────────────────────
+function loadCalibState() {
+  fetch('/api/gantry/calibration').then(function(r){return r.json();}).then(function(d){
+    calibState = d;
+    updateCalibUI();
+    drawCanvas();
+  });
+}
+
+function updateCalibUI() {
+  var el = document.getElementById('calib-status');
+  if (!el) return;
+  if (calibState.applied && calibState.sq_x !== null) {
+    el.style.color = 'var(--ok)';
+    el.textContent = '✓ Calibrated'
+      + ' | sq_x=' + calibState.sq_x.toFixed(1) + 'mm'
+      + ' sq_y=' + calibState.sq_y.toFixed(1) + 'mm'
+      + ' | a1=(' + calibState.a1_x.toFixed(0) + ',' + calibState.a1_y.toFixed(0) + ')'
+      + ' h8=(' + calibState.h8_x.toFixed(0) + ',' + calibState.h8_y.toFixed(0) + ')';
+  } else if (calibState.a1_x !== null || calibState.h8_x !== null) {
+    el.style.color = 'var(--warn)';
+    var parts = [];
+    parts.push(calibState.a1_x !== null ? 'a1 ✓ ('+calibState.a1_x.toFixed(0)+','+calibState.a1_y.toFixed(0)+')' : 'a1 missing');
+    parts.push(calibState.h8_x !== null ? 'h8 ✓ ('+calibState.h8_x.toFixed(0)+','+calibState.h8_y.toFixed(0)+')' : 'h8 missing');
+    el.textContent = parts.join('  ·  ') + '  →  click Apply when both saved';
+  } else {
+    el.style.color = 'var(--dim)';
+    el.textContent = 'No calibration. Jog to a1 center then click Save a1.';
+  }
+}
+
+function calibSaveA1() {
+  fetch('/api/gantry/calibration/save_a1', {method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if (d.ok) {
+        calibState.a1_x = d.x; calibState.a1_y = d.y;
+        calibState.applied = false;
+        updateCalibUI();
+        drawCanvas();
+      } else { alert('Save a1 failed: '+(d.msg||'')); }
+    });
+}
+
+function calibSaveH8() {
+  fetch('/api/gantry/calibration/save_h8', {method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if (d.ok) {
+        calibState.h8_x = d.x; calibState.h8_y = d.y;
+        calibState.applied = false;
+        updateCalibUI();
+        drawCanvas();
+      } else { alert('Save h8 failed: '+(d.msg||'')); }
+    });
+}
+
+function calibApply() {
+  fetch('/api/gantry/calibration/apply', {method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if (d.ok) {
+        calibState = {applied:true, a1_x:d.a1_x, a1_y:d.a1_y,
+                      h8_x:d.h8_x, h8_y:d.h8_y, sq_x:d.sq_x, sq_y:d.sq_y};
+        updateCalibUI();
+        drawCanvas();
+        if (d.warn) console.warn(d.warn);
+      } else { alert('Calibration failed: '+(d.msg||'')); }
+    });
+}
+
+function calibClear() {
+  if (!confirm('Clear board calibration and delete board_calibration.json?')) return;
+  fetch('/api/gantry/calibration/clear', {method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(){
+      calibState = {applied:false,a1_x:null,a1_y:null,h8_x:null,h8_y:null,sq_x:null,sq_y:null};
+      updateCalibUI();
+      drawCanvas();
+    });
+}
+
+function calibGoto() {
+  var sq = document.getElementById('calib-verify-sq').value.trim().toLowerCase();
+  if (sq) _gotoSquareMM(sq);
+}
+
+function calibGotoSel(sel) {
+  var sq = sel.value;
+  if (!sq) return;
+  document.getElementById('calib-verify-sq').value = sq;
+  sel.value = '';
+  _gotoSquareMM(sq);
+}
+
+function buildCalibVerifySelect() {
+  var sel = document.getElementById('calib-sq-sel');
+  if (!sel) return;
+  var squares = ['a1','h1','a8','h8','d4','e4','d5','e5','a4','h4','e1','e8'];
+  squares.forEach(function(sq) {
+    var o = document.createElement('option');
+    o.value = sq; o.textContent = sq.toUpperCase();
+    sel.appendChild(o);
   });
 }
 
@@ -2117,26 +2471,31 @@ function drawCanvas(gx, gy) {
   if (!canvas) return;
   var ctx = canvas.getContext('2d');
   var W = 320, H = 320, pad = 30;
-  // Scale: workspace is X_MAX mm wide (full travel)
   var sc = (W - 2*pad) / X_MAX;
+
+  // Use calibrated board geometry when available
+  var bx  = (calibState.applied && calibState.sq_x) ? calibState.a1_x : BO_X;
+  var by  = (calibState.applied && calibState.sq_y) ? calibState.a1_y : BO_Y;
+  var sqx = (calibState.applied && calibState.sq_x) ? calibState.sq_x : SQ;
+  var sqy = (calibState.applied && calibState.sq_y) ? calibState.sq_y : SQ;
 
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#020206';
   ctx.fillRect(0, 0, W, H);
 
-  // Workspace border (full travel area)
+  // Workspace border
   ctx.strokeStyle = '#1a1a2e';
   ctx.lineWidth = 1;
   ctx.strokeRect(pad, pad, W-2*pad, H-2*pad);
 
-  // X limit indicator (right side = X home)
+  // X limit (right side = X home)
   ctx.fillStyle = '#1e0a0a';
   ctx.fillRect(W-pad-2, pad, 2, H-2*pad);
   ctx.fillStyle = '#ff4060';
   ctx.font = '7px monospace';
   ctx.fillText('X HOME', W-pad+3, pad+12);
 
-  // Y limit indicator (bottom = Y home)
+  // Y limit (bottom = Y home)
   ctx.fillStyle = '#0a1e0a';
   ctx.fillRect(pad, H-pad, W-2*pad, 2);
   ctx.fillStyle = '#3fca6e';
@@ -2144,32 +2503,27 @@ function drawCanvas(gx, gy) {
   ctx.fillText('Y HOME', pad+2, H-pad+10);
 
   // Chess square grid
-  var sqpx = SQ * sc;
   for (var r = 0; r < 8; r++) {
     for (var c = 0; c < 8; c++) {
-      var px = pad + (BO_X + c*SQ)*sc;
-      var py = H - pad - (BO_Y + (r+1)*SQ)*sc;
+      var px = pad + (bx + c*sqx)*sc;
+      var py = H - pad - (by + (r+1)*sqy)*sc;
       ctx.fillStyle = (r+c)%2===0 ? '#1a1a3e' : '#0d0d1e';
-      ctx.fillRect(px, py, sqpx, sqpx);
+      ctx.fillRect(px, py, sqx*sc, sqy*sc);
     }
   }
 
   // Board border
-  ctx.strokeStyle = '#3a3a7a';
+  ctx.strokeStyle = calibState.applied ? '#5a5aaa' : '#3a3a7a';
   ctx.lineWidth = 1.5;
-  ctx.strokeRect(
-    pad + BO_X*sc,
-    H - pad - (BO_Y + 8*SQ)*sc,
-    8*sqpx, 8*sqpx
-  );
+  ctx.strokeRect(pad + bx*sc, H - pad - (by + 8*sqy)*sc, 8*sqx*sc, 8*sqy*sc);
 
-  // Corner square labels
+  // Corner labels
   ctx.fillStyle = '#40407a';
   ctx.font = '7px monospace';
-  ctx.fillText('a1', pad+BO_X*sc+2, H-pad-BO_Y*sc-2);
-  ctx.fillText('h8', pad+(BO_X+7*SQ)*sc+2, H-pad-(BO_Y+7*SQ)*sc-12);
+  ctx.fillText('a1', pad+bx*sc+2, H-pad-by*sc-2);
+  ctx.fillText('h8', pad+(bx+7*sqx)*sc+2, H-pad-(by+7*sqy)*sc-12);
 
-  // Axis tick labels (0, X_MAX)
+  // Axis labels
   ctx.fillStyle = '#30305a';
   ctx.font = '7px monospace';
   ctx.fillText('0', pad-6, H-pad+10);
@@ -2179,17 +2533,40 @@ function drawCanvas(gx, gy) {
   ctx.fillStyle = '#3a3a6a';
   ctx.fillRect(pad-1, H-pad-1, 3, 3);
 
+  // Calibration save points (orange=a1, blue=h8, shown even before Apply)
+  if (calibState.a1_x !== null) {
+    var ax = pad + calibState.a1_x * sc;
+    var ay = H - pad - calibState.a1_y * sc;
+    ctx.fillStyle = '#ff8030';
+    ctx.beginPath(); ctx.arc(ax, ay, 5, 0, 2*Math.PI); ctx.fill();
+    ctx.fillStyle = '#ff8030'; ctx.font = '8px monospace';
+    ctx.fillText('a1', ax+6, ay+3);
+  }
+  if (calibState.h8_x !== null) {
+    var hx = pad + calibState.h8_x * sc;
+    var hy = H - pad - calibState.h8_y * sc;
+    ctx.fillStyle = '#4090ff';
+    ctx.beginPath(); ctx.arc(hx, hy, 5, 0, 2*Math.PI); ctx.fill();
+    ctx.fillStyle = '#4090ff'; ctx.font = '8px monospace';
+    ctx.fillText('h8', hx+6, hy+3);
+  }
+
+  // Calibration badge
+  if (calibState.applied) {
+    ctx.fillStyle = '#2a4a2a';
+    ctx.fillRect(pad, pad, 54, 12);
+    ctx.fillStyle = '#5fca7f';
+    ctx.font = '7px monospace';
+    ctx.fillText('CALIBRATED', pad+2, pad+9);
+  }
+
   // Current position dot + crosshair
   if (gx === undefined) {
     gx = curStatus.gantry_x || 0;
     gy = curStatus.gantry_y || 0;
   }
-  var cx = pad + gx*sc;
-  var cy = H - pad - gy*sc;
-
-  // Clamp to canvas
-  cx = Math.max(pad, Math.min(W-pad, cx));
-  cy = Math.max(pad, Math.min(H-pad, cy));
+  var cx = Math.max(pad, Math.min(W-pad, pad + gx*sc));
+  var cy = Math.max(pad, Math.min(H-pad, H - pad - gy*sc));
 
   ctx.strokeStyle = '#00d4aa';
   ctx.lineWidth = 1;
@@ -2198,7 +2575,7 @@ function drawCanvas(gx, gy) {
   ctx.fillStyle = '#00d4aa';
   ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 2*Math.PI); ctx.fill();
 
-  // Position readout on canvas
+  // Position readout
   ctx.fillStyle = '#00d4aa';
   ctx.font = '9px monospace';
   ctx.fillText('('+gx.toFixed(0)+', '+gy.toFixed(0)+')', pad+2, pad-6);
@@ -2247,8 +2624,11 @@ function hwPost(url, label) {
       if (label==='engage' || label==='release') {
         document.getElementById('hw-magnet-t').textContent = d.ok ? label : 'failed';
       }
-      if (label==='clock')  document.getElementById('hw-clock-msg').textContent = msg;
-      if (label==='home')   document.getElementById('hw-home-msg').textContent = msg;
+      if (label==='clock') document.getElementById('hw-clock-msg').textContent = msg;
+      if (label==='home')  document.getElementById('hw-home-msg').textContent = msg;
+      // Generic: if label is an element ID, update its text
+      var el = document.getElementById(label);
+      if (el) el.textContent = msg;
     }).catch(function(){});
 }
 
@@ -2457,6 +2837,15 @@ function pollStatus() {
     document.getElementById('cam-footer').textContent =
       (d.cam_info||'—') + (d.error ? ' ⚠ '+d.error : '');
 
+    // Calibration state sync from status
+    if (d.calib_applied !== undefined && d.calib_applied !== calibState.applied) {
+      calibState = {applied: d.calib_applied,
+                    a1_x: d.calib_a1_x, a1_y: d.calib_a1_y,
+                    h8_x: d.calib_h8_x, h8_y: d.calib_h8_y,
+                    sq_x: d.calib_sq_x, sq_y: d.calib_sq_y};
+      updateCalibUI();
+    }
+
     // Gantry
     if (d.gantry_x !== undefined) {
       setGantryPos(d.gantry_x, d.gantry_y);
@@ -2562,6 +2951,8 @@ buildHandles();
 buildCornerEditor();
 loadCornersFromServer();
 updateCornerInfo();
+loadCalibState();
+buildCalibVerifySelect();
 drawCanvas(0, 0);
 setInterval(pollStatus, 500);
 pollStatus();
@@ -2585,6 +2976,7 @@ def main():
     args = parser.parse_args()
 
     _load_corners()
+    _load_calibration()
 
     # Static image
     if args.image:
