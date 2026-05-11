@@ -78,6 +78,8 @@ class ChessClockNode(Node):
             String, '/game_manager/state', self._on_game_state, 10)
         self.create_subscription(
             String, '/game_manager/turn', self._on_turn, 10)
+        self.create_subscription(
+            Float32, '/clock/set_time', self._on_set_time, 10)
 
         # ---- Services ----
         self.create_service(Trigger, '/clock/reset', self._srv_reset)
@@ -130,6 +132,17 @@ class ChessClockNode(Node):
             self._set_active('WHITE')
         elif turn == 'BLACK':
             self._set_active('BLACK')
+
+    def _on_set_time(self, msg: Float32):
+        """Set time per player in minutes (Chess OS game settings)."""
+        new_time = float(msg.data) * 60.0
+        self._init_time = new_time
+        self._white_time = new_time
+        self._black_time = new_time
+        self._clock_state = 'STOPPED'
+        self._flag_fired = False
+        self._publish()
+        self.get_logger().info(f'Clock time updated to {new_time:.0f}s per player')
 
     # ------------------------------------------------------------------
     # Services

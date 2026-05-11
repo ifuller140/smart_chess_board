@@ -111,6 +111,10 @@ class GameManagerNode(Node):
         self._motion_done_event     = threading.Event()
         self._flag_event            = threading.Event()
         self._flag_loser            = ''        # 'WHITE' or 'BLACK'
+        self._new_game_event        = threading.Event()
+
+        # Move history (UCI strings, one per half-move)
+        self._move_history: list = []
 
         # Latest values from subscriptions
         self._latest_changed_squares: set = set()   # chess.Square indices from perception
@@ -122,6 +126,9 @@ class GameManagerNode(Node):
         self._motion_pub = self.create_publisher(String, '/motion/command', 10)
         # Authoritative FEN for piece_detector_node (game-state-assisted piece typing)
         self._fen_pub   = self.create_publisher(String, '/game_manager/board_fen', 10)
+        # Game control publishers (read by Chess OS)
+        self._move_history_pub = self.create_publisher(String, '/game_manager/move_history', 10)
+        self._result_pub       = self.create_publisher(String, '/game_manager/result', 10)
 
         # ── Subscriptions ─────────────────────────────────────────────────
         self.create_subscription(
@@ -140,6 +147,11 @@ class GameManagerNode(Node):
         self._clock_hit_client = self.create_client(Trigger, '/clock/hit')
         self._engine_client    = self.create_client(
             RequestMove, '/chess_engine/request_move')
+
+        # ── Game control services (called by Chess OS) ────────────────────
+        self.create_service(Trigger, '/game/start',    self._svc_start_game)
+        self.create_service(Trigger, '/game/new_game', self._svc_new_game)
+        self.create_service(Trigger, '/game/resign',   self._svc_resign)
 
         # Publish initial FEN so piece_detector starts with correct state
         self._publish_board_fen()
@@ -216,6 +228,22 @@ class GameManagerNode(Node):
 
         # ── Main game loop ────────────────────────────────────────────────
         while rclpy.ok():
+            # New game reset (from Chess OS /game/new_game service)
+            if self._new_game_event.is_set():
+                self._new_game_event.clear()
+                self._clock_hit_event.clear()
+                self._board_state_event.clear()
+                self._motion_done_event.clear()
+                self._board = chess.Board()
+                self._pre_move_fen = chess.STARTING_FEN
+                self._move_history.clear()
+                self._publish_board_fen()
+                self._pub_move_history()
+                self._transition(GS.IDLE)
+                self._do_capture_premove()
+                self.get_logger().info("New game reset complete — waiting for clock press")
+                continue
+
             # Check for flag fall at any point
             if self._flag_event.is_set():
                 self._flag_event.clear()
@@ -265,6 +293,8 @@ class GameManagerNode(Node):
 
                 # Apply move to internal board
                 self._board.push(human_move)
+                self._move_history.append(human_move.uci())
+                self._pub_move_history()
                 self._publish_board_fen()
                 self.get_logger().info(
                     f'Human move accepted: {human_move.uci()}  '
@@ -312,6 +342,8 @@ class GameManagerNode(Node):
                 )
 
                 self._board.push(computer_move)
+                self._move_history.append(computer_move.uci())
+                self._pub_move_history()
                 self._publish_board_fen()
 
                 # If computer promoted (black pawn to rank 1), wait for user
@@ -632,10 +664,49 @@ class GameManagerNode(Node):
         """Transition to GAME_OVER and log the result."""
         self._transition(GS.GAME_OVER)
         self._publish_turn('NONE')
+        self._result_pub.publish(String(data=reason))
         self.get_logger().info(f'═══ GAME OVER ═══  {reason}')
         self.get_logger().info(f'Final position: {self._board.fen()}')
         self.get_logger().info(
             f'Move history: {" ".join(m.uci() for m in self._board.move_stack)}')
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Game Control Services (called by Chess OS)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _svc_start_game(self, request, response):
+        """Trigger a clock-hit event from the UI — starts game or unblocks PROMOTION_WAIT."""
+        if self._state in (GS.IDLE, GS.PROMOTION_WAIT):
+            self._clock_hit_event.set()
+            response.success = True
+            response.message = f"Game start triggered from state {self._state}"
+        else:
+            response.success = False
+            response.message = f"Cannot start game from state {self._state}"
+        return response
+
+    def _svc_new_game(self, request, response):
+        """Reset to a fresh game — unblocks any waiting loop, resets board to starting position."""
+        self._new_game_event.set()
+        self._clock_hit_event.set()
+        self._board_state_event.set()
+        self._motion_done_event.set()
+        response.success = True
+        response.message = "New game reset triggered"
+        return response
+
+    def _svc_resign(self, request, response):
+        """Resign the current game immediately."""
+        self._end_game("Resignation")
+        response.success = True
+        response.message = "Resigned"
+        return response
+
+    def _pub_move_history(self):
+        """Publish the full move history as a space-separated UCI string."""
+        msg = String()
+        msg.data = ' '.join(self._move_history)
+        self._move_history_pub.publish(msg)
 
     # ─────────────────────────────────────────────────────────────────────
     # Publishing Helpers

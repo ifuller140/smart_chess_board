@@ -10,7 +10,7 @@ Usage:
     python3 code/chess_os.py --mode showcase
     python3 code/chess_os.py --no-ros --image /path/to/frame.jpg
 
-Access: http://192.168.1.149:5000
+Access: http://<pi-ip>:5000  (IP printed at startup)
 """
 
 from __future__ import annotations
@@ -46,6 +46,13 @@ try:
     HAS_ROS = True
 except ImportError:
     HAS_ROS = False
+
+try:
+    from rcl_interfaces.srv import SetParameters
+    from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
+    HAS_RCL_PARAMS = True
+except ImportError:
+    HAS_RCL_PARAMS = False
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _ROOT         = Path(__file__).parent.parent
@@ -145,6 +152,15 @@ _state = {
     "calib_sq_x":    None,
     "calib_sq_y":    None,
     "calib_applied": False,
+    # Game control
+    "move_history_uci":           [],
+    "game_result":                "",
+    "session_reference_captured": False,
+    "think_time_s":               2.0,
+    # Perception diff data
+    "square_scores":              {},
+    "diff_frame":                 None,
+    "ref_status":                 "No reference captured. Click 'Capture Reference' first.",
 }
 
 # ── Jog state — background thread publishes velocity to /stepper/velocity ───────
@@ -208,6 +224,11 @@ _params = {
     "show_pieces":          1,
     "show_white_mask":      0,
     "show_black_mask":      0,
+    # Diff detection (pushed to piece_detector_node via SetParameters)
+    "display_threshold":   18.0,
+    "shift_compensation":   1.0,
+    "clump_enable":          0,
+    "clump_keep_per_group":  1,
 }
 
 # ── Camera manager — MJPEG frame buffer ───────────────────────────────────────
@@ -507,12 +528,19 @@ if HAS_ROS:
             self.create_subscription(String,  "/stepper/status",             self._on_stepper_status, 10)
             self.create_subscription(Float32, "/clock/white_time",           self._on_white_time,     10)
             self.create_subscription(Float32, "/clock/black_time",           self._on_black_time,     10)
+            # Game control / perception data from ROS
+            self.create_subscription(String,  "/game_manager/move_history",  self._on_move_history,   10)
+            self.create_subscription(String,  "/game_manager/result",        self._on_result,         10)
+            self.create_subscription(String,  "/perception/square_scores",   self._on_square_scores,  10)
+            self.create_subscription(Image,   "/perception/piece_debug",     self._on_diff_img,       10)
+            self.create_subscription(String,  "/perception/reference_status",self._on_ref_status,     10)
 
             # ── Publishers ─────────────────────────────────────────────
             self.vel_pub       = self.create_publisher(Twist,    "/stepper/velocity",       10)
             self.cmd_pub       = self.create_publisher(RosPoint, "/stepper/command",        10)
             self.estop_pub     = self.create_publisher(Bool,     "/emergency_stop",         10)
             self.reset_pos_pub = self.create_publisher(Bool,     "/stepper/reset_position", 10)
+            self.set_time_pub  = self.create_publisher(Float32,  "/clock/set_time",         10)
 
             # ── Service clients ────────────────────────────────────────
             self._svc_engage       = self.create_client(Trigger, "/servo/engage")
@@ -522,6 +550,20 @@ if HAS_ROS:
             self._svc_clock_reset  = self.create_client(Trigger, "/clock/reset")
             self._svc_clock_pause  = self.create_client(Trigger, "/clock/pause")
             self._svc_clock_resume = self.create_client(Trigger, "/clock/resume")
+            # Game control services
+            self._svc_game_start    = self.create_client(Trigger, "/game/start")
+            self._svc_game_new      = self.create_client(Trigger, "/game/new_game")
+            self._svc_game_resign   = self.create_client(Trigger, "/game/resign")
+            self._svc_cap_reference = self.create_client(Trigger, "/perception/capture_premove")
+            # Detector parameter client (optional — requires rcl_interfaces)
+            self._svc_detector_params = None
+            if HAS_RCL_PARAMS:
+                self._svc_detector_params = self.create_client(
+                    SetParameters, "/piece_detector_node/set_parameters")
+
+            # Pending detector param update (set by Flask thread, applied by ROS timer)
+            self._pending_detector_params = None
+            self.create_timer(0.2, self._check_pending)
 
             # ── Action client for point-to-point gantry moves ─────────
             try:
@@ -640,6 +682,82 @@ if HAS_ROS:
 
         def _on_black_time(self, msg):
             with _lock: _state["black_time"] = msg.data
+
+        def _on_move_history(self, msg):
+            uci_str = msg.data.strip()
+            uci_list = uci_str.split() if uci_str else []
+            with _lock:
+                _state["move_history_uci"] = uci_list
+                _state["move_history"]     = uci_list
+
+        def _on_result(self, msg):
+            with _lock:
+                _state["game_result"] = msg.data.strip()
+
+        def _on_square_scores(self, msg):
+            try:
+                with _lock:
+                    _state["square_scores"] = json.loads(msg.data)
+            except Exception:
+                pass
+
+        def _on_diff_img(self, msg):
+            try:
+                h, w = msg.height, msg.width
+                data = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+                img  = data.reshape((h, w, 3))
+                ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    with _lock:
+                        _state["diff_frame"] = bytes(buf)
+            except Exception:
+                pass
+
+        def _on_ref_status(self, msg):
+            with _lock:
+                _state["ref_status"] = msg.data
+
+        def request_detector_params(self, threshold, compensation,
+                                    clump_enable=False, clump_keep=1):
+            if HAS_RCL_PARAMS:
+                self._pending_detector_params = {
+                    "diff_threshold":            threshold,
+                    "global_shift_compensation": compensation,
+                    "clump_enable":              clump_enable,
+                    "clump_keep_per_group":      clump_keep,
+                }
+
+        def _check_pending(self):
+            params = self._pending_detector_params
+            if params is None or not HAS_RCL_PARAMS:
+                return
+            if self._svc_detector_params is None:
+                return
+            self._pending_detector_params = None
+            if not self._svc_detector_params.service_is_ready():
+                return
+            type_map = {
+                "diff_threshold":            ParameterType.PARAMETER_DOUBLE,
+                "global_shift_compensation": ParameterType.PARAMETER_DOUBLE,
+                "clump_enable":              ParameterType.PARAMETER_BOOL,
+                "clump_keep_per_group":      ParameterType.PARAMETER_INTEGER,
+            }
+            req = SetParameters.Request()
+            for name, value in params.items():
+                pv = ParameterValue()
+                ptype = type_map.get(name, ParameterType.PARAMETER_DOUBLE)
+                pv.type = ptype
+                if ptype == ParameterType.PARAMETER_DOUBLE:
+                    pv.double_value = float(value)
+                elif ptype == ParameterType.PARAMETER_BOOL:
+                    pv.bool_value = bool(int(value))
+                elif ptype == ParameterType.PARAMETER_INTEGER:
+                    pv.integer_value = int(value)
+                p = Parameter()
+                p.name = name
+                p.value = pv
+                req.parameters.append(p)
+            self._svc_detector_params.call_async(req)
 
         def call_svc(self, client, timeout: float = 2.0):
             if not client.wait_for_service(timeout_sec=0.5):
@@ -772,6 +890,12 @@ def api_status():
             "calib_h8_y":     _state["calib_h8_y"],
             "calib_sq_x":     _state["calib_sq_x"],
             "calib_sq_y":     _state["calib_sq_y"],
+            # Game control
+            "move_history_uci":           _state["move_history_uci"],
+            "game_result":                _state["game_result"],
+            "think_time_s":               _state.get("think_time_s", 2.0),
+            "session_reference_captured": _state["session_reference_captured"],
+            "ref_status":                 _state["ref_status"],
         })
 
 @app.route("/api/snapshot")
@@ -930,24 +1054,135 @@ def api_stepper_reset_position():
 
 @app.route("/api/capture_premove", methods=["POST"])
 def api_capture_premove():
-    """Call /perception/capture_premove service to snapshot the current board."""
-    node = _ros_node
-    if node is None:
-        return jsonify({"ok": False, "message": "ROS not connected"}), 503
+    """Backward-compatible alias for /api/perception/capture_reference."""
+    return api_capture_reference()
+
+
+@app.route("/api/perception/capture_reference", methods=["POST"])
+def api_capture_reference():
+    """Call /perception/capture_premove and mark session_reference_captured."""
+    resp = _call_svc("_svc_cap_reference")
+    if not isinstance(resp, tuple):
+        with _lock:
+            _state["session_reference_captured"] = True
+            _state["ref_status"] = "Reference captured ✓"
+    return resp
+
+
+@app.route("/api/diff_frame")
+def api_diff_frame():
+    """Piece detector LAB diff heatmap (from /perception/piece_debug)."""
+    with _lock:
+        data = _state.get("diff_frame")
+    if not data:
+        data = _blank_jpeg(400, 400, "Waiting for piece_detector...")
+    return Response(data, mimetype="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.route("/api/square_scores")
+def api_square_scores():
+    with _lock:
+        return jsonify({
+            "scores":               dict(_state.get("square_scores", {})),
+            "display_threshold":    _params.get("display_threshold", 18.0),
+            "shift_compensation":   _params.get("shift_compensation", 1.0),
+            "clump_enable":         int(_params.get("clump_enable", 0)),
+            "clump_keep_per_group": int(_params.get("clump_keep_per_group", 1)),
+        })
+
+
+@app.route("/api/detector_params", methods=["POST"])
+def api_detector_params():
+    """Push diff threshold + compensation + clump settings to piece_detector_node."""
+    data = request.get_json(silent=True) or {}
+    thresh       = float(data.get("diff_threshold", 18.0))
+    comp         = float(data.get("shift_compensation", 1.0))
+    clump_enable = bool(data.get("clump_enable", False))
+    clump_keep   = int(data.get("clump_keep_per_group", 1))
+    with _lock:
+        _params["display_threshold"]    = thresh
+        _params["shift_compensation"]   = comp
+        _params["clump_enable"]         = int(clump_enable)
+        _params["clump_keep_per_group"] = clump_keep
+    if _ros_node is not None and HAS_RCL_PARAMS:
+        _ros_node.request_detector_params(thresh, comp, clump_enable, clump_keep)
+        return jsonify({"ok": True,
+                        "msg": f"Applied threshold={thresh}, comp={comp}, "
+                               f"clump={clump_enable}(keep={clump_keep})"})
+    elif _ros_node is not None:
+        return jsonify({"ok": False,
+                        "msg": "rcl_interfaces not available — params stored locally only"}), 503
+    return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+
+
+# ── Game control routes ───────────────────────────────────────────────────────
+
+@app.route("/api/game/start", methods=["POST"])
+def api_game_start():
+    """Trigger game start (same as pressing the physical clock from IDLE)."""
+    return _call_svc("_svc_game_start")
+
+
+@app.route("/api/game/new", methods=["POST"])
+def api_game_new():
+    """Reset to a fresh game."""
+    with _lock:
+        _state["game_result"]       = ""
+        _state["move_history_uci"]  = []
+        _state["move_history"]      = []
+    return _call_svc("_svc_game_new")
+
+
+@app.route("/api/game/resign", methods=["POST"])
+def api_game_resign():
+    """Resign the current game."""
+    return _call_svc("_svc_game_resign")
+
+
+@app.route("/api/game/settings", methods=["POST"])
+def api_game_settings():
+    """Update think time and/or clock time per player."""
+    data = request.get_json(silent=True) or {}
+    msgs = []
+    if "think_time_s" in data:
+        with _lock:
+            _state["think_time_s"] = float(data["think_time_s"])
+        msgs.append(f"think_time={data['think_time_s']}s (stored; restart game_manager to apply)")
+    if "time_per_player_min" in data and _ros_node is not None and HAS_ROS:
+        try:
+            m = Float32()
+            m.data = float(data["time_per_player_min"])
+            _ros_node.set_time_pub.publish(m)
+            msgs.append(f"clock={data['time_per_player_min']}min")
+        except Exception as e:
+            return jsonify({"ok": False, "msg": str(e)}), 500
+    return jsonify({"ok": True, "applied": msgs})
+
+
+# ── Node health ───────────────────────────────────────────────────────────────
+
+EXPECTED_NODES = [
+    "stepper_driver_node", "servo_node", "limit_switch_node",
+    "clock_display_node",  "camera_node", "board_detector_node",
+    "piece_detector_node", "gantry_kinematics_node", "motion_planner_node",
+    "homing_node",         "game_manager_node",       "chess_engine_node",
+]
+
+
+@app.route("/api/nodes/health")
+def api_nodes_health():
+    if _ros_node is None or not HAS_ROS:
+        return jsonify({n: False for n in EXPECTED_NODES})
     try:
-        from std_srvs.srv import Trigger
-        client = node.create_client(Trigger, "/perception/capture_premove")
-        if not client.wait_for_service(timeout_sec=2.0):
-            return jsonify({"ok": False, "message": "Service not available"}), 503
-        future = client.call_async(Trigger.Request())
-        import rclpy as _rclpy
-        _rclpy.spin_until_future_complete(node, future, timeout_sec=5.0)
-        if future.done() and future.result():
-            r = future.result()
-            return jsonify({"ok": r.success, "message": r.message})
-        return jsonify({"ok": False, "message": "Timeout"}), 504
+        alive = set(_ros_node.get_node_names())
+        return jsonify({n: (n in alive) for n in EXPECTED_NODES})
     except Exception as e:
-        return jsonify({"ok": False, "message": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
+
+
+# ─────────────────── (old api_capture_premove body kept below for ref)
+
 
 # ── Gantry jog routes ─────────────────────────────────────────────────────────
 @app.route("/api/gantry/jog/start", methods=["POST"])
@@ -1446,6 +1681,72 @@ body.showcase #debug-view{display:none}
 .cat-list b{color:var(--accent)}
 .cat-list a{color:var(--dim);transition:color .12s}
 .cat-list a:hover{color:var(--text)}
+
+/* ── Diff analysis (Perception tab) ──────────────────────────────── */
+.diff-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+@media(max-width:700px){.diff-grid{grid-template-columns:1fr}}
+#score-canvas{display:block;border:1px solid var(--border);border-radius:4px;
+              image-rendering:pixelated;width:100%;max-width:360px;aspect-ratio:1}
+#diff-heatmap{width:100%;display:block;image-rendering:pixelated;border-radius:4px;
+              border:1px solid var(--border)}
+.ref-banner{
+  padding:10px 14px;border-radius:6px;margin-bottom:10px;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+}
+.ref-banner.needs{background:#2a1400;border:2px solid var(--warn);color:var(--warn)}
+.ref-banner.done{background:#082a14;border:2px solid var(--ok);color:var(--ok)}
+.flagged-row{padding:5px 0;font-size:.78em}
+.flagged-row .lbl{color:var(--dim)}
+#flagged-squares{color:var(--ok);font-family:monospace;font-weight:700;letter-spacing:.05em}
+.median-row{padding:2px 0;font-size:.68em;color:var(--dim)}
+#median-floor{color:var(--accent);font-family:monospace}
+.slider-row{display:flex;align-items:center;gap:6px;margin:5px 0}
+.slider-row label{flex:0 0 150px;font-size:.7em;color:var(--dim);
+                  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slider-row input[type=range]{flex:1;accent-color:var(--accent);height:4px;min-width:80px}
+.slider-row .vb{flex:0 0 42px;text-align:right;font-family:monospace;font-size:.72em;color:var(--text)}
+.tog-row{display:flex;align-items:center;gap:8px;margin:5px 0}
+.tog-row label{font-size:.7em;color:var(--dim);cursor:pointer}
+.tog-row input[type=checkbox]{accent-color:var(--accent);width:13px;height:13px;cursor:pointer}
+
+/* ── Node health (Hardware tab) ───────────────────────────────────── */
+.node-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:4px 14px;padding:4px 0}
+.node-row{display:flex;align-items:center;gap:6px;font-size:.72em;font-family:monospace}
+.node-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.node-dot.ok{background:var(--ok)}
+.node-dot.err{background:var(--err)}
+.node-dot.unk{background:var(--dim)}
+
+/* ── Game controls (Game tab) ─────────────────────────────────────── */
+.checklist-card{padding:10px 12px;border-radius:5px;
+  background:var(--surf2);border:1px solid var(--border);margin-bottom:8px}
+.checklist-title{font-size:.6em;text-transform:uppercase;letter-spacing:.09em;
+  color:var(--dim);font-weight:700;margin-bottom:8px;padding-bottom:5px;
+  border-bottom:1px solid var(--border)}
+.check-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:.75em}
+.check-icon{width:14px;height:14px;border-radius:3px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:.9em}
+.check-icon.ok{background:#082a14;color:var(--ok)}
+.check-icon.no{background:#18182e;color:var(--dim)}
+.promo-banner{
+  background:#2a1e50;border:2px solid #8957e5;border-radius:6px;
+  padding:12px 16px;margin-bottom:10px;display:none;
+}
+.promo-banner.visible{display:block}
+.promo-banner .promo-title{color:#c084fc;font-weight:700;font-size:.85em;margin-bottom:6px}
+.gameover-banner{
+  background:#2a0810;border:2px solid var(--err);border-radius:6px;
+  padding:12px 16px;margin-bottom:10px;display:none;
+}
+.gameover-banner.visible{display:block}
+.gameover-banner .go-result{color:#ff8080;font-size:1em;font-weight:700;margin-bottom:8px}
+.settings-row{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:.75em}
+.settings-row label{flex:0 0 140px;color:var(--dim)}
+.settings-row input[type=range]{flex:1;accent-color:var(--accent)}
+.settings-row input[type=number]{width:60px;background:#040408;color:var(--text);
+  border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.9em;text-align:center}
+.settings-row .vb{flex:0 0 42px;font-family:monospace;font-size:.72em;color:var(--text);text-align:right}
+.game-ctrl-row{display:flex;gap:8px;flex-wrap:wrap;padding:6px 0}
 </style>
 </head>
 <body class="debug">
@@ -1559,8 +1860,51 @@ body.showcase #debug-view{display:none}
 
     <!-- ── GAME ─────────────────────────────────────────────────── -->
     <div class="tab-panel active" id="tab-game">
+
+      <!-- Promotion banner -->
+      <div class="promo-banner" id="promo-banner">
+        <div class="promo-title">&#9837; Pawn Promotion</div>
+        <div style="font-size:.8em;color:#c9d1d9;margin-bottom:10px">
+          The computer promoted a pawn! Place a <b>queen</b> on the indicated square,
+          then click <b>OK</b> or press the physical clock button.
+        </div>
+        <button class="btn primary" onclick="gameAct('start')">&#10003; OK — Piece placed</button>
+      </div>
+
+      <!-- Game-over banner -->
+      <div class="gameover-banner" id="gameover-banner">
+        <div class="go-result" id="gameover-result">Game Over</div>
+        <button class="btn" onclick="gameAct('new')" style="margin-top:4px">&#8635; New Game</button>
+      </div>
+
       <div class="two-col">
         <div>
+          <!-- Pre-game checklist -->
+          <div class="checklist-card">
+            <div class="checklist-title">Pre-Game Checklist</div>
+            <div class="check-row">
+              <div class="check-icon" id="chk-ros">?</div>
+              <span>ROS connected</span>
+            </div>
+            <div class="check-row">
+              <div class="check-icon" id="chk-homed">?</div>
+              <span>Gantry homed</span>
+            </div>
+            <div class="check-row">
+              <div class="check-icon" id="chk-calib">?</div>
+              <span>Board calibrated</span>
+            </div>
+            <div class="check-row">
+              <div class="check-icon" id="chk-ref">?</div>
+              <span>Reference captured</span>
+            </div>
+            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn primary" id="start-game-btn"
+                      onclick="gameAct('start')" disabled>&#9654; Start Game</button>
+              <span id="start-game-hint" style="font-size:.65em;color:var(--warn);align-self:center"></span>
+            </div>
+          </div>
+
           <div class="card">
             <div class="card-hdr">Board Position</div>
             <div id="board-wrap"><div id="board"></div></div>
@@ -1642,12 +1986,61 @@ body.showcase #debug-view{display:none}
               </div>
             </div>
           </div>
+
+          <!-- Game controls -->
+          <div class="card">
+            <div class="card-hdr">Game Controls</div>
+            <div class="card-body">
+              <div class="game-ctrl-row">
+                <button class="btn warn" onclick="confirmGameAct('new','Start a new game? Current game will be abandoned.')">&#8635; New Game</button>
+                <button class="btn danger" onclick="confirmGameAct('resign','Resign this game?')">&#9873; Resign</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Game settings -->
+          <div class="card">
+            <div class="card-hdr">Game Settings</div>
+            <div class="card-body">
+              <div class="settings-row">
+                <label title="Stockfish think time in seconds">Stockfish (s)</label>
+                <input type="range" id="think-slider" min="0.5" max="10" step="0.5" value="2"
+                  oninput="document.getElementById('think-vb').textContent=(+this.value).toFixed(1);sendGameSettings()">
+                <span class="vb" id="think-vb">2.0</span>
+              </div>
+              <div class="settings-row">
+                <label title="Time per player in minutes">Time / player (min)</label>
+                <input type="number" id="clock-time-input" min="1" max="60" value="10"
+                  style="width:60px;background:#040408;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.9em"
+                  onchange="sendGameSettings()">
+              </div>
+              <div style="font-size:.62em;color:var(--dim);margin-top:6px">
+                Clock time applies immediately. Think time takes effect next game (restart node to apply mid-game).
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div><!-- /tab-game -->
 
     <!-- ── PERCEPTION ───────────────────────────────────────────── -->
     <div class="tab-panel" id="tab-perception">
+
+      <!-- Capture Reference banner (prominent — required before game start) -->
+      <div class="ref-banner needs" id="ref-banner">
+        <div style="flex:1">
+          <div style="font-weight:700;font-size:.82em;margin-bottom:3px">
+            &#9888; Capture Pre-Move Reference
+          </div>
+          <div style="font-size:.7em;line-height:1.5" id="ref-status-text">
+            No reference captured. Required before starting a game — snapshots the current board as the move-detection baseline.
+          </div>
+        </div>
+        <button class="btn warn" id="capture-ref-btn" onclick="doCaptureReference()">
+          &#128247; Capture Reference
+        </button>
+      </div>
+
       <div class="two-col" style="margin-bottom:8px">
         <div class="card">
           <div class="card-hdr">Corner Calibration</div>
@@ -1665,23 +2058,98 @@ body.showcase #debug-view{display:none}
           <div class="card-body">
             <div class="stat-row">
               <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Method</span>
-              <span class="stat-val" style="font-size:.72em;color:#58a6ff">Pre-move frame diff</span>
+              <span class="stat-val" style="font-size:.72em;color:#58a6ff">LAB per-square diff</span>
             </div>
             <div class="stat-row">
               <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Last Changed Squares</span>
               <span class="stat-val" id="perc-lastmove" style="font-family:monospace;color:#3fb950;font-size:.75em">–</span>
             </div>
-            <div class="btn-row" style="margin-top:10px">
-              <button class="btn primary" onclick="capturePreMove()">&#128247; Capture Pre-Move Ref</button>
+            <div class="stat-row">
+              <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Reference Status</span>
+              <span class="stat-val" id="ref-status-inline" style="font-size:.7em;color:var(--warn)">–</span>
             </div>
-            <div style="font-size:.63em;color:var(--dim);margin-top:6px;line-height:1.5">
-              The pre-move reference is auto-captured by the game manager at the
-              start of each player's turn. Use this button to manually recapture
-              if the board was disturbed.
+            <div style="font-size:.63em;color:var(--dim);margin-top:8px;line-height:1.6;background:#040408;padding:8px;border-radius:4px">
+              <b style="color:var(--text)">How it works:</b>
+              game_manager enters <b>WAITING_PLAYER_MOVE</b> → calls /perception/capture_premove.
+              Human moves, presses clock → piece_detector compares every frame to the reference.
+              Per-square LAB diff scores are published to /perception/square_scores.
+              After global shift compensation, squares above diff_threshold are flagged as changed.
+              game_manager matches changed squares to a legal move.
             </div>
           </div>
         </div>
       </div>
+
+      <!-- Diff analysis section (fen_visualizer pipeline) -->
+      <div class="card">
+        <div class="card-hdr">Diff Analysis — Threshold Tuning</div>
+        <div class="card-body">
+          <div class="diff-grid">
+            <!-- Left: heatmap from ROS -->
+            <div>
+              <div style="font-size:.63em;color:var(--dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:.08em">
+                Piece Detector Heatmap (live from /perception/piece_debug)
+              </div>
+              <img id="diff-heatmap" src="/api/diff_frame" alt="diff heatmap">
+              <div style="margin-top:8px;font-size:.63em;color:var(--dim)">
+                Green outlines = squares flagged by the actual detector using its own threshold.
+                Use <b>Apply to Detector</b> to push your tuned values to the node.
+              </div>
+            </div>
+            <!-- Right: interactive score canvas + controls -->
+            <div>
+              <div style="font-size:.63em;color:var(--dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:.08em">
+                Interactive Score Grid (preview using sliders below)
+              </div>
+              <canvas id="score-canvas" width="360" height="360"></canvas>
+              <div class="flagged-row">
+                <span class="lbl">Would flag: </span>
+                <span id="flagged-squares">–</span>
+              </div>
+              <div class="median-row">
+                Compensation floor: <span id="median-floor">–</span>
+              </div>
+
+              <div style="margin-top:10px;background:var(--surf2);border:1px solid var(--border);border-radius:5px;padding:10px 12px">
+                <div style="font-size:.63em;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:8px;font-weight:700;border-bottom:1px solid var(--border);padding-bottom:5px">
+                  Detection Thresholds
+                  <small style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)">— preview only</small>
+                </div>
+                <div class="slider-row">
+                  <label title="Adjusted score above this = square flagged as changed. Default: 18">Diff threshold</label>
+                  <input type="range" id="s_display_threshold" min="5" max="80" step="0.5" value="18"
+                    oninput="onDiffSlider('display_threshold',+this.value);document.getElementById('vb_display_threshold').textContent=(+this.value).toFixed(1)">
+                  <span class="vb" id="vb_display_threshold">18.0</span>
+                </div>
+                <div class="slider-row">
+                  <label title="0=none, 1=full median subtraction, >1=aggressive. Default: 1.0">Shift compensation</label>
+                  <input type="range" id="s_shift_compensation" min="0" max="2.5" step="0.05" value="1.0"
+                    oninput="onDiffSlider('shift_compensation',+this.value);document.getElementById('vb_shift_compensation').textContent=(+this.value).toFixed(2)">
+                  <span class="vb" id="vb_shift_compensation">1.00</span>
+                </div>
+                <div class="tog-row">
+                  <input type="checkbox" id="t_clump_enable" onchange="onDiffTog('clump_enable',this.checked)">
+                  <label for="t_clump_enable" title="Group adjacent flagged squares, keep only hottest per cluster. NOTE: set Keep ≥ 4 for castling.">Clump mode (reduce perspective bleed)</label>
+                </div>
+                <div class="slider-row">
+                  <label title="Squares to keep per clump. 1=tight, 2-4 for castling.">Keep per clump</label>
+                  <input type="range" id="s_clump_keep" min="1" max="4" step="1" value="1"
+                    oninput="onDiffSlider('clump_keep_per_group',+this.value);document.getElementById('vb_clump_keep').textContent=this.value">
+                  <span class="vb" id="vb_clump_keep">1</span>
+                </div>
+                <div class="btn-row" style="margin-top:8px">
+                  <button class="btn primary" onclick="applyToDetector()">&#9881; Apply to Actual Detector</button>
+                </div>
+                <div style="font-size:.62em;color:var(--dim);margin-top:6px;line-height:1.5">
+                  Pushes <code>diff_threshold</code>, <code>global_shift_compensation</code>,
+                  and <code>clump_enable</code> to <code>piece_detector_node</code> via ROS set_parameters.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-hdr">Overlay Toggles</div>
         <div class="card-body" id="overlay-togs"></div>
@@ -1872,6 +2340,21 @@ body.showcase #debug-view{display:none}
 
     <!-- ── HARDWARE ──────────────────────────────────────────────── -->
     <div class="tab-panel" id="tab-hardware">
+
+      <!-- Node Health panel -->
+      <div class="card" style="margin-bottom:8px">
+        <div class="card-hdr">
+          ROS Node Health
+          <span style="font-size:.85em;font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim);margin-left:8px" id="node-health-ts">polling…</span>
+        </div>
+        <div class="card-body">
+          <div class="node-grid" id="node-health-grid">
+            <!-- populated by JS -->
+            <div style="color:var(--dim);font-size:.72em">Loading…</div>
+          </div>
+        </div>
+      </div>
+
       <div class="hw-grid">
 
         <div class="hw-block">
@@ -2257,11 +2740,192 @@ function sendParam(d) {
     body:JSON.stringify(d)});
 }
 function triggerReprocess() { sendParam({}); }
-function capturePreMove() {
-  fetch('/api/capture_premove', {method:'POST'}).then(function(r){return r.json();})
-    .then(function(d){ alert(d.message || (d.ok ? 'Pre-move captured' : 'Failed')); })
-    .catch(function(){ alert('Service unavailable'); });
+function capturePreMove() { doCaptureReference(); }
+
+// ── Capture Reference ─────────────────────────────────────────────
+function doCaptureReference() {
+  var btn = document.getElementById('capture-ref-btn');
+  if (btn) btn.disabled = true;
+  fetch('/api/perception/capture_reference', {method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var banner = document.getElementById('ref-banner');
+      var txt    = document.getElementById('ref-status-text');
+      var inl    = document.getElementById('ref-status-inline');
+      if (d.ok) {
+        if (banner) { banner.className='ref-banner done'; }
+        if (txt)    { txt.textContent='Reference captured ✓ — board is ready for move detection.'; }
+        if (inl)    { inl.textContent='Captured ✓'; inl.style.color='var(--ok)'; }
+      } else {
+        if (txt) { txt.textContent='Failed: '+(d.msg||d.message||'unknown error'); }
+        if (inl) { inl.textContent='Failed'; inl.style.color='var(--err)'; }
+      }
+      if (btn) btn.disabled = false;
+    }).catch(function(e) {
+      var txt = document.getElementById('ref-status-text');
+      if (txt) txt.textContent = 'Service unavailable';
+      if (btn) btn.disabled = false;
+    });
 }
+
+// ── Game control ──────────────────────────────────────────────────
+function gameAct(action) {
+  var url = {start:'/api/game/start', new:'/api/game/new', resign:'/api/game/resign'}[action];
+  if (!url) return;
+  fetch(url, {method:'POST'}).then(function(r){return r.json();})
+    .then(function(d){
+      if (!d.ok) { alert('Game action failed: '+(d.msg||d.message||'unknown')); }
+    }).catch(function(){ alert('ROS not connected'); });
+}
+
+function confirmGameAct(action, msg) {
+  if (window.confirm(msg)) gameAct(action);
+}
+
+var _settingsTimer = null;
+function sendGameSettings() {
+  clearTimeout(_settingsTimer);
+  _settingsTimer = setTimeout(function() {
+    var think = parseFloat(document.getElementById('think-slider').value);
+    var clock = parseFloat(document.getElementById('clock-time-input').value);
+    fetch('/api/game/settings', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({think_time_s: think, time_per_player_min: clock})
+    });
+  }, 500);
+}
+
+// ── Diff score canvas ─────────────────────────────────────────────
+var _diffParams = {display_threshold:18.0, shift_compensation:1.0, clump_enable:0, clump_keep_per_group:1};
+var _squareScores = {};
+
+function onDiffSlider(key, val) {
+  _diffParams[key] = val;
+  renderScoreCanvas();
+}
+function onDiffTog(key, val) {
+  _diffParams[key] = val ? 1 : 0;
+  renderScoreCanvas();
+}
+
+function renderScoreCanvas() {
+  var canvas = document.getElementById('score-canvas');
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  var w = canvas.width, h = canvas.height;
+  var sq = w / 8;
+  ctx.clearRect(0, 0, w, h);
+  var scores = _squareScores;
+  var vals = Object.values(scores);
+  var median = 0;
+  if (vals.length) {
+    var sorted = vals.slice().sort(function(a,b){return a-b;});
+    median = sorted[Math.floor(sorted.length/2)];
+  }
+  var comp   = _diffParams.shift_compensation;
+  var thresh = _diffParams.display_threshold;
+  var floor  = median * comp;
+  var flagged = [];
+  var files = 'abcdefgh';
+  for (var r = 0; r < 8; r++) {
+    for (var f = 0; f < 8; f++) {
+      var sq_name = files[f] + (8 - r);
+      var raw = scores[sq_name] || 0;
+      var adj = Math.max(0, raw - floor);
+      var isLight = (r + f) % 2 === 0;
+      // base tile
+      ctx.fillStyle = isLight ? '#2a2a3a' : '#1a1a28';
+      ctx.fillRect(f * sq, r * sq, sq, sq);
+      // heat overlay
+      if (raw > 0) {
+        var intensity = Math.min(1.0, adj / (thresh * 1.5));
+        ctx.fillStyle = 'rgba(255,' + Math.round(60 + 180 * (1-intensity)) + ',40,' + (0.2 + 0.75 * intensity) + ')';
+        ctx.fillRect(f * sq, r * sq, sq, sq);
+      }
+      // flag outline
+      if (adj >= thresh) {
+        ctx.strokeStyle = 'rgba(60,255,120,0.9)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(f * sq + 1, r * sq + 1, sq - 2, sq - 2);
+        flagged.push(sq_name);
+      }
+      // score text
+      ctx.fillStyle = adj >= thresh ? '#ffffff' : '#888';
+      ctx.font = Math.round(sq * 0.28) + 'px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(adj.toFixed(0), f * sq + sq / 2, r * sq + sq * 0.65);
+      // square name
+      ctx.fillStyle = '#445';
+      ctx.font = Math.round(sq * 0.22) + 'px monospace';
+      ctx.fillText(sq_name, f * sq + sq / 2, r * sq + sq - 3);
+    }
+  }
+  var fEl = document.getElementById('flagged-squares');
+  if (fEl) fEl.textContent = flagged.length ? flagged.join(' ') : '—';
+  var mEl = document.getElementById('median-floor');
+  if (mEl) mEl.textContent = floor.toFixed(1);
+}
+
+function applyToDetector() {
+  fetch('/api/detector_params', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      diff_threshold:     _diffParams.display_threshold,
+      shift_compensation: _diffParams.shift_compensation,
+      clump_enable:       _diffParams.clump_enable,
+      clump_keep_per_group: _diffParams.clump_keep_per_group
+    })
+  }).then(function(r){return r.json();})
+    .then(function(d){ if (!d.ok) alert('Apply failed: '+(d.msg||'')); });
+}
+
+// Refresh diff images and score data when on perception tab
+setInterval(function() {
+  if (activeTab !== 'perception') return;
+  fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
+    _squareScores = d.scores || {};
+    renderScoreCanvas();
+    // Sync sliders from server if not being dragged
+    var elems = {s_display_threshold:d.display_threshold, s_shift_compensation:d.shift_compensation,
+                 s_clump_keep:d.clump_keep_per_group};
+    // (don't override while user is interacting — just update internal state)
+    if (d.display_threshold !== undefined) _diffParams.display_threshold = d.display_threshold;
+    if (d.shift_compensation !== undefined) _diffParams.shift_compensation = d.shift_compensation;
+    if (d.clump_enable !== undefined) _diffParams.clump_enable = d.clump_enable;
+    if (d.clump_keep_per_group !== undefined) _diffParams.clump_keep_per_group = d.clump_keep_per_group;
+  });
+  // Refresh diff heatmap image
+  var img = document.getElementById('diff-heatmap');
+  if (img) img.src = '/api/diff_frame?t=' + Date.now();
+}, 1500);
+
+// ── Node health polling ───────────────────────────────────────────
+var _nodeHealthInterval = null;
+function startNodeHealthPoll() {
+  if (_nodeHealthInterval) return;
+  _nodeHealthInterval = setInterval(function() {
+    if (activeTab !== 'hardware') return;
+    fetch('/api/nodes/health').then(function(r){return r.json();}).then(function(d){
+      var grid = document.getElementById('node-health-grid');
+      var ts   = document.getElementById('node-health-ts');
+      if (!grid) return;
+      if (d.error) { grid.innerHTML='<span style="color:var(--err)">'+d.error+'</span>'; return; }
+      var nodes = Object.keys(d);
+      var html  = '';
+      nodes.forEach(function(n) {
+        var ok  = d[n];
+        var cls = ok ? 'ok' : 'err';
+        html += '<div class="node-row"><div class="node-dot '+cls+'"></div>'+n+'</div>';
+      });
+      grid.innerHTML = html;
+      if (ts) ts.textContent = 'updated '+new Date().toLocaleTimeString();
+    }).catch(function(){
+      var grid = document.getElementById('node-health-grid');
+      if (grid) grid.innerHTML='<span style="color:var(--dim)">ROS offline</span>';
+    });
+  }, 3000);
+}
+startNodeHealthPoll();
 
 // ── Gantry controls ───────────────────────────────────────────────
 function getJogSpeed() { return +document.getElementById('jog-speed').value; }
@@ -2889,6 +3553,86 @@ function pollStatus() {
       document.getElementById('estop-btn').classList.add('fired');
     }
 
+    // ── Pre-game checklist ────────────────────────────────────────
+    var chkFn = function(id, ok) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = ok ? '✓' : '✗';
+      el.className = 'check-icon ' + (ok ? 'ok' : 'no');
+    };
+    var rosOk   = !!d.ros_connected;
+    var homedOk = !!d.gantry_homed;
+    var calibOk = !!d.calib_applied;
+    var refOk   = !!d.session_reference_captured;
+    chkFn('chk-ros',   rosOk);
+    chkFn('chk-homed', homedOk);
+    chkFn('chk-calib', calibOk);
+    chkFn('chk-ref',   refOk);
+    var startBtn  = document.getElementById('start-game-btn');
+    var startHint = document.getElementById('start-game-hint');
+    var canStart  = rosOk && homedOk && refOk;
+    if (startBtn) startBtn.disabled = !canStart;
+    if (startHint) {
+      if (!rosOk)   startHint.textContent = 'ROS not connected';
+      else if (!homedOk) startHint.textContent = 'Home the gantry first';
+      else if (!refOk)   startHint.textContent = 'Capture reference first (Perception tab)';
+      else               startHint.textContent = '';
+    }
+
+    // ── Move history (UCI from game_manager) ──────────────────────
+    var hist = d.move_history_uci || d.move_history || [];
+    if (hist.length) {
+      var mh = '';
+      hist.forEach(function(m,i) {
+        if (i%2===0) mh += '<span class="mn">'+(Math.floor(i/2)+1)+'. </span>';
+        mh += '<span class="mv">'+m+' </span>';
+      });
+      var mhEl = document.getElementById('move-hist');
+      if (mhEl) { mhEl.innerHTML = mh; mhEl.scrollTop = mhEl.scrollHeight; }
+    }
+
+    // ── Promotion banner ──────────────────────────────────────────
+    var promoBanner  = document.getElementById('promo-banner');
+    if (promoBanner) {
+      promoBanner.className = 'promo-banner' + (gs === 'PROMOTION_WAIT' ? ' visible' : '');
+    }
+
+    // ── Game-over banner ──────────────────────────────────────────
+    var goBanner = document.getElementById('gameover-banner');
+    var goResult = document.getElementById('gameover-result');
+    if (goBanner) {
+      var showGo = (gs === 'GAME_OVER' && d.game_result);
+      goBanner.className = 'gameover-banner' + (showGo ? ' visible' : '');
+      if (goResult && d.game_result) goResult.textContent = d.game_result;
+    }
+
+    // ── Reference status (Perception tab) ────────────────────────
+    var refBanner = document.getElementById('ref-banner');
+    var refTxt    = document.getElementById('ref-status-text');
+    var refInl    = document.getElementById('ref-status-inline');
+    if (refBanner) {
+      refBanner.className = 'ref-banner ' + (refOk ? 'done' : 'needs');
+    }
+    if (refTxt && d.ref_status) refTxt.textContent = d.ref_status;
+    if (refInl) {
+      refInl.textContent = d.ref_status || '–';
+      refInl.style.color = refOk ? 'var(--ok)' : 'var(--warn)';
+    }
+
+    // ── Settings: populate on first load ─────────────────────────
+    var ts = document.getElementById('think-slider');
+    var tv = document.getElementById('think-vb');
+    if (ts && !ts._synced && d.think_time_s) {
+      ts.value = d.think_time_s;
+      if (tv) tv.textContent = parseFloat(d.think_time_s).toFixed(1);
+      ts._synced = true;
+    }
+    var ct = document.getElementById('clock-time-input');
+    if (ct && !ct._synced && d.white_time) {
+      ct.value = Math.round(d.white_time / 60);
+      ct._synced = true;
+    }
+
   }).catch(function(){
     setPill('pill-cam', false);
     setPill('pill-ros', false);
@@ -3019,9 +3763,20 @@ def main():
             target=_opencv_camera_loop, args=(args.camera,),
             daemon=True).start()
 
-    print(f"\n  ♞  ChessOS")
+    import socket as _socket
+    def _get_local_ip():
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "localhost"
+    pi_ip = _get_local_ip()
+    print(f"\n  ♞  ChessOS ready")
+    print(f"     http://{pi_ip}:{args.port}")
     print(f"     http://localhost:{args.port}")
-    print(f"     http://192.168.1.149:{args.port}")
     print(f"     Mode:   {args.mode}")
     print(f"     ROS2:   {'enabled' if not args.no_ros else 'disabled'}")
     print(f"     Tests:  {_TEST_SCRIPT}\n")
