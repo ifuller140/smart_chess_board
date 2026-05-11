@@ -33,8 +33,8 @@ Corner-Based Obstacle Routing:
 
 Topics:
   Subscribes: /motion/command   (String) — "UCI FEN" move command
+  Subscribes: /motion/abort     (Bool)   — True to cancel in-progress move
   Publishes:  /motion/done      (Bool)   — True on success, False on failure
-  Publishes:  /game_manager/state (String) — PROMOTION_WAIT during promotion
 
 Action Client:
   /gantry/move (chess_interfaces/action/MoveGantry) — move gantry to XY
@@ -157,7 +157,9 @@ class MotionPlannerNode(Node):
 
         # ── Publishers ──────────────────────────────────────────────────────
         self._done_pub  = self.create_publisher(Bool, '/motion/done', 10)
-        self._state_pub = self.create_publisher(String, '/game_manager/state', 10)
+
+        # ── Abort flag (set by /motion/abort subscription) ──────────────────
+        self._abort_requested = False
 
         # ── Action client ───────────────────────────────────────────────────
         self._gantry_client = ActionClient(self, MoveGantry, '/gantry/move')
@@ -166,9 +168,10 @@ class MotionPlannerNode(Node):
         self._servo_engage  = self.create_client(Trigger, '/servo/engage')
         self._servo_release = self.create_client(Trigger, '/servo/release')
 
-        # ── Command subscription ─────────────────────────────────────────
+        # ── Subscriptions ────────────────────────────────────────────────
         # Format: "UCI FEN"  e.g.  "e2e4 rnbqkbnr/.../w KQkq - 0 1"
         self.create_subscription(String, '/motion/command', self._command_cb, 10)
+        self.create_subscription(Bool, '/motion/abort', self._on_abort, 10)
 
         self.get_logger().info(
             f'Motion Planner ready — '
@@ -180,12 +183,19 @@ class MotionPlannerNode(Node):
     # Command Handling
     # ─────────────────────────────────────────────────────────────────────
 
+    def _on_abort(self, msg: Bool):
+        """Receive abort signal from game_manager — stop gantry movement immediately."""
+        if msg.data:
+            self._abort_requested = True
+            self.get_logger().warn('Motion abort requested')
+
     def _command_cb(self, msg: String):
         """
         Receive 'UCI FEN' command and execute the appropriate move sequence.
 
         Format:  "e2e4 rnbqkbnr/pppppppp/.../RNBQKBNR w KQkq - 0 1"
         """
+        self._abort_requested = False  # clear any stale abort from previous new-game
         parts = msg.data.strip().split(' ', 1)
         if len(parts) < 1 or len(parts[0]) < 4:
             self.get_logger().error(f'Invalid command format: {msg.data!r}')
@@ -248,9 +258,6 @@ class MotionPlannerNode(Node):
         if not ok:
             return False
 
-        if is_promotion:
-            self._handle_promotion(move, board)
-
         return True
 
     # ─────────────────────────────────────────────────────────────────────
@@ -294,15 +301,6 @@ class MotionPlannerNode(Node):
         if not ok:
             return False
         return self._pick_and_place_square(src, dst, board)
-
-    def _handle_promotion(self, move: chess.Move, board: chess.Board):
-        color = 'Black' if board.turn == chess.BLACK else 'White'
-        piece = chess.piece_name(move.promotion).capitalize()
-        sq    = chess.square_name(move.to_square)
-        self.get_logger().info(
-            f'Pawn promotion: {color} pawn → {piece} at {sq}. '
-            f'Prompting user to place piece on board.')
-        self._state_pub.publish(String(data='PROMOTION_WAIT'))
 
     # ─────────────────────────────────────────────────────────────────────
     # Graveyard Routing
@@ -577,6 +575,9 @@ class MotionPlannerNode(Node):
         speed: Optional[float] = None,
         timeout: float = 30.0,
     ) -> bool:
+        if self._abort_requested:
+            self.get_logger().warn('Move skipped — abort requested')
+            return False
         if not self._gantry_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error('/gantry/move action server not available')
             return False

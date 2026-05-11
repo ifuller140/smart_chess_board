@@ -114,6 +114,12 @@ class ChessClockNode(Node):
 
         if state in ('IDLE', 'HOMING', 'STARTUP', 'GAME_OVER'):
             self._stop()
+            # Reset to full time on a new game / startup so the next game starts fresh
+            if state in ('IDLE', 'STARTUP'):
+                self._white_time = self._init_time
+                self._black_time = self._init_time
+                self._flag_fired = False
+                self._publish()
         elif state == 'PROMOTION_WAIT':
             # Black promoted — pause clock until user swaps piece and confirms
             self._pause()
@@ -265,8 +271,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         if rclpy.ok():
-            if rclpy.ok():
-                rclpy.shutdown()
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

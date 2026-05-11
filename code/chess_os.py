@@ -557,12 +557,16 @@ if HAS_ROS:
             self._svc_cap_reference = self.create_client(Trigger, "/perception/capture_premove")
             # Detector parameter client (optional — requires rcl_interfaces)
             self._svc_detector_params = None
+            self._svc_game_manager_params = None
             if HAS_RCL_PARAMS:
                 self._svc_detector_params = self.create_client(
                     SetParameters, "/piece_detector_node/set_parameters")
+                self._svc_game_manager_params = self.create_client(
+                    SetParameters, "/game_manager_node/set_parameters")
 
-            # Pending detector param update (set by Flask thread, applied by ROS timer)
+            # Pending param updates (set by Flask thread, applied by ROS timer)
             self._pending_detector_params = None
+            self._pending_game_manager_params = None
             self.create_timer(0.2, self._check_pending)
 
             # ── Action client for point-to-point gantry moves ─────────
@@ -727,21 +731,37 @@ if HAS_ROS:
                     "clump_keep_per_group":      clump_keep,
                 }
 
+        def request_game_manager_params(self, think_time_s: float):
+            if HAS_RCL_PARAMS:
+                self._pending_game_manager_params = {
+                    "engine_think_time_s": think_time_s,
+                }
+
         def _check_pending(self):
-            params = self._pending_detector_params
-            if params is None or not HAS_RCL_PARAMS:
+            if HAS_RCL_PARAMS:
+                self._apply_pending_params(
+                    self._pending_detector_params,
+                    self._svc_detector_params,
+                    {
+                        "diff_threshold":            ParameterType.PARAMETER_DOUBLE,
+                        "global_shift_compensation": ParameterType.PARAMETER_DOUBLE,
+                        "clump_enable":              ParameterType.PARAMETER_BOOL,
+                        "clump_keep_per_group":      ParameterType.PARAMETER_INTEGER,
+                    },
+                )
+                self._pending_detector_params = None
+                self._apply_pending_params(
+                    self._pending_game_manager_params,
+                    self._svc_game_manager_params,
+                    {"engine_think_time_s": ParameterType.PARAMETER_DOUBLE},
+                )
+                self._pending_game_manager_params = None
+
+        def _apply_pending_params(self, params, client, type_map):
+            if params is None or client is None:
                 return
-            if self._svc_detector_params is None:
+            if not client.service_is_ready():
                 return
-            self._pending_detector_params = None
-            if not self._svc_detector_params.service_is_ready():
-                return
-            type_map = {
-                "diff_threshold":            ParameterType.PARAMETER_DOUBLE,
-                "global_shift_compensation": ParameterType.PARAMETER_DOUBLE,
-                "clump_enable":              ParameterType.PARAMETER_BOOL,
-                "clump_keep_per_group":      ParameterType.PARAMETER_INTEGER,
-            }
             req = SetParameters.Request()
             for name, value in params.items():
                 pv = ParameterValue()
@@ -757,18 +777,20 @@ if HAS_ROS:
                 p.name = name
                 p.value = pv
                 req.parameters.append(p)
-            self._svc_detector_params.call_async(req)
+            client.call_async(req)
 
         def call_svc(self, client, timeout: float = 2.0):
             if not client.wait_for_service(timeout_sec=0.5):
                 return False, "Service not available"
             future = client.call_async(Trigger.Request())
-            rclpy.spin_until_future_complete(self, future,
-                                             timeout_sec=timeout)
-            if future.done():
-                r = future.result()
-                return r.success, r.message
-            return False, "Timeout"
+            # Poll — the background rclpy.spin thread processes the response
+            deadline = time.monotonic() + timeout
+            while not future.done():
+                if time.monotonic() > deadline:
+                    return False, "Timeout"
+                time.sleep(0.05)
+            r = future.result()
+            return r.success, r.message
 
 # ── Test runner ───────────────────────────────────────────────────────────────
 class _TestRunner:
@@ -1146,9 +1168,14 @@ def api_game_settings():
     data = request.get_json(silent=True) or {}
     msgs = []
     if "think_time_s" in data:
+        think_s = float(data["think_time_s"])
         with _lock:
-            _state["think_time_s"] = float(data["think_time_s"])
-        msgs.append(f"think_time={data['think_time_s']}s (stored; restart game_manager to apply)")
+            _state["think_time_s"] = think_s
+        if _ros_node is not None and HAS_RCL_PARAMS:
+            _ros_node.request_game_manager_params(think_s)
+            msgs.append(f"think_time={think_s}s (applied to game_manager_node)")
+        else:
+            msgs.append(f"think_time={think_s}s (stored; ROS not available)")
     if "time_per_player_min" in data and _ros_node is not None and HAS_ROS:
         try:
             m = Float32()
@@ -3247,20 +3274,28 @@ function drawCanvas(gx, gy) {
 
 // ── Emergency stop ────────────────────────────────────────────────
 function doEstop() {
-  fetch('/api/hw/estop', {method:'POST'})
-    .then(function(r){return r.json();})
-    .then(function(d){
-      var btn = document.getElementById('estop-btn');
-      if (d.ok) {
-        btn.classList.add('fired');
-        btn.textContent = '⚠ STOPPED';
-        setTimeout(function(){
+  var btn = document.getElementById('estop-btn');
+  if (btn.classList.contains('fired')) {
+    // Second click — deliberately clear the e-stop
+    fetch('/api/hw/estop/clear', {method:'POST'})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (d.ok) {
           btn.classList.remove('fired');
           btn.textContent = '☠ E-STOP';
-          fetch('/api/hw/estop/clear', {method:'POST'});
-        }, 3000);
-      }
-    }).catch(function(){});
+        }
+      }).catch(function(){});
+  } else {
+    // First click — activate e-stop
+    fetch('/api/hw/estop', {method:'POST'})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (d.ok) {
+          btn.classList.add('fired');
+          btn.textContent = '⚠ CLEAR E-STOP';
+        }
+      }).catch(function(){});
+  }
 }
 
 // ── Clock controls ────────────────────────────────────────────────
@@ -3470,16 +3505,6 @@ function pollStatus() {
       lmEl.textContent = d.last_move ? d.last_move.split(',').join(' → ') : '–';
     }
 
-    // Move history
-    if (d.move_history && d.move_history.length) {
-      var mh = '';
-      d.move_history.forEach(function(m,i) {
-        if (i%2===0) mh += '<span class="mn">'+(Math.floor(i/2)+1)+'. </span>';
-        mh += '<span class="mv">'+m+' </span>';
-      });
-      document.getElementById('move-hist').innerHTML = mh;
-    }
-
     // Connection stats
     var age = d.last_updated > 0 ? (Date.now()/1000 - d.last_updated) : 9999;
     var ae  = document.getElementById('st-age');
@@ -3570,11 +3595,12 @@ function pollStatus() {
     chkFn('chk-ref',   refOk);
     var startBtn  = document.getElementById('start-game-btn');
     var startHint = document.getElementById('start-game-hint');
-    var canStart  = rosOk && homedOk && refOk;
+    var canStart  = rosOk && homedOk && calibOk && refOk;
     if (startBtn) startBtn.disabled = !canStart;
     if (startHint) {
-      if (!rosOk)   startHint.textContent = 'ROS not connected';
+      if (!rosOk)        startHint.textContent = 'ROS not connected';
       else if (!homedOk) startHint.textContent = 'Home the gantry first';
+      else if (!calibOk) startHint.textContent = 'Apply board calibration first (Hardware tab)';
       else if (!refOk)   startHint.textContent = 'Capture reference first (Perception tab)';
       else               startHint.textContent = '';
     }

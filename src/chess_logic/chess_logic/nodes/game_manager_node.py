@@ -78,6 +78,7 @@ class GS:
     EXECUTING_MOVE       = 'EXECUTING_MOVE'
     HITTING_CLOCK        = 'HITTING_CLOCK'
     PROMOTION_WAIT       = 'PROMOTION_WAIT'
+    PROMOTION_DONE       = 'PROMOTION_DONE'
     GAME_OVER            = 'GAME_OVER'
 
 
@@ -124,6 +125,7 @@ class GameManagerNode(Node):
         self._state_pub = self.create_publisher(String, '/game_manager/state', 10)
         self._turn_pub  = self.create_publisher(String, '/game_manager/turn',  10)
         self._motion_pub = self.create_publisher(String, '/motion/command', 10)
+        self._abort_pub  = self.create_publisher(Bool,   '/motion/abort',   10)
         # Authoritative FEN for piece_detector_node (game-state-assisted piece typing)
         self._fen_pub   = self.create_publisher(String, '/game_manager/board_fen', 10)
         # Game control publishers (read by Chess OS)
@@ -300,6 +302,15 @@ class GameManagerNode(Node):
                     f'Human move accepted: {human_move.uci()}  '
                     f'Board: {self._board.fen().split(" ")[0]}')
 
+                # If human promoted, wait for the physical piece swap
+                if human_move.promotion is not None:
+                    self.get_logger().info(
+                        'Human pawn promotion — waiting for player to place promoted piece and press clock...')
+                    self._transition(GS.PROMOTION_WAIT)
+                    self._clock_hit_event.clear()
+                    self._clock_hit_event.wait()
+                    self._state_pub.publish(String(data=GS.PROMOTION_DONE))
+
                 # Check game end after human move
                 game_end = self._check_game_end()
                 if game_end:
@@ -353,6 +364,8 @@ class GameManagerNode(Node):
                     self._transition(GS.PROMOTION_WAIT)
                     self._clock_hit_event.clear()
                     self._clock_hit_event.wait()  # User presses clock to confirm
+                    # Resume the chess clock before continuing
+                    self._state_pub.publish(String(data=GS.PROMOTION_DONE))
                     self._transition(GS.EXECUTING_MOVE)
 
                 # Check game end after computer move
@@ -575,6 +588,7 @@ class GameManagerNode(Node):
 
         req = RequestMove.Request()
         req.fen = self._board.fen()
+        req.think_time_s = float(self._think_time)
 
         future = self._engine_client.call_async(req)
         deadline = time.monotonic() + self._think_time + 10.0
@@ -687,6 +701,8 @@ class GameManagerNode(Node):
 
     def _svc_new_game(self, request, response):
         """Reset to a fresh game — unblocks any waiting loop, resets board to starting position."""
+        # Cancel any in-progress gantry motion before resetting
+        self._abort_pub.publish(Bool(data=True))
         self._new_game_event.set()
         self._clock_hit_event.set()
         self._board_state_event.set()
@@ -752,8 +768,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         if rclpy.ok():
-            if rclpy.ok():
-                rclpy.shutdown()
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -17,11 +17,16 @@ class ChessEngineNode(Node):
         self.difficulty = self.get_parameter('difficulty').value
         
         self.engine = None
-        
+
         # Try to init stockfish
         try:
             self.engine = chess.engine.SimpleEngine.popen_uci(self.engine_path)
-            self.get_logger().info(f"Stockfish engine started: {self.engine_path}")
+            if self.difficulty > 0:
+                skill = min(20, max(0, self.difficulty))
+                self.engine.configure({"Skill Level": skill})
+            self.get_logger().info(
+                f"Stockfish engine started: {self.engine_path} "
+                f"(skill={self.difficulty if self.difficulty > 0 else 'random'})")
         except Exception as e:
             self.get_logger().warn(f"Could not start Stockfish: {e}. Will use Random/Simple fallback.")
 
@@ -38,10 +43,10 @@ class ChessEngineNode(Node):
         best_move = None
         
         if self.engine and self.difficulty > 0:
-            # Use Stockfish
             try:
-                limit = chess.engine.Limit(time=1.0) # 1 second think time
-                result = self.engine.play(board, limit)
+                think_time = float(request.think_time_s) if request.think_time_s > 0 else 1.0
+                think_time = max(0.5, think_time)
+                result = self.engine.play(board, chess.engine.Limit(time=think_time))
                 best_move = result.move
             except Exception as e:
                 self.get_logger().error(f"Engine error: {e}")

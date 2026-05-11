@@ -1,4 +1,5 @@
 string fen               # Current board state
+float32 think_time_s     # How long the engine should think (seconds)
 ---
 string best_move_uci     # e.g., "e2e4"
 float32 think_time
