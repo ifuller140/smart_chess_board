@@ -1,41 +1,52 @@
 #!/usr/bin/env python3
-"""Quick test script for the Z-axis SG90 servo on GPIO 12 (BCM)."""
+"""Quick test script for the Z-axis SG90 servo on GPIO 12 (BCM).
 
-import RPi.GPIO as GPIO
+Uses pigpio (matches src/chess_hw_interface servo_node.py) instead of
+RPi.GPIO. This talks to the pigpiod daemon over a socket, so the script
+itself does not need to run as root.
+
+Requires the pigpio daemon running on the Pi:
+    sudo pigpiod
+"""
+
+import sys
 import time
 
+import pigpio
+
 Z_SERVO_PIN = 12
-PWM_FREQ = 50  # Hz — standard for SG90
 
-# SG90 pulse widths as duty cycles at 50 Hz (period = 20ms)
-#   0°  -> 1.0ms -> 5.0%
-#   90° -> 1.5ms -> 7.5%  (center / magnet raised)
-# 180°  -> 2.0ms -> 10.0% (magnet lowered)
-UP   = 7.5   # magnet raised
-DOWN = 10.0  # magnet lowered
+# Pulse widths in microseconds (standard SG90 range: 1000-2000us)
+#   0°  -> 1000us
+#   90° -> 1500us (center / magnet raised)
+# 180°  -> 2000us (magnet lowered)
+UP = 1500    # magnet raised
+DOWN = 2000  # magnet lowered
 
 
-def angle_to_duty(degrees: float) -> float:
-    """Convert 0-180° to SG90 duty cycle."""
-    return 5.0 + (degrees / 180.0) * 5.0
+def angle_to_pulsewidth(degrees: float) -> int:
+    """Convert 0-180° to a pigpio pulse width in microseconds."""
+    return int(1000 + (degrees / 180.0) * 1000)
 
 
 def main():
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(Z_SERVO_PIN, GPIO.OUT)
+    pi = pigpio.pi()
+    if not pi.connected:
+        print("Cannot connect to pigpiod. Start it with: sudo pigpiod")
+        sys.exit(1)
 
-    pwm = GPIO.PWM(Z_SERVO_PIN, PWM_FREQ)
-    pwm.start(UP)
+    pi.set_mode(Z_SERVO_PIN, pigpio.OUTPUT)
+    pi.set_servo_pulsewidth(Z_SERVO_PIN, UP)
     print(f"Z-axis servo on GPIO {Z_SERVO_PIN} — started at UP position (90°)")
     time.sleep(1)
 
     print("\nRunning sweep: UP -> DOWN -> UP")
     print("  Moving DOWN (180°) ...")
-    pwm.ChangeDutyCycle(DOWN)
+    pi.set_servo_pulsewidth(Z_SERVO_PIN, DOWN)
     time.sleep(1.5)
 
     print("  Moving UP (90°) ...")
-    pwm.ChangeDutyCycle(UP)
+    pi.set_servo_pulsewidth(Z_SERVO_PIN, UP)
     time.sleep(1.5)
 
     print("\nInteractive mode — enter angle (0-180) or q to quit:")
@@ -48,9 +59,9 @@ def main():
             if not 0 <= deg <= 180:
                 print("  Out of range (0-180)")
                 continue
-            duty = angle_to_duty(deg)
-            print(f"  -> {deg}° (duty {duty:.2f}%)")
-            pwm.ChangeDutyCycle(duty)
+            pulse = angle_to_pulsewidth(deg)
+            print(f"  -> {deg}° (pulse {pulse}us)")
+            pi.set_servo_pulsewidth(Z_SERVO_PIN, pulse)
             time.sleep(0.5)
         except ValueError:
             print("  Enter a number or 'q'")
@@ -58,10 +69,10 @@ def main():
             break
 
     print("\nReturning to UP and cleaning up.")
-    pwm.ChangeDutyCycle(UP)
+    pi.set_servo_pulsewidth(Z_SERVO_PIN, UP)
     time.sleep(0.5)
-    pwm.stop()
-    GPIO.cleanup()
+    pi.set_servo_pulsewidth(Z_SERVO_PIN, 0)  # stop pulses to avoid jitter
+    pi.stop()
 
 
 if __name__ == "__main__":
