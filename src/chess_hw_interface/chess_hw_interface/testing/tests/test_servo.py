@@ -25,9 +25,13 @@ class ServoTest(HardwareTest):
     # PWM settings
     PWM_FREQUENCY = 50  # 50Hz for servos
     
-    # Z-axis servo positions (duty cycle %)
-    Z_UP_PWM = 2.5      # Magnet raised
-    Z_DOWN_PWM = 7.5    # Magnet lowered
+    # Z-axis servo positions (duty cycle %, 50Hz software PWM)
+    # Calibrated via code/test_z_servo.py's interactive angle sweep:
+    # 170deg release (clear) / 145deg engage (drag), converted to duty
+    # cycle with the same 500-2500us / 0-180deg mapping as that script
+    # and src/chess_hw_interface/nodes/servo_node.py.
+    Z_UP_PWM = 11.94    # Release (170deg) — magnet clear of pieces
+    Z_DOWN_PWM = 10.56  # Engage (145deg) — magnet drags a piece
     
     # Clock servo positions (duty cycle %)
     # USER_ATTENTION: Calibrate these values for your clock button

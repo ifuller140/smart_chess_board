@@ -17,12 +17,7 @@ import pigpio
 
 Z_SERVO_PIN = 12
 
-# Calibrated positions — must match src/chess_hw_interface/config/pins.yaml
-# (servo_node: engage_pulse_us / release_pulse_us)
-UP = 1500   # release position — magnet clear of board
-DOWN = 500  # engage position — magnet approaches board
-
-# Wider sweep range for interactive calibration (typical SG90 full travel)
+# Sweep range for interactive calibration (typical SG90 full travel)
 MIN_PULSE = 500
 MAX_PULSE = 2500
 
@@ -30,6 +25,12 @@ MAX_PULSE = 2500
 def angle_to_pulsewidth(degrees: float) -> int:
     """Convert 0-180° to a pigpio pulse width in microseconds."""
     return int(MIN_PULSE + (degrees / 180.0) * (MAX_PULSE - MIN_PULSE))
+
+
+# Calibrated positions — must match src/chess_hw_interface/config/pins.yaml
+# (servo_node: engage_angle_deg / release_angle_deg)
+UP = angle_to_pulsewidth(170)    # release position — magnet clear of board
+DOWN = angle_to_pulsewidth(145)  # engage position — magnet drags piece
 
 
 def main():

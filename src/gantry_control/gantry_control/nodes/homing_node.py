@@ -40,6 +40,16 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, String
 
+# SG90 pulse-width range, matches chess_hw_interface.nodes.servo_node
+# and code/test_z_servo.py's calibration sweep
+MIN_PULSE_US = 500
+MAX_PULSE_US = 2500
+
+
+def angle_to_pulsewidth(degrees: float) -> int:
+    """Convert a 0-180 degree servo angle to a pigpio pulse width in microseconds."""
+    return int(MIN_PULSE_US + (degrees / 180.0) * (MAX_PULSE_US - MIN_PULSE_US))
+
 
 class HomingNode(Node):
     """
@@ -71,6 +81,7 @@ class HomingNode(Node):
         self.declare_parameter('x_limit_pin',       self._DEFAULT_X_LIMIT_PIN)
         self.declare_parameter('y_limit_pin',       self._DEFAULT_Y_LIMIT_PIN)
         self.declare_parameter('servo_pin',         self._DEFAULT_SERVO_PIN)
+        self.declare_parameter('release_angle_deg', 170.0)  # Clear position — matches servo_node
 
         # ── Timing / speed parameters ──────────────────────────────────────
         self.declare_parameter('dir_setup_us',      5)
@@ -102,6 +113,7 @@ class HomingNode(Node):
         self.x_limit_pin   = self.get_parameter('x_limit_pin').value
         self.y_limit_pin   = self.get_parameter('y_limit_pin').value
         self.servo_pin     = self.get_parameter('servo_pin').value
+        self.servo_release_pw = angle_to_pulsewidth(self.get_parameter('release_angle_deg').value)
 
         self.dir_setup_us      = self.get_parameter('dir_setup_us').value
         self.step_pulse_us     = self.get_parameter('step_pulse_us').value
@@ -217,7 +229,7 @@ class HomingNode(Node):
     def _disengage_magnet(self):
         """Raise the magnet (release position) before homing."""
         self.get_logger().info('  Disengaging magnet (raising servo)...')
-        self.pi.set_servo_pulsewidth(self.servo_pin, 1500)
+        self.pi.set_servo_pulsewidth(self.servo_pin, self.servo_release_pw)
         time.sleep(0.5)
         self.pi.set_servo_pulsewidth(self.servo_pin, 0)
 
