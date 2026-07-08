@@ -15,7 +15,7 @@
 - **Logic layer** (`chess_logic`): `game_manager_node` (775-line real state machine — move validation, capture/castling/en passant/promotion handling, service-based start/new-game/resign), `chess_engine_node` (real Stockfish integration via `python-chess`, skill-level/difficulty setting, random-move fallback if engine unavailable).
 - **Interfaces**: consolidated into one package, `chess_interfaces` (`BoardState.msg`, `RequestMove.srv`, `MoveGantry.action`). This satisfies the old "create a unified `smart_chess_interfaces` package" initiative below — it happened, just under a different name. Orphaned duplicate `.action`/`.srv` files in `gantry_control`/`chess_logic` and the dead `chess_perception_upload` package have been removed (2026-07-08 cleanup).
 - **Master launch file**: `src/launch/full_system_launch.py` brings up all 5 layers (hardware, gantry, perception, logic, Chess OS) in dependency order.
-- **Chess OS** (`src/chess_ui/` — real ROS package as of 2026-07-08, was `code/chess_os.py`): functionally complete as a UI/control surface — game start/new/resign, promotion banner, engine difficulty setting, board calibration workflow (now pushed live to `motion_planner_node`), live gantry/hardware status, ROS-native hardware test runner, node health panel, real diff-heatmap/square-score perception display. Architecture consolidation (Steps 1-4 below) is **done and live-verified on the Pi**. Only Step 5 (deleting superseded `code/` scripts) remains.
+- **Chess OS** (`src/chess_ui/` — real ROS package as of 2026-07-08, was `code/chess_os.py`): functionally complete as a UI/control surface — game start/new/resign, promotion banner, engine difficulty setting, board calibration workflow (now pushed live to `motion_planner_node`), live gantry/hardware status, ROS-native hardware test runner, node health panel, real diff-heatmap/square-score perception display. Architecture consolidation is **fully complete and live-verified on the Pi** — see Initiative 1 below (now closed out).
 - **Documentation**: refreshed 2026-07-08 (this pass) — package naming, interfaces doc, magnet system description (permanent, not electromagnet — this error had spread into 5 hardware docs), CONTEXT.md file references, CHANGELOG, feature status badges all corrected.
 
 ### ⚠️ Partially Working / Needs Physical Verification Only
@@ -37,13 +37,13 @@ Discovered twice in one session (2026-07-08), both times independently: after `c
 
 ### 🔴 Architecturally Broken / Needs Rework
 
-- **`code/` standalone scripts** (`gantry_calibration.py`, `hardware_test.py`, `calibration_verify.py`, `square.py`) duplicate ROS-side homing/motion-planning/testing logic with hardcoded GPIO pins that can drift out of sync with `pins.yaml`. To be deleted once each one's ROS-side equivalent is confirmed working on the Pi — **this is the last step of the Chess OS initiative below (Step 5)**.
+Empty as of 2026-07-08 — the Chess OS / `code/` architecture consolidation (Initiative 1 below) was the last item here and is now complete.
 
 ---
 
 ## 🧠 Strategic Initiatives
 
-### 1. Chess OS / `code/` Architecture Consolidation — CURRENT TOP PRIORITY
+### 1. Chess OS / `code/` Architecture Consolidation — ✅ COMPLETE (2026-07-08)
 
 **Problem**: `chess_os.py` grew from "a UI" into a monolith that reimplements vision detection, gantry coordinate math, and calibration/homing logic that already exists correctly inside the ROS packages. It isn't installable as a ROS package and isn't launched by `full_system_launch.py`.
 
@@ -70,7 +70,9 @@ Discovered twice in one session (2026-07-08), both times independently: after `c
   - Built `chess_ui` on the Pi via `colcon build --symlink-install --packages-select chess_ui` (5.7s, clean) without touching the running perception stack. Ran the new package side-by-side with the still-running old `chess_os.py` on a different port (5001 vs 5000) and diffed them directly: **index page byte-identical** (97,375 bytes both), **`/api/status` key set identical**, snapshot/diff_frame/square_scores/tests-catalogue/node-health all matched. Ran a real hardware test (`camera/full`) through the new package's action-client wiring — identical behavior to Step 3's verification. Ran the full calibration flow (synthetic `/gantry/pose` publish → save_a1 → save_h8 → apply) through the new package — `sq_x/sq_y=25.0mm`, `pushed_to_motion_planner:true`, confirmed `state._ROOT` resolves correctly to the repo root through the symlink-installed path. Cleared the test calibration afterward.
   - Cut over: killed the old `chess_os.py` process and the port-5001 test instance, started `chess_ui` on port 5000 as the production instance, confirmed it live end-to-end. Deleted `code/chess_os.py` (fully superseded) and updated all doc references (`README.md`, `CLAUDE.md`, `docs/CONTEXT.md`, `docs/software/nodes.md`, `docs/software/architecture.md`, `docs/features/README.md`) from `python3 code/chess_os.py` to `ros2 run chess_ui chess_ui`. Left `.agent/PROJECT_INTEGRATION_PLAN.md` untouched — it's a completed historical planning doc from 2026-05-10, not current reference material.
   - While restarting the production instance, hit the `camera_ros` stale-subscriber bug again (see the new "Known Bug" entry above) — `camera_node` had been up ~2 hours since Step 1's fix. Restarted the perception stack fresh; confirmed working immediately after.
-- [ ] Step 5: delete superseded `code/` scripts
+- [x] Step 5: delete superseded `code/` scripts — done 2026-07-08. Deleted `gantry_calibration.py`, `hardware_test.py`, `calibration_verify.py` (imported from `gantry_calibration.py`, had to go together), `square.py`. Also deleted `ServoTestController.py`, which the plan hadn't originally flagged but turned out to be dead code entirely unrelated to servos — it's a 28BYJ-48/ULN2003 half-step stepper driver script (4096 steps/rev, 4-pin control sequence) left over from the original hardware iteration before the NEMA11+A4988 switch, and calls `move_to_angle()` which is never defined anywhere in the file (only `cdmove_to_angle()` is) — it would `NameError` immediately if run. Confirmed via `git grep` that nothing else in the repo imports or references any of these 5 files except each other and now-updated docs. Kept `test_z_servo.py`, `probe_camera.py`, `capture_calibration_images.py`, `live_camera_preview.py`, `camera_stream_server.py`, and the shell scripts (`fix_video_permissions.sh`, `run_preview.sh`, `setup_perception.sh`, `install_libcamera_python.sh`) — genuine standalone bench-test/setup tools with no ROS equivalent. Updated `docs/software/README.md`'s stale "Component Tests" list to match. Confirmed via `git pull` that the deletion synced cleanly to the Pi's clone.
+
+**All 5 steps of the Chess OS architecture consolidation are now done and live-verified on the Pi.** `code/` contains only genuine standalone tools with no ROS duplication; Chess OS is a real, installable, launchable ROS package.
 
 ### 2. Physical Calibration & Verification
 
@@ -94,6 +96,6 @@ To start working on an area, adopt a **Persona**:
 
 - **"I am the Hardware Agent"**: I will ignore game logic and focus purely on making motors spin and reading sensors.
 - **"I am the Logic Agent"**: I will mock hardware and focus on chess rules and state machines.
-- **"I am the Chess OS Agent"**: I will work through the Architecture Consolidation initiative above, one step at a time, verifying on the Pi after each step before moving to the next.
+- **"I am the Chess OS Agent"**: work in `src/chess_ui/` (Flask routes/ROS client/templates) — the architecture consolidation is done, so this is now normal feature/bugfix work, not a rework initiative.
 
 _Last Updated: 2026-07-08_

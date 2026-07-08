@@ -96,11 +96,16 @@ ros2 topic echo /perception/board_state
 colcon test --packages-select <package>
 ```
 
+### Hardware Test Suite (ROS-native)
+```bash
+./run_hw_test.sh --category gantry --subtest manual
+```
+Or via Chess OS's Tests tab / `/hw_test/run` action (`test_runner_node`, `chess_hw_interface`). See `.agent/workflows/hardware-test.md`.
+
 ### Component Tests
-Standalone scripts in `code/`:
-- `square.py` — Stepper motion test
-- `ServoTestController.py` — Servo test
-- `gantry_calibration.py` — Gantry calibration
+Standalone bench-test scripts in `code/` with no ROS equivalent:
+- `test_z_servo.py` — Z-axis magnet servo sanity check ahead of physical calibration
+- `probe_camera.py`, `capture_calibration_images.py`, `live_camera_preview.py` — camera bring-up/calibration-capture tools
 - `camera_stream_server.py` — Raw MJPEG stream (port 8080)
 
 ---
