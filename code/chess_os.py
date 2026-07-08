@@ -818,13 +818,16 @@ def api_capture_premove():
 
 @app.route("/api/perception/capture_reference", methods=["POST"])
 def api_capture_reference():
-    """Call /perception/capture_premove and mark session_reference_captured."""
-    resp = _call_svc("_svc_cap_reference")
-    if not isinstance(resp, tuple):
+    """Call /perception/capture_premove and mark session_reference_captured
+    only if the service call actually reported success."""
+    if _ros_node is None:
+        return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+    ok, msg = _ros_node.call_svc(_ros_node._svc_cap_reference)
+    if ok:
         with _lock:
             _state["session_reference_captured"] = True
             _state["ref_status"] = "Reference captured ✓"
-    return resp
+    return jsonify({"ok": ok, "msg": msg})
 
 
 @app.route("/api/diff_frame")
