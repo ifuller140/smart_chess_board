@@ -6,7 +6,7 @@
 
 ```mermaid
 graph TB
-    COS["Chess OS\n(code/chess_os.py)\nFlask :5000"]
+    COS["Chess OS\n(chess_ui package)\nFlask :5000"]
 
     subgraph HW["Hardware Interface (chess_hw_interface)"]
         SD[stepper_driver_node]
@@ -53,7 +53,7 @@ graph TB
     LS -->|clock_hit| GM
 ```
 
-> **Chess OS is the primary user interface.** Open `http://<pi-ip>:5000` after launching ROS nodes. It subscribes to all key topics, publishes jog velocity and E-stop commands, and spawns hardware tests as subprocesses.
+> **Chess OS is the primary user interface.** Open `http://<pi-ip>:5000` after launching ROS nodes. It subscribes to all key topics, publishes jog velocity and E-stop commands, and triggers hardware tests via `test_runner_node`'s `RunHardwareTest` action (Chess OS itself does not spawn test subprocesses — see [nodes.md](nodes.md)).
 
 ## Data Flow
 
@@ -230,11 +230,11 @@ Terminal 1 — ROS nodes
               ├── game_manager_node
               └── chess_engine_node
 
-Terminal 2 — Chess OS (web UI)
-  python3 code/chess_os.py        # → http://<pi-ip>:5000
+Terminal 2 — Chess OS (web UI), or launched automatically as part of full_system_launch.py
+  ros2 run chess_ui chess_ui       # → http://<pi-ip>:5000
 ```
 
-Chess OS is a separate process — it connects to the running ROS graph via rclpy. It can also run without ROS (`--no-ros`) for vision-only or offline development.
+Chess OS is a separate process — it connects to the running ROS graph via rclpy. It can also run without ROS (`--no-ros`) for offline UI development (falls back to a local OpenCV camera capture).
 
 ---
 

@@ -6,11 +6,11 @@ An automated chess board that plays physical chess against a human opponent usin
 
 ## Chess OS — Main Interface
 
-**Chess OS** is the primary control interface for the board. It's a Flask web app that runs on the Pi and exposes everything through a browser UI:
+**Chess OS** is the primary control interface for the board. It's a ROS 2 package (`chess_ui`) that runs a Flask web app on the Pi and exposes everything through a browser UI:
 
 ```bash
-# Start Chess OS (from project root on the Pi)
-python3 code/chess_os.py
+# Start Chess OS (from project root on the Pi, after colcon build + source install/setup.bash)
+ros2 run chess_ui chess_ui
 
 # Then open in any browser on the same network:
 # http://<pi-ip>:5000
@@ -21,8 +21,8 @@ python3 code/chess_os.py
 | **Game** | Live FEN board, game start/stop, Stockfish moves, chess clock |
 | **Gantry** | Jog controls, homing, board calibration, square navigation, canvas visualizer |
 | **Hardware** | Servo (magnet), limit switch indicators, stepper commands, emergency stop |
-| **Perception** | Live camera stream, board corners, vision parameters, overlay toggles |
-| **Tests** | Run any hardware test category directly from the browser |
+| **Perception** | Live camera stream, piece-detector diff heatmap, per-square scores, detection threshold tuning |
+| **Tests** | Run any hardware test category directly from the browser (via `test_runner_node`) |
 
 > **Always launch Chess OS when working with the board.** It is the single pane of glass for gantry control, calibration, vision, hardware state, and test execution.
 
@@ -99,14 +99,16 @@ ros2 launch src/launch/full_system_launch.py
 
 ### 4. Open Chess OS
 
+Already running if you used the full-system launch above. Otherwise, start it separately:
+
 ```bash
 # In a second terminal — start the web UI
-python3 code/chess_os.py
+ros2 run chess_ui chess_ui
 
 # Open http://<pi-ip>:5000 in your browser
 ```
 
-Chess OS connects to ROS automatically if nodes are running. It also works standalone (no ROS) for vision-only or UI development.
+Chess OS connects to ROS automatically if nodes are running. It also works standalone (`--no-ros`, falling back to a local OpenCV camera capture) for UI development without a running ROS graph.
 
 ### 5. Test Hardware
 
@@ -123,14 +125,15 @@ See [.agent/workflows/hardware-test.md](.agent/workflows/hardware-test.md) for t
 ```
 smart_chess_board/
 ├── src/                   # ROS 2 packages
-│   ├── chess_hw_interface/   # GPIO drivers + hardware tests
+│   ├── chess_hw_interface/   # GPIO drivers + hardware tests + test_runner_node
 │   ├── chess_perception/     # Camera + board detection nodes
 │   ├── chess_logic/          # Stockfish + game state machine
 │   ├── gantry_control/       # CoreXY kinematics + motion planning
 │   ├── chess_interfaces/     # ROS 2 message/service/action definitions
+│   ├── chess_ui/             # Chess OS — web UI/control surface (main UI)
 │   └── launch/               # full_system_launch.py
 ├── docs/                  # All documentation
-├── code/                  # Standalone scripts + chess_os.py (main UI)
+├── code/                  # Standalone bench-test scripts
 ├── setup/                 # System configuration (sudoers)
 ├── cad/                   # CAD files
 └── .agent/workflows/      # Deployment and testing guides

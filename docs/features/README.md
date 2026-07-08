@@ -73,7 +73,7 @@ See [CLAUDE.md](../../CLAUDE.md#hardware-testing-suite) for full CLI reference.
 ### Phase 5: Polish
 - [x] Chess clock display (`clock_display_node`, dual TM1637)
 - [ ] Error recovery (emergency stop exists; piece-drop/mis-detection recovery is still manual)
-- [x] User interface (`code/chess_os.py` — functionally complete, but architecturally needs rework; see the "Chess OS / code/ Architecture Consolidation" initiative in `.agent/PROJECT_STATUS.md`)
+- [x] User interface (`chess_ui` ROS package — Chess OS architecture consolidation complete: see `.agent/PROJECT_STATUS.md`)
 
 ---
 

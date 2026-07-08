@@ -4,11 +4,11 @@
 
 ---
 
-## Chess OS — Web Interface (`code/chess_os.py`)
+## Chess OS — Web Interface (`chess_ui` package, `src/chess_ui/`)
 
-Chess OS is not a ROS node — it's a Flask web application that acts as the **master control UI**. It runs as a standalone Python process and connects to the live ROS graph via rclpy.
+Chess OS's Flask app itself isn't a ROS node, but `chess_ui` is a proper ROS 2 (ament_python) package — installable via colcon, launchable from `full_system_launch.py`. Its Flask process spins a thin ROS client node (`ros_client.RosNode`) on a background thread that connects to the live ROS graph via rclpy; all vision/coordinate computation happens in the ROS packages, not here.
 
-**Start**: `python3 code/chess_os.py` → open `http://<pi-ip>:5000`
+**Start**: `ros2 run chess_ui chess_ui` → open `http://<pi-ip>:5000`
 
 **ROS subscriptions** (reads live state):
 
@@ -23,7 +23,9 @@ Chess OS is not a ROS node — it's a Flask web application that acts as the **m
 | `/limit_switch/clock_hit` | `std_msgs/Bool` | Clock button indicator |
 | `/clock/white_time` | `std_msgs/Float32` | White clock MM:SS |
 | `/clock/black_time` | `std_msgs/Float32` | Black clock MM:SS |
-| `/camera/image_raw` | `sensor_msgs/Image` | Live MJPEG stream |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Live MJPEG stream (same topic `board_detector_node`/`piece_detector_node` use) |
+| `/perception/piece_debug` | `sensor_msgs/Image` | Piece-detector diff heatmap (Perception tab) |
+| `/perception/square_scores` | `std_msgs/String` (JSON) | Per-square diff scores (Perception tab) |
 
 **ROS publishers**:
 
@@ -42,11 +44,12 @@ Chess OS is not a ROS node — it's a Flask web application that acts as the **m
 | `/servo/release` | Magnet release |
 | `/clock/reset`, `/clock/pause`, `/clock/resume` | Clock controls |
 
-**ROS action client**:
+**ROS action clients**:
 
 | Action | Used for |
 |--------|---------|
 | `/gantry/move` (`MoveGantry`) | Square goto / calibration moves (fire-and-forget) |
+| `/hw_test/run` (`RunHardwareTest`) | Tests tab — streams `test_runner_node`'s subprocess output as feedback |
 
 **Key API endpoints** (all JSON):
 
@@ -54,16 +57,17 @@ Chess OS is not a ROS node — it's a Flask web application that acts as the **m
 |----------|-------------|
 | `GET /api/status` | Full system state snapshot |
 | `GET /api/stream/raw` | Raw camera MJPEG stream |
-| `GET /api/stream/warp` | Warped board MJPEG stream |
+| `GET /api/diff_frame` | Piece-detector diff heatmap (from `/perception/piece_debug`) |
+| `GET /api/square_scores` | Per-square diff scores + current detector thresholds |
 | `POST /api/gantry/jog/start` | Start continuous jog `{dir, speed}` |
 | `POST /api/gantry/jog/stop` | Stop jog |
 | `POST /api/gantry/goto` | Move to square `{square}` or `{x_mm, y_mm}` |
 | `POST /api/gantry/calibration/save_a1` | Save current pos as a1 |
 | `POST /api/gantry/calibration/save_h8` | Save current pos as h8 |
-| `POST /api/gantry/calibration/apply` | Compute sq_x/sq_y, write `board_calibration.json` |
+| `POST /api/gantry/calibration/apply` | Compute sq_x/sq_y, write `board_calibration.json`, push to `motion_planner_node` via `SetParameters` |
 | `POST /api/hw/estop` | Publish emergency stop |
-| `POST /api/tests/run` | Launch a test `{category, subtest}` |
-| `GET /api/tests/stream` | SSE stream of test stdout |
+| `POST /api/tests/run` | Launch a test `{category, subtest}` via `test_runner_node` |
+| `GET /api/tests/stream` | SSE stream of test output |
 
 **Flags**:
 

@@ -37,8 +37,9 @@ smart_chess_board/
 │   ├── chess_logic/            # Game rules & Stockfish engine
 │   ├── gantry_control/         # Motion control & kinematics
 │   ├── chess_interfaces/       # ROS 2 msg/srv/action definitions (CMake)
-│   └── launch/                 # full_system_launch.py (brings up all 4 layers)
-├── code/                        # Standalone scripts + code/chess_os.py (main UI — architecture rework in progress, see .agent/PROJECT_STATUS.md)
+│   ├── chess_ui/               # Chess OS — web UI/control surface (main UI)
+│   └── launch/                 # full_system_launch.py (brings up all 5 layers)
+├── code/                        # Standalone bench-test scripts (no ROS equivalent)
 ├── setup/                       # System configuration files (sudoers, etc.)
 ├── cad/                         # CAD files & exports
 └── simulation/                  # Simulation environment
@@ -71,7 +72,8 @@ smart_chess_board/
 | `chess_perception` | Computer vision | `camera_node`, `board_detector_node`, `piece_detector_node` |
 | `chess_logic` | Game management | `game_manager_node`, `chess_engine_node` |
 | `gantry_control` | Motion control | `gantry_kinematics_node`, `motion_planner_node`, `homing_node` |
-| `chess_interfaces` | ROS 2 interfaces | `MoveGantry.action`, `RequestMove.srv`, `BoardState.msg` |
+| `chess_interfaces` | ROS 2 interfaces | `MoveGantry.action`, `RunHardwareTest.action`, `RequestMove.srv`, `BoardState.msg` |
+| `chess_ui` | Chess OS web UI | `chess_ui` (Flask app + ROS client node, `ros2 run chess_ui chess_ui`) |
 
 ## Critical Constraints
 
@@ -130,7 +132,8 @@ All node/logic implementation is complete (see `.agent/PROJECT_STATUS.md` for th
 1. **Gantry calibration** — `x_max_mm`, `board_origin_x/y_mm` in `homing_node`/`motion_planner_node` are placeholder defaults, need measurement on the physical rig
 2. **Camera calibration** — Intrinsic calibration (`calibration.npz`) has never been generated; capture/calibration scripts exist but haven't been run
 3. **Corner-routing BFS** — Implemented in `motion_planner_node`, untested with real pieces obstructing a path
-4. **Chess OS architecture** — Functionally complete but architecturally needs rework (duplicates vision/coordinate/calibration logic that already exists in the ROS packages); this is the current top-priority initiative, see `.agent/PROJECT_STATUS.md`
+4. **`camera_ros` stale-subscriber bug** — after a couple hours of `camera_node` uptime, new subscribers (including `ros2 topic hz`) stop receiving frames on `/camera/image_raw/compressed` even though existing long-running subscribers keep working; restarting `camera_node` fixes it. Not yet root-caused. See `.agent/PROJECT_STATUS.md`.
+5. **`code/` script cleanup** — remaining standalone scripts need auditing for ROS equivalents; see the Chess OS initiative in `.agent/PROJECT_STATUS.md`
 
 ## Documentation Index
 

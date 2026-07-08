@@ -201,11 +201,11 @@ pip3 install RPi.GPIO python-chess opencv-python numpy
 
 ## Chess OS — Primary User Interface
 
-`code/chess_os.py` is the master control web app. Run it in a second terminal after launching ROS nodes:
+Chess OS is the `chess_ui` ROS package (`src/chess_ui/`) — a Flask web app plus its ROS 2 client node, split across `chess_ui/{app,routes,ros_client,camera,state}.py` and `templates/index.html`. Run it after launching ROS nodes (or via `full_system_launch.py`, which now starts it automatically):
 
 ```bash
-python3 code/chess_os.py        # → http://<pi-ip>:5000
-python3 code/chess_os.py --no-ros  # offline / vision-only mode
+ros2 run chess_ui chess_ui             # → http://<pi-ip>:5000
+ros2 run chess_ui chess_ui --no-ros    # offline / local OpenCV camera fallback
 ```
 
 | Tab | Purpose |
@@ -213,25 +213,25 @@ python3 code/chess_os.py --no-ros  # offline / vision-only mode
 | **Game** | FEN board display, game start/stop, move history, chess clock |
 | **Gantry** | Jog (WASD+servo), homing, board calibration workflow, square goto, canvas |
 | **Hardware** | Servo/magnet, limit switch live status, stepper step, E-stop |
-| **Perception** | Live MJPEG stream, board corners, CV params, overlay toggles |
-| **Tests** | Run any `test_runner.py` test category/subtest from the browser |
+| **Perception** | Live camera stream, piece-detector diff heatmap, per-square scores, detection threshold tuning (all sourced from `chess_perception` topics — Chess OS does no vision itself) |
+| **Tests** | Run any hardware test category/subtest from the browser via `test_runner_node`'s `/hw_test/run` action |
 
 Chess OS connects to ROS automatically if `rclpy` is importable and the ROS nodes are running. All state is available via `GET /api/status`.
 
-**Board calibration** is done entirely from the Gantry tab — no CLI required. See the workflow card in that tab.
+**Board calibration** is done entirely from the Gantry tab — no CLI required. Applying it also pushes the values live to `motion_planner_node` via `SetParameters`, so the debug tool and real gameplay stay in sync.
 
 ## File Locations Reference
 
 | Purpose | Path |
 |---------|------|
-| **Chess OS (main UI)** | `code/chess_os.py` |
+| **Chess OS (main UI)** | `src/chess_ui/` (ROS package; `ros2 run chess_ui chess_ui`) |
 | Board calibration data | `board_calibration.json` (project root, created by Chess OS) |
 | GPIO pin config | `src/chess_hw_interface/config/pins.yaml` |
 | CV parameters | Declared as ROS parameters directly in `piece_detector_node.py` (no separate yaml file exists); tunable live via `/api/detector_params` in Chess OS |
 | Board coordinates | `src/gantry_control/config/board_map.yaml` |
 | Camera calibration | Not yet generated — see "Step 2: Intrinsic Calibration" in `docs/features/vision-system.md`; output would land at `src/chess_perception/config/calibration.npz` once run |
 | Launch all | `src/launch/full_system_launch.py` |
-| Test scripts | `code/*.py` |
+| Test scripts | `code/*.py` (standalone bench-test scripts only — hardware test suite itself runs via `test_runner_node`) |
 | CAD exports | `cad/exports/` |
 | System config (sudoers) | `setup/` |
 | Vision system docs | `docs/features/vision-system.md` |
