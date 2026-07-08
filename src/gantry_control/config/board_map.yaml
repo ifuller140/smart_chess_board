@@ -1,31 +1,32 @@
 # Board Map Configuration
 #
 # Coordinate System (IMPORTANT):
-#   - Origin (0,0): Bottom-RIGHT corner of the gantry (where X and Y limit switches are)
-#   - +X direction: LEFT (toward the left side of the board from the back)
-#   - +Y direction: UP (toward the back/black's side of the board)
+#   - Origin (0,0): Bottom-LEFT corner of the gantry, from the player's perspective
+#   - +X direction: RIGHTWARD, toward the h-file / toward the X limit switch
+#   - +Y direction: BACKWARD/UPWARD, toward the back/black's side of the board (rank 8)
 #
 # Physical Reality:
-#   - X limit switch is at the far RIGHT of the X rail
-#   - Y limit switch is at the BOTTOM of the Y rail (closest to player)
-#   - After homing, the gantry is at (0,0) = bottom-right corner
+#   - X limit switch is at the far RIGHT of the X rail (X_MAX)
+#   - Y limit switch is at the front of the Y rail, closest to the player (Y=0)
+#   - After homing, the gantry drives back to (0,0) = bottom-left corner
 #
 # Chess Board Mapping:
 #   - Square a1 (white's left corner, nearest to white player) is approximately
-#     200mm to the LEFT (+X) and 20mm UP (+Y) from the homed origin.
-#   - Square h1 is near the origin (far right, row 1) 
-#   - Square a8 is far left AND far up (near black player)
+#     board_origin_x_mm to the RIGHT (+X) and board_origin_y_mm UP (+Y) from the
+#     homed origin.
+#   - Square h1 is 7 squares further in +X (rightward) from a1.
+#   - Square a8 is 7 squares further in +Y (toward black) from a1.
 #
-# NOTE: All values marked "CALIBRATED" were estimated from user measurements
-#       and MUST be verified by physical testing. Run the square_navigation
-#       hardware test to confirm gantry lands on correct squares.
+# NOTE: All values marked "CALIBRATED" were estimated and MUST be verified by
+#       physical measurement on the real rig (see .agent/IMPLEMENTATION_PLAN.md
+#       Phase 4). Run the square_navigation hardware test to confirm the gantry
+#       lands on the correct squares once assembled.
 
 motion_planner_node:
   ros__parameters:
 
     # ---- Board origin (center of square a1, in mm from home) ----
-    # a1 is ~200mm left and ~20mm up from the homing position (bottom-right corner)
-    board_origin_x_mm: 200.0     # [CALIBRATED - verify with square_navigation test]
+    board_origin_x_mm: 20.0      # [CALIBRATED - verify with square_navigation test]
     board_origin_y_mm: 20.0      # [CALIBRATED - verify with square_navigation test]
 
     # ---- Square geometry ----
@@ -36,38 +37,47 @@ motion_planner_node:
     # ---- Move speed ----
     move_speed_mm_s: 50.0        # Speed during game moves (mm/s)
 
+    # ---- Board edge routing for graveyard moves ----
+    # When routing a captured piece to the graveyard, the gantry first moves
+    # horizontally (at the piece's current Y) to this X position — just past
+    # the right edge of the board (past the h-file) — clearing all board
+    # squares before moving vertically into the graveyard zone.
+    # h-file center = board_origin_x_mm + 7*square_size_mm = 195mm;
+    # h-file right edge = 195 + square_size_mm/2 = 207.5mm.
+    board_edge_safe_x_mm: 230.0    # [CALIBRATED] Just past the right edge of the board
+
     # ---- Graveyard positions ----
-    # Graveyard is behind Black's pieces (high Y side, past rank 8)
-    # Pieces route horizontally to the nearest board edge first, then move
-    # up past rank 8 into the graveyard zone.
+    # Graveyard is behind Black's pieces (high Y side, past rank 8).
+    # Pieces route horizontally to board_edge_safe_x_mm first, then move up
+    # past rank 8 into the graveyard zone, then horizontally into their slot.
     #
     # Layout (viewed from white's perspective):
-    #   Rank 8 (back of board): y ≈ board_origin_y_mm + 7 * square_size_mm = 195mm
-    #   Graveyard starts:       y ≈ 215mm (20mm past rank 8)
-    #   Graveyard columns:      Spread across x positions outside board area
-    #
-    # Graveyard slots (generated at runtime from these origins + slot_spacing)
-    graveyard_origin_x_mm: 210.0    # [CALIBRATED] X of first graveyard column
-    graveyard_origin_y_mm: 215.0    # [CALIBRATED] Y of graveyard row (above rank 8)
+    #   Rank 8 (back of board): y = board_origin_y_mm + 7*square_size_mm = 195mm
+    #   Graveyard row starts:   y = graveyard_origin_y_mm (past rank 8)
+    #   Graveyard columns:     fill leftward (decreasing X) from graveyard_origin_x_mm,
+    #                          safe because this row is entirely off the board in Y.
+    graveyard_origin_x_mm: 230.0    # [CALIBRATED] X of first (rightmost) graveyard column
+    graveyard_origin_y_mm: 215.0    # [CALIBRATED] Y of first graveyard row (past rank 8)
     graveyard_slot_spacing_mm: 22.0 # Spacing between captured piece slots
     graveyard_cols: 8               # Number of columns in graveyard (supports 16 captured pieces)
 
-    # ---- Board edge routing for graveyard moves ----
-    # When routing a captured piece to the graveyard, the gantry first moves
-    # horizontally to one of these X edge positions (to clear all pieces),
-    # then moves up to the graveyard Y position.
-    board_edge_left_x_mm: 205.0    # [CALIBRATED] Just past the left edge of board
-    board_edge_right_x_mm: 5.0     # [CALIBRATED] Just past the right edge of board
-
 gantry_kinematics_node:
   ros__parameters:
-    # Physical gantry travel limits
+    # Physical gantry travel limits — must match homing_node's x_max_mm below;
+    # both are placeholder defaults pending physical measurement (Phase 4).
     x_max_mm: 250.0              # Maximum X travel from origin
     y_max_mm: 250.0              # Maximum Y travel from origin
     position_tolerance_mm: 1.5   # Arrival tolerance in mm
     steps_per_mm: 5.0            # CoreXY: 200 steps/rev ÷ 40mm/rev = 5 steps/mm
     max_speed_mm_s: 60.0
     acceleration_mm_s2: 80.0
+
+homing_node:
+  ros__parameters:
+    # Must match gantry_kinematics_node's x_max_mm above — this value is used
+    # to drive back from the X limit switch to logical X=0 after homing.
+    x_max_mm: 250.0
+    steps_per_mm: 5.0
 
 stepper_driver_node:
   ros__parameters:

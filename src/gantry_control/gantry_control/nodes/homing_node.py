@@ -101,7 +101,8 @@ class HomingNode(Node):
 
         # ── Coordinate parameters ──────────────────────────────────────────
         # x_max_mm: physical X travel from origin (bottom-left) to X limit switch
-        self.declare_parameter('x_max_mm',          240.0)
+        # Must match gantry_kinematics_node's x_max_mm — see board_map.yaml.
+        self.declare_parameter('x_max_mm',          250.0)
         self.declare_parameter('steps_per_mm',      5.0)
 
         # ── Read all parameters ────────────────────────────────────────────

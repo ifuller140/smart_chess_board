@@ -39,8 +39,8 @@ class GantryKinematicsNode(Node):
         self.declare_parameter('steps_per_mm', 5.0)
         self.declare_parameter('max_speed_mm_s', 60.0)
         self.declare_parameter('acceleration_mm_s2', 80.0)
-        self.declare_parameter('x_max_mm', 300.0)
-        self.declare_parameter('y_max_mm', 300.0)
+        self.declare_parameter('x_max_mm', 250.0)
+        self.declare_parameter('y_max_mm', 250.0)
         self.declare_parameter('position_tolerance_mm', 1.5)
 
         self.steps_per_mm = float(self.get_parameter('steps_per_mm').value)
