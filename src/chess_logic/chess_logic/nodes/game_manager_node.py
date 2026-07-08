@@ -23,6 +23,7 @@ Game Flow Per Turn:
 State Machine States:
   STARTUP             → node initializing
   HOMING              → gantry returning to origin
+  HOMING_FAILED       → homing attempt failed; retrying automatically every 5s
   IDLE                → waiting for game to start (first clock hit)
   WAITING_PLAYER_MOVE → human's turn; waiting for clock press
   CAPTURING_BOARD     → camera capturing post-move image
@@ -30,7 +31,13 @@ State Machine States:
   CALCULATING_RESPONSE → chess engine computing reply
   EXECUTING_MOVE      → gantry executing computer's move
   HITTING_CLOCK       → clock servo pressing button
-  GAME_OVER           → checkmate/stalemate/draw/flag fall
+  PROMOTION_WAIT      → waiting for player to place/confirm promoted piece
+  MOTION_ERROR        → gantry move failed; paused for operator, /game/new_game to recover
+  GAME_OVER           → checkmate/stalemate/draw/flag fall/resignation
+
+Note: the game loop thread never exits on any of the above conditions —
+it always loops back to wait for /game/new_game (or, for HOMING_FAILED,
+retries homing on its own). Only real node shutdown stops the thread.
 
 Published Topics:
   /game_manager/state (String) — current state name (read by clock_display_node, chess_clock_node)
@@ -70,6 +77,7 @@ from chess_interfaces.srv import RequestMove
 class GS:
     STARTUP              = 'STARTUP'
     HOMING               = 'HOMING'
+    HOMING_FAILED        = 'HOMING_FAILED'
     IDLE                 = 'IDLE'
     WAITING_PLAYER_MOVE  = 'WAITING_PLAYER_MOVE'
     CAPTURING_BOARD      = 'CAPTURING_BOARD'
@@ -79,7 +87,12 @@ class GS:
     HITTING_CLOCK        = 'HITTING_CLOCK'
     PROMOTION_WAIT       = 'PROMOTION_WAIT'
     PROMOTION_DONE       = 'PROMOTION_DONE'
+    MOTION_ERROR         = 'MOTION_ERROR'
     GAME_OVER            = 'GAME_OVER'
+
+# States where the game loop is paused waiting for an operator action
+# (new game or resign) rather than normal turn-taking.
+_PAUSED_STATES = (GS.GAME_OVER, GS.MOTION_ERROR)
 
 
 class GameManagerNode(Node):
@@ -113,6 +126,7 @@ class GameManagerNode(Node):
         self._flag_event            = threading.Event()
         self._flag_loser            = ''        # 'WHITE' or 'BLACK'
         self._new_game_event        = threading.Event()
+        self._resign_event          = threading.Event()
 
         # Move history (UCI strings, one per half-move)
         self._move_history: list = []
@@ -120,6 +134,12 @@ class GameManagerNode(Node):
         # Latest values from subscriptions
         self._latest_changed_squares: set = set()   # chess.Square indices from perception
         self._motion_success = True
+
+        # Gates so a late/stale callback from a previous timed-out request
+        # (e.g. a /motion/done that arrives after we already gave up waiting)
+        # isn't misapplied to a later, unrelated request.
+        self._awaiting_board_state = False
+        self._awaiting_motion      = False
 
         # ── Publishers ────────────────────────────────────────────────────
         self._state_pub = self.create_publisher(String, '/game_manager/state', 10)
@@ -181,6 +201,10 @@ class GameManagerNode(Node):
 
     def _on_changed_squares(self, msg: String):
         """Receive changed squares list from piece_detector_node."""
+        if not self._awaiting_board_state:
+            # Stale message from a previous, already-timed-out capture request.
+            self.get_logger().warn('Ignoring changed-squares — not currently awaiting a capture')
+            return
         raw = msg.data.strip()
         sqs: set = set()
         if raw:
@@ -196,6 +220,10 @@ class GameManagerNode(Node):
 
     def _on_motion_done(self, msg: Bool):
         """Motion planner signalled move completion."""
+        if not self._awaiting_motion:
+            # Stale message from a previous, already-timed-out motion request.
+            self.get_logger().warn('Ignoring /motion/done — not currently awaiting a motion result')
+            return
         self._motion_success = msg.data
         self._motion_done_event.set()
 
@@ -217,9 +245,12 @@ class GameManagerNode(Node):
         time.sleep(1.0)    # Let ROS spin settle
 
         self._transition(GS.HOMING)
-        if not self._do_home():
-            self.get_logger().error('Homing failed — staying in STARTUP. Retry manually.')
-            self._transition(GS.STARTUP)
+        while rclpy.ok() and not self._do_home():
+            self.get_logger().error('Homing failed — retrying in 5s...')
+            self._transition(GS.HOMING_FAILED)
+            time.sleep(5.0)
+            self._transition(GS.HOMING)
+        if not rclpy.ok():
             return
 
         self._transition(GS.IDLE)
@@ -246,11 +277,27 @@ class GameManagerNode(Node):
                 self.get_logger().info("New game reset complete — waiting for clock press")
                 continue
 
+            # Resign (from Chess OS /game/resign service) — handled here, in the
+            # game-loop thread, rather than mutating state from the service
+            # callback thread directly.
+            if self._resign_event.is_set():
+                self._resign_event.clear()
+                if self._state not in (GS.GAME_OVER,):
+                    self._abort_pub.publish(Bool(data=True))
+                    self._end_game('Resignation')
+                continue
+
             # Check for flag fall at any point
             if self._flag_event.is_set():
                 self._flag_event.clear()
                 self._end_game(f'Time expired — {self._flag_loser} loses')
-                break
+                continue
+
+            # Paused after a game end or an unrecoverable motion error — wait
+            # here (instead of exiting the loop/thread) for /game/new_game.
+            if self._state in _PAUSED_STATES:
+                time.sleep(0.2)
+                continue
 
             if self._state in (GS.IDLE, GS.WAITING_PLAYER_MOVE):
                 # Wait for human to press clock
@@ -258,14 +305,14 @@ class GameManagerNode(Node):
                 self.get_logger().info(
                     f'[{self._state}] Waiting for clock press...')
 
-                # Block until clock hit or flag fall (check flag every 0.5s)
+                # Block until clock hit, flag fall, or resign (check every 0.5s)
                 while rclpy.ok():
                     if self._clock_hit_event.wait(timeout=0.5):
                         break
-                    if self._flag_event.is_set():
+                    if self._flag_event.is_set() or self._resign_event.is_set():
                         break
-                if self._flag_event.is_set():
-                    continue  # Handle flag at top of loop
+                if self._flag_event.is_set() or self._resign_event.is_set():
+                    continue  # Handle flag/resign at top of loop
 
                 self._clock_hit_event.clear()
 
@@ -279,6 +326,8 @@ class GameManagerNode(Node):
                 # ── Capture board state ───────────────────────────────────
                 self._transition(GS.CAPTURING_BOARD)
                 ok = self._do_capture_board()
+                if self._new_game_event.is_set() or self._resign_event.is_set():
+                    continue  # new_game/resign woke this wait — handle at top, don't trust `ok`
                 if not ok:
                     self.get_logger().warn('Board capture timed out — asking for retry')
                     self._transition(GS.WAITING_PLAYER_MOVE)
@@ -307,8 +356,8 @@ class GameManagerNode(Node):
                     self.get_logger().info(
                         'Human pawn promotion — waiting for player to place promoted piece and press clock...')
                     self._transition(GS.PROMOTION_WAIT)
-                    self._clock_hit_event.clear()
-                    self._clock_hit_event.wait()
+                    if not self._wait_promotion_confirm():
+                        continue  # flag fell or resign happened during promotion wait
                     self._state_pub.publish(String(data=GS.PROMOTION_DONE))
 
                 # Check game end after human move
@@ -316,7 +365,7 @@ class GameManagerNode(Node):
                 if game_end:
                     self.get_logger().info(f'Game over: {game_end}')
                     self._end_game(game_end)
-                    break
+                    continue
 
                 # ── Switch clock to computer ──────────────────────────────
                 self._publish_turn('BLACK')
@@ -333,17 +382,27 @@ class GameManagerNode(Node):
                     else:
                         self.get_logger().error('No legal moves available — game over?')
                         self._end_game('No legal moves for computer')
-                        break
+                        continue
 
                 computer_move = chess.Move.from_uci(computer_move_uci)
 
                 # ── Execute gantry move ────────────────────────────────────
                 self._transition(GS.EXECUTING_MOVE)
                 ok = self._do_execute_move(computer_move_uci, self._board.fen())
+                if self._new_game_event.is_set() or self._resign_event.is_set():
+                    continue  # new_game/resign woke this wait — handle at top, don't trust `ok`
                 if not ok:
-                    self.get_logger().error(f'Motion failed for {computer_move_uci}')
-                    # Don't break — gantry may have partially moved, try to continue
-                    self.get_logger().warn('Attempting to continue despite motion error')
+                    # Don't push the move to the board model — the physical
+                    # board may not match it (partial move, dropped piece).
+                    # Pause for operator intervention instead of silently
+                    # desyncing model vs. reality.
+                    self.get_logger().error(
+                        f'Motion failed for {computer_move_uci} — pausing for operator. '
+                        f'Verify the physical board, then call /game/new_game to reset.')
+                    self._result_pub.publish(String(
+                        data=f'Motion error executing {computer_move_uci} — needs operator attention'))
+                    self._transition(GS.MOTION_ERROR)
+                    continue
 
                 # Apply computer move to internal board
                 # Check for pawn promotion
@@ -362,8 +421,8 @@ class GameManagerNode(Node):
                     self.get_logger().info(
                         'Computer promoted! Waiting for user to place queen on board...')
                     self._transition(GS.PROMOTION_WAIT)
-                    self._clock_hit_event.clear()
-                    self._clock_hit_event.wait()  # User presses clock to confirm
+                    if not self._wait_promotion_confirm():
+                        continue  # flag fell or resign happened during promotion wait
                     # Resume the chess clock before continuing
                     self._state_pub.publish(String(data=GS.PROMOTION_DONE))
                     self._transition(GS.EXECUTING_MOVE)
@@ -374,13 +433,17 @@ class GameManagerNode(Node):
                     self.get_logger().info(f'Game over: {game_end}')
                     # Hit clock before ending so display is clean
                     self._transition(GS.HITTING_CLOCK)
-                    self._do_hit_clock()
+                    if not self._do_hit_clock():
+                        self.get_logger().warn('Clock-hit servo call failed while ending game')
                     self._end_game(game_end)
-                    break
+                    continue
 
                 # ── Hit clock to pass turn to human ───────────────────────
                 self._transition(GS.HITTING_CLOCK)
-                self._do_hit_clock()
+                if not self._do_hit_clock():
+                    self.get_logger().warn(
+                        'Clock-hit servo call failed — turn is being published anyway; '
+                        'verify the physical clock was actually pressed')
 
                 # ── Switch clock to human ─────────────────────────────────
                 self._publish_turn('WHITE')
@@ -424,6 +487,7 @@ class GameManagerNode(Node):
         self.get_logger().info('Capturing post-move board image...')
 
         self._board_state_event.clear()
+        self._awaiting_board_state = True
 
         if self._capture_client.wait_for_service(timeout_sec=3.0):
             self._capture_client.call_async(Trigger.Request())
@@ -432,6 +496,7 @@ class GameManagerNode(Node):
                 '/camera/capture not available — waiting for changed-squares anyway')
 
         got = self._board_state_event.wait(timeout=self._cap_timeout)
+        self._awaiting_board_state = False
         if not got:
             self.get_logger().warn('Changed-squares message not received within timeout')
             return False
@@ -616,10 +681,12 @@ class GameManagerNode(Node):
         self.get_logger().info(f'Executing move: {uci}')
 
         self._motion_done_event.clear()
+        self._awaiting_motion = True
         self._motion_pub.publish(String(data=command))
 
         # Wait for motion planner to signal completion
         completed = self._motion_done_event.wait(timeout=self._move_timeout)
+        self._awaiting_motion = False
         if not completed:
             self.get_logger().error(
                 f'Motion timeout after {self._move_timeout}s for move {uci}')
@@ -627,6 +694,27 @@ class GameManagerNode(Node):
 
         self._motion_done_event.clear()
         return self._motion_success
+
+    def _wait_promotion_confirm(self) -> bool:
+        """
+        Block (with periodic flag/resign polling) until the player presses the
+        clock to confirm the promoted piece has been physically placed.
+
+        Returns True if confirmed normally. Returns False if a flag fall or
+        resign happened during the wait — the caller should `continue` the
+        main loop so it's handled at the top on the next iteration.
+        """
+        self._clock_hit_event.clear()
+        while rclpy.ok():
+            got_clock_hit = self._clock_hit_event.wait(timeout=0.5)
+            # Resign also sets _clock_hit_event to unblock this wait promptly —
+            # check flag/resign *after* waiting regardless of why we woke up,
+            # so a resign isn't misread as a normal promotion confirmation.
+            if self._flag_event.is_set() or self._resign_event.is_set():
+                return False
+            if got_clock_hit:
+                return True
+        return False
 
     def _do_hit_clock(self) -> bool:
         """Call the clock servo to press the chess clock button."""
@@ -712,10 +800,16 @@ class GameManagerNode(Node):
         return response
 
     def _svc_resign(self, request, response):
-        """Resign the current game immediately."""
-        self._end_game("Resignation")
+        """
+        Request resignation. The actual state transition/board-ending happens
+        in the game-loop thread (which observes _resign_event) rather than
+        here in the service-callback thread, to avoid racing the loop's own
+        reads/writes of _state and _board.
+        """
+        self._resign_event.set()
+        self._clock_hit_event.set()  # unblock any wait currently in progress
         response.success = True
-        response.message = "Resigned"
+        response.message = "Resignation requested"
         return response
 
     def _pub_move_history(self):
