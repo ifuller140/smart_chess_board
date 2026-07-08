@@ -40,7 +40,7 @@ try:
     import rclpy
     from rclpy.node import Node
     from std_msgs.msg import String, Bool, Float32
-    from sensor_msgs.msg import Image
+    from sensor_msgs.msg import Image, CompressedImage
     from geometry_msgs.msg import Point as RosPoint, Twist
     from std_srvs.srv import Trigger
     HAS_ROS = True
@@ -304,7 +304,7 @@ if HAS_ROS:
             super().__init__("chess_os")
 
             # ── Subscriptions ──────────────────────────────────────────
-            self.create_subscription(Image,   "/camera/image_raw",           self._on_img,            10)
+            self.create_subscription(CompressedImage, "/camera/image_raw/compressed", self._on_img, 10)
             self.create_subscription(String,  "/game_manager/board_fen",     self._on_fen,            10)
             self.create_subscription(String,  "/game_manager/state",         self._on_state,          10)
             self.create_subscription(String,  "/game_manager/turn",          self._on_turn,           10)
@@ -392,30 +392,19 @@ if HAS_ROS:
                 return {"ok": False, "msg": str(e)}
 
         def _on_img(self, msg):
+            """/camera/image_raw/compressed — JPEG bytes, same topic board_detector_node
+            and piece_detector_node already consume (the uncompressed /camera/image_raw
+            topic exists in the graph but camera_ros never actually publishes frames on it)."""
             try:
-                enc  = msg.encoding.lower()
-                h, w = msg.height, msg.width
-                data = np.frombuffer(msg.data, dtype=np.uint8)
-                if enc in ('bgr8', 'bgr888'):
-                    frame = data.reshape(h, msg.step)[:, :w*3].reshape(h, w, 3)
-                elif enc in ('rgb8', 'rgb888'):
-                    frame = data.reshape(h, msg.step)[:, :w*3].reshape(h, w, 3)
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                elif enc in ('yuv422', 'yuyv'):
-                    yuyv  = data.reshape(h, msg.step)[:, :w*2].reshape(h, w, 2)
-                    frame = cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUYV)
-                elif enc in ('mono8', '8uc1'):
-                    mono  = data.reshape(h, msg.step)[:, :w].reshape(h, w)
-                    frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
-                else:
-                    bpp   = max(3, len(msg.data) // (h * w) if h * w > 0 else 3)
-                    frame = data.reshape(h, w, min(bpp, 4)).copy()
-                    if bpp == 4:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                data  = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+                frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
+                if frame is None:
+                    raise ValueError("JPEG decode returned None")
+                h, w = frame.shape[:2]
                 _camera.update_raw(_to_jpeg(frame, 75))
                 with _lock:
                     _state["raw_frame"] = frame
-                    _state["cam_info"]  = f"{w}×{h} {enc}"
+                    _state["cam_info"]  = f"{w}×{h} jpeg"
             except Exception as e:
                 with _lock:
                     _state["error"] = f"img: {e}"
@@ -3299,7 +3288,7 @@ def main():
                     target=lambda: rclpy.spin(_ros_node),
                     daemon=True).start()
                 print("  ✓ ROS2 node started")
-                print("    Subscribing: /camera/image_raw, /game_manager/{board_fen,state,turn}")
+                print("    Subscribing: /camera/image_raw/compressed, /game_manager/{board_fen,state,turn}")
             except Exception as e:
                 print(f"  ⚠  ROS2 init failed: {e}")
                 args.no_ros = True
