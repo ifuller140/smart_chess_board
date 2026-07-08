@@ -17,10 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import queue
-import signal
-import subprocess
 import sys
 import threading
 import time
@@ -57,7 +54,6 @@ except ImportError:
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _ROOT         = Path(__file__).parent.parent
 _CALIB_FILE   = _ROOT / "board_calibration.json"
-_TEST_SCRIPT  = _ROOT / "run_hw_test.sh"
 
 # ── Test catalogue ────────────────────────────────────────────────────────────
 TEST_CATALOGUE: Dict[str, List[str]] = {
@@ -373,6 +369,22 @@ if HAS_ROS:
                 self._move_ac = None
                 self._has_move_action = False
 
+            # ── Action client for hardware test orchestration ─────────
+            # test_runner_node (chess_hw_interface) owns the actual subprocess;
+            # chess_os is just a client streaming its feedback into the UI.
+            self._test_queue      = queue.Queue()
+            self._test_running    = False
+            self._test_last_run   = None
+            self._test_goal_handle = None
+            try:
+                from chess_interfaces.action import RunHardwareTest as _RHT
+                from rclpy.action import ActionClient as _AClient2
+                self._test_ac = _AClient2(self, _RHT, '/hw_test/run')
+                self._has_test_action = True
+            except ImportError:
+                self._test_ac = None
+                self._has_test_action = False
+
             with _lock:
                 _state["ros_connected"] = True
             self.get_logger().info("ChessOS ROS2 node ready")
@@ -394,6 +406,60 @@ if HAS_ROS:
                 return {"ok": True, "msg": f"Moving to ({x_mm:.1f}, {y_mm:.1f}) mm"}
             except Exception as e:
                 return {"ok": False, "msg": str(e)}
+
+        def start_test(self, category: str, subtest: str) -> bool:
+            if not self._has_test_action or self._test_ac is None:
+                return False
+            if self._test_running:
+                return False
+            if not self._test_ac.wait_for_server(timeout_sec=1.0):
+                return False
+            from chess_interfaces.action import RunHardwareTest as _RHT
+            goal = _RHT.Goal()
+            goal.category = category
+            goal.subtest  = subtest
+            self._test_running     = True
+            self._test_last_run    = f"{category}/{subtest}"
+            self._test_goal_handle = None
+            send_future = self._test_ac.send_goal_async(
+                goal, feedback_callback=self._on_test_feedback)
+            send_future.add_done_callback(self._on_test_goal_response)
+            return True
+
+        def stop_test(self):
+            if self._test_goal_handle is not None:
+                self._test_goal_handle.cancel_goal_async()
+
+        def _on_test_goal_response(self, future):
+            goal_handle = future.result()
+            if not goal_handle.accepted:
+                self._test_queue.put({"type": "error",
+                                      "line": "Goal rejected — test_runner_node busy or unavailable"})
+                self._test_running = False
+                return
+            self._test_goal_handle = goal_handle
+            goal_handle.get_result_async().add_done_callback(self._on_test_result)
+
+        def _on_test_feedback(self, feedback_msg):
+            self._test_queue.put({"type": "line", "line": feedback_msg.feedback.line})
+
+        def _on_test_result(self, future):
+            result = future.result().result
+            self._test_queue.put({"type": "done", "line": result.message,
+                                  "rc": result.return_code})
+            self._test_running    = False
+            self._test_goal_handle = None
+
+        def stream_test_sse(self):
+            while True:
+                try:
+                    item = self._test_queue.get(timeout=30)
+                except queue.Empty:
+                    yield 'data: {"type":"ping"}\n\n'
+                    continue
+                yield f"data: {json.dumps(item)}\n\n"
+                if item.get("type") in ("done", "error"):
+                    return
 
         def _on_img(self, msg):
             """/camera/image_raw/compressed — JPEG bytes, same topic board_detector_node
@@ -597,69 +663,6 @@ if HAS_ROS:
                 time.sleep(0.05)
             r = future.result()
             return r.success, r.message
-
-# ── Test runner ───────────────────────────────────────────────────────────────
-class _TestRunner:
-    def __init__(self):
-        self._lock    = threading.Lock()
-        self._proc    = None
-        self._queue   = queue.Queue()
-        self.running  = False
-        self.last_run = None
-
-    def start(self, category: str, subtest: str) -> bool:
-        with self._lock:
-            if self.running:
-                return False
-            cmd = (['bash', str(_TEST_SCRIPT),
-                    '--category', category, '--subtest', subtest]
-                   if _TEST_SCRIPT.exists()
-                   else ['python3', '-m',
-                         'chess_hw_interface.testing.test_runner',
-                         '--category', category, '--subtest', subtest])
-            try:
-                self._proc = subprocess.Popen(
-                    cmd, cwd=str(_ROOT),
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1,
-                    preexec_fn=os.setsid)
-                self.running  = True
-                self.last_run = f"{category}/{subtest}"
-            except Exception as e:
-                self._queue.put({"type": "error", "line": str(e)})
-                return False
-        threading.Thread(target=self._read, daemon=True).start()
-        return True
-
-    def stop(self):
-        with self._lock:
-            if self._proc:
-                try:
-                    os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
-                except Exception:
-                    pass
-
-    def _read(self):
-        for line in self._proc.stdout:
-            self._queue.put({"type": "line", "line": line.rstrip()})
-        self._proc.wait()
-        rc = self._proc.returncode
-        self._queue.put({"type": "done", "line": f"Exited: {rc}", "rc": rc})
-        with self._lock:
-            self.running = False
-
-    def stream_sse(self):
-        while True:
-            try:
-                item = self._queue.get(timeout=30)
-            except queue.Empty:
-                yield 'data: {"type":"ping"}\n\n'
-                continue
-            yield f"data: {json.dumps(item)}\n\n"
-            if item.get("type") == "done":
-                return
-
-_runner = _TestRunner()
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -1157,25 +1160,35 @@ def api_tests_run():
     sub  = data.get("subtest", "")
     if not cat or not sub:
         return jsonify({"ok": False, "msg": "Need category + subtest"}), 400
-    ok = _runner.start(cat, sub)
-    return jsonify({"ok": ok, "msg": "started" if ok else "already running"})
+    if _ros_node is None:
+        return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+    ok = _ros_node.start_test(cat, sub)
+    return jsonify({"ok": ok,
+                    "msg": "started" if ok else
+                           "already running, or test_runner_node unavailable"})
 
 @app.route("/api/tests/stop", methods=["POST"])
 def api_tests_stop():
-    _runner.stop()
+    if _ros_node is not None:
+        _ros_node.stop_test()
     return jsonify({"ok": True})
 
 @app.route("/api/tests/stream")
 def api_tests_stream():
-    return Response(_runner.stream_sse(),
+    if _ros_node is None:
+        return Response('data: {"type":"error","line":"ROS not connected"}\n\n',
+                        mimetype="text/event-stream")
+    return Response(_ros_node.stream_test_sse(),
                     mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache",
                              "X-Accel-Buffering": "no"})
 
 @app.route("/api/tests/status")
 def api_tests_status():
-    return jsonify({"running": _runner.running,
-                    "last_run": _runner.last_run})
+    if _ros_node is None:
+        return jsonify({"running": False, "last_run": None})
+    return jsonify({"running": _ros_node._test_running,
+                    "last_run": _ros_node._test_last_run})
 
 # ═════════════════════════════════════════════════════════════════════════════
 # HTML TEMPLATE
@@ -3353,7 +3366,7 @@ def main():
     print(f"     http://localhost:{args.port}")
     print(f"     Mode:   {args.mode}")
     print(f"     ROS2:   {'enabled' if not args.no_ros else 'disabled'}")
-    print(f"     Tests:  {_TEST_SCRIPT}\n")
+    print(f"     Tests:  via test_runner_node (/hw_test/run action)\n")
 
     app.run(host=args.host, port=args.port,
             debug=False, use_reloader=False, threaded=True)

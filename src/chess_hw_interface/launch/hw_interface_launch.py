@@ -68,4 +68,12 @@ def generate_launch_description():
             name='gantry_kinematics',
             parameters=[{'steps_per_mm': 5.0}]
         ),
+
+        # ── Hardware Test Orchestration ─────────────────────
+        Node(
+            package='chess_hw_interface',
+            executable='test_runner_node',
+            name='test_runner_node',
+            output='screen',
+        ),
     ])

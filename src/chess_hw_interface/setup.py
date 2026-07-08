@@ -31,6 +31,7 @@ setup(
             'clock_display_node = chess_hw_interface.nodes.clock_display_node:main',
             'gpio_watchdog_node = chess_hw_interface.nodes.gpio_watchdog_node:main',
             'chess_clock_node = chess_hw_interface.nodes.chess_clock_node:main',
+            'test_runner_node = chess_hw_interface.nodes.test_runner_node:main',
         ],
     },
 )
