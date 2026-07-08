@@ -348,15 +348,19 @@ if HAS_ROS:
             # Detector parameter client (optional — requires rcl_interfaces)
             self._svc_detector_params = None
             self._svc_game_manager_params = None
+            self._svc_motion_planner_params = None
             if HAS_RCL_PARAMS:
                 self._svc_detector_params = self.create_client(
                     SetParameters, "/piece_detector_node/set_parameters")
                 self._svc_game_manager_params = self.create_client(
                     SetParameters, "/game_manager_node/set_parameters")
+                self._svc_motion_planner_params = self.create_client(
+                    SetParameters, "/motion_planner_node/set_parameters")
 
             # Pending param updates (set by Flask thread, applied by ROS timer)
             self._pending_detector_params = None
             self._pending_game_manager_params = None
+            self._pending_motion_planner_params = None
             self.create_timer(0.2, self._check_pending)
 
             # ── Action client for point-to-point gantry moves ─────────
@@ -516,6 +520,19 @@ if HAS_ROS:
                     "engine_think_time_s": think_time_s,
                 }
 
+        def request_motion_planner_params(self, origin_x_mm, origin_y_mm, sq_size_mm):
+            """Push calibrated board geometry to motion_planner_node — the node
+            that actually drives the gantry during real games. Without this,
+            calibrating via the Chess OS UI only affected chess_os's own local
+            square_to_mm() (used by the manual Square Nav debug tool), leaving
+            motion_planner_node on its uncalibrated declare_parameter defaults."""
+            if HAS_RCL_PARAMS:
+                self._pending_motion_planner_params = {
+                    "board_origin_x_mm": origin_x_mm,
+                    "board_origin_y_mm": origin_y_mm,
+                    "square_size_mm":    sq_size_mm,
+                }
+
         def _check_pending(self):
             if HAS_RCL_PARAMS:
                 self._apply_pending_params(
@@ -535,6 +552,16 @@ if HAS_ROS:
                     {"engine_think_time_s": ParameterType.PARAMETER_DOUBLE},
                 )
                 self._pending_game_manager_params = None
+                self._apply_pending_params(
+                    self._pending_motion_planner_params,
+                    self._svc_motion_planner_params,
+                    {
+                        "board_origin_x_mm": ParameterType.PARAMETER_DOUBLE,
+                        "board_origin_y_mm": ParameterType.PARAMETER_DOUBLE,
+                        "square_size_mm":    ParameterType.PARAMETER_DOUBLE,
+                    },
+                )
+                self._pending_motion_planner_params = None
 
         def _apply_pending_params(self, params, client, type_map):
             if params is None or client is None:
@@ -1076,6 +1103,12 @@ def api_calib_apply():
         _state["calib_sq_x"]    = sq_x
         _state["calib_sq_y"]    = sq_y
         _state["calib_applied"] = True
+    # Push to motion_planner_node — the node that actually drives the gantry
+    # during real games — so calibrating here isn't just a local debug-tool value.
+    pushed = False
+    if _ros_node is not None and HAS_RCL_PARAMS:
+        _ros_node.request_motion_planner_params(a1x, a1y, (sq_x + sq_y) / 2.0)
+        pushed = True
     try:
         _CALIB_FILE.write_text(json.dumps({
             "a1_x": a1x, "a1_y": a1y,
@@ -1086,9 +1119,11 @@ def api_calib_apply():
     except Exception as e:
         return jsonify({"ok": True, "sq_x": sq_x, "sq_y": sq_y,
                         "a1_x": a1x, "a1_y": a1y, "h8_x": h8x, "h8_y": h8y,
+                        "pushed_to_motion_planner": pushed,
                         "warn": f"Saved in memory; file write failed: {e}"})
     return jsonify({"ok": True, "sq_x": sq_x, "sq_y": sq_y,
-                    "a1_x": a1x, "a1_y": a1y, "h8_x": h8x, "h8_y": h8y})
+                    "a1_x": a1x, "a1_y": a1y, "h8_x": h8x, "h8_y": h8y,
+                    "pushed_to_motion_planner": pushed})
 
 @app.route("/api/gantry/calibration/clear", methods=["POST"])
 def api_calib_clear():
