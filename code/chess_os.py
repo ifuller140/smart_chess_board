@@ -56,7 +56,6 @@ except ImportError:
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _ROOT         = Path(__file__).parent.parent
-_CORNERS_FILE = _ROOT / "board_corners.json"
 _CALIB_FILE   = _ROOT / "board_calibration.json"
 _TEST_SCRIPT  = _ROOT / "run_hw_test.sh"
 
@@ -117,9 +116,6 @@ _state = {
     "last_updated":   0.0,
     "cam_info":       "–",
     "error":          "",
-    "corners":        [[0.10,0.10],[0.90,0.10],[0.90,0.90],[0.10,0.90]],
-    "pieces64":       [""] * 64,
-    "detected_fen":   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "last_move":      "",
     # Game manager
     "game_fen":       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -210,21 +206,8 @@ def _load_calibration():
         print(f"  ⚠  Calibration load failed: {e}")
 
 
+# Diff detection params — pushed to piece_detector_node via SetParameters
 _params = {
-    "white_thresh":       200,
-    "black_thresh":        60,
-    "min_blob_area":       80,
-    "bottom_anchor_bias": 0.85,
-    "undistort_enable":    0,
-    "undistort_k1":       -25,
-    "undistort_k2":         8,
-    "undistort_focal":     83,
-    "warp_size":          480,
-    "show_grid":            1,
-    "show_pieces":          1,
-    "show_white_mask":      0,
-    "show_black_mask":      0,
-    # Diff detection (pushed to piece_detector_node via SetParameters)
     "display_threshold":   18.0,
     "shift_compensation":   1.0,
     "clump_enable":          0,
@@ -233,10 +216,16 @@ _params = {
 
 # ── Camera manager — MJPEG frame buffer ───────────────────────────────────────
 class _CameraManager:
+    """Thread-safe MJPEG frame buffer for the raw camera feed.
+
+    The raw frame comes straight from ROS (`_RosNode._on_img`) or, in
+    --no-ros dev mode, from `_opencv_camera_loop` — never re-rendered
+    or annotated here. Vision/board detection lives in `chess_perception`;
+    see `/api/diff_frame` and `/api/square_scores` for its debug output.
+    """
     def __init__(self):
         self._lock     = threading.Lock()
         self._raw_jpeg = b''
-        self._warp_jpeg = b''
         self._index    = 0   # increments on every new raw frame
 
     def update_raw(self, jpeg_bytes: bytes):
@@ -244,19 +233,11 @@ class _CameraManager:
             self._raw_jpeg = jpeg_bytes
             self._index   += 1
 
-    def update_warp(self, jpeg_bytes: bytes):
-        with self._lock:
-            self._warp_jpeg = jpeg_bytes
-
     def get_raw(self) -> bytes:
         with self._lock:
             return self._raw_jpeg
 
-    def get_warp(self) -> bytes:
-        with self._lock:
-            return self._warp_jpeg
-
-    def mjpeg_stream(self, source: str = "raw"):
+    def mjpeg_stream(self):
         """Generator that pushes MJPEG parts as fast as new frames arrive."""
         last_idx = -1
         while True:
@@ -264,7 +245,7 @@ class _CameraManager:
             for _ in range(100):
                 with self._lock:
                     idx  = self._index
-                    data = self._raw_jpeg if source == "raw" else self._warp_jpeg
+                    data = self._raw_jpeg
                 if idx != last_idx and data:
                     break
                 time.sleep(0.005)
@@ -275,31 +256,8 @@ class _CameraManager:
 
 _camera = _CameraManager()
 
-# ── Vision helpers (adapted from fen_visualizer.py) ───────────────────────────
-def _load_corners():
-    try:
-        with open(_CORNERS_FILE) as f:
-            data = json.load(f)
-        if isinstance(data, list) and len(data) == 4:
-            with _lock:
-                _state["corners"] = data
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print(f"⚠  corners load: {e}")
-
-def _save_corners(corners):
-    try:
-        with open(_CORNERS_FILE, "w") as f:
-            json.dump(corners, f, indent=2)
-    except Exception as e:
-        print(f"⚠  corners save: {e}")
-
 def _best_fen() -> str:
-    src = _state.get("fen_source", "local")
-    if src == "game_mgr" and _state.get("game_fen"):
-        return _state["game_fen"]
-    return _state.get("detected_fen",
+    return _state.get("game_fen",
                       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 
 def _blank_jpeg(w: int, h: int, msg: str) -> bytes:
@@ -313,174 +271,6 @@ def _to_jpeg(frame, quality: int = 80) -> bytes:
     ok, buf = cv2.imencode('.jpg', frame,
                            [cv2.IMWRITE_JPEG_QUALITY, quality])
     return bytes(buf) if ok else b''
-
-def _undistort(frame, p):
-    if not p.get("undistort_enable", 0):
-        return frame
-    h, w = frame.shape[:2]
-    f    = p["undistort_focal"] / 100.0 * w
-    K    = np.array([[f, 0, w/2], [0, f, h/2], [0, 0, 1]], dtype=np.float64)
-    D    = np.array([p["undistort_k1"]/100, p["undistort_k2"]/100, 0, 0],
-                    dtype=np.float64)
-    return cv2.undistort(frame, K, D)
-
-def _warp(frame, corners_norm, sz: int):
-    h, w   = frame.shape[:2]
-    cpx    = [[c[0]*w, c[1]*h] for c in corners_norm]
-    src    = np.float32(cpx)
-    dst    = np.float32([[0,0],[sz-1,0],[sz-1,sz-1],[0,sz-1]])
-    M      = cv2.getPerspectiveTransform(src, dst)
-    M_inv  = cv2.getPerspectiveTransform(dst, src)
-    warped = cv2.warpPerspective(frame, M, (sz, sz))
-    return warped, M, M_inv, cpx
-
-def _detect_pieces(warped, p):
-    sq   = p["warp_size"] // 8
-    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-    k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    wm   = cv2.morphologyEx(
-               cv2.threshold(gray, p["white_thresh"], 255,
-                             cv2.THRESH_BINARY)[1], cv2.MORPH_OPEN, k)
-    bm   = cv2.morphologyEx(
-               cv2.threshold(gray, p["black_thresh"], 255,
-                             cv2.THRESH_BINARY_INV)[1], cv2.MORPH_OPEN, k)
-    best: Dict = {}
-    for color, mask in [('W', wm), ('B', bm)]:
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in cnts:
-            area = cv2.contourArea(cnt)
-            if area < p["min_blob_area"]:
-                continue
-            Mc = cv2.moments(cnt)
-            if Mc["m00"] == 0:
-                continue
-            _, y0, _, h2 = cv2.boundingRect(cnt)
-            cx   = int(Mc["m10"] / Mc["m00"])
-            cyc  = int(Mc["m01"] / Mc["m00"])
-            bias = p["bottom_anchor_bias"]
-            cy   = min(int(cyc*(1-bias) + (y0+h2)*bias), sq*8-1)
-            cx   = min(max(cx, 0), sq*8-1)
-            key  = (cy // sq, cx // sq)
-            if key not in best or area > best[key][0]:
-                best[key] = (area, color)
-    p64 = [""] * 64
-    for (row, col), (_, color) in best.items():
-        if 0 <= row < 8 and 0 <= col < 8:
-            p64[row*8+col] = color
-    return p64, wm, bm
-
-def _fen_from_detection(p64) -> str:
-    rows = []
-    for ri in range(7, -1, -1):
-        wr = 7 - ri
-        empty, s = 0, ''
-        for fi in range(8):
-            pc = p64[wr*8+fi]
-            if not pc:
-                empty += 1
-            else:
-                if empty:
-                    s += str(empty); empty = 0
-                s += 'P' if pc == 'W' else 'p'
-        if empty:
-            s += str(empty)
-        rows.append(s)
-    return '/'.join(rows) + ' w KQkq - 0 1'
-
-def _render_warp(warped, p, p64):
-    out = warped.copy()
-    sz  = p["warp_size"]
-    sq  = sz // 8
-    for r in range(8):
-        for c in range(8):
-            if (r + c) % 2 == 0:
-                roi = out[r*sq:(r+1)*sq, c*sq:(c+1)*sq].astype(np.float32)
-                roi = cv2.addWeighted(roi, 0.82,
-                                      np.full_like(roi, 190), 0.18, 0)
-                out[r*sq:(r+1)*sq, c*sq:(c+1)*sq] = roi.astype(np.uint8)
-    if p["show_grid"]:
-        for i in range(9):
-            cv2.line(out, (i*sq, 0),  (i*sq, sz),  (0, 200, 200), 1)
-            cv2.line(out, (0, i*sq),  (sz, i*sq),  (0, 200, 200), 1)
-    if p["show_pieces"]:
-        for row in range(8):
-            for col in range(8):
-                pc = p64[row*8+col]
-                if pc:
-                    cx, cy = col*sq+sq//2, row*sq+sq//2
-                    fill   = (240, 240, 240) if pc == 'W' else (25, 25, 25)
-                    cv2.circle(out, (cx, cy), sq//3, fill, -1)
-                    cv2.circle(out, (cx, cy), sq//3, (80, 80, 80), 1)
-                    tc = (30, 30, 30) if pc == 'W' else (220, 220, 220)
-                    cv2.putText(out, pc, (cx-8, cy+6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, tc, 2)
-    cv2.rectangle(out, (0, 0), (sz-1, sz-1), (0, 255, 100), 2)
-    return out
-
-def _render_raw(frame, cpx, p, p64, M_inv):
-    out = frame.copy()
-    sz  = p["warp_size"]
-    sq  = sz // 8
-    if p["show_grid"] and M_inv is not None:
-        for i in range(9):
-            for segs in [([[i*sq, 0]], [[i*sq, sz]]),
-                         ([[0, i*sq]], [[sz, i*sq]])]:
-                p0 = cv2.perspectiveTransform(
-                    np.float32([segs[0]]), M_inv)[0, 0].astype(int)
-                p1 = cv2.perspectiveTransform(
-                    np.float32([segs[1]]), M_inv)[0, 0].astype(int)
-                cv2.line(out, tuple(p0), tuple(p1), (0, 200, 200), 1)
-    labels = ['TL', 'TR', 'BR', 'BL']
-    colors = [(255,80,80),(80,255,80),(80,80,255),(255,255,80)]
-    for i, (cx, cy) in enumerate(cpx):
-        cv2.circle(out, (int(cx), int(cy)), 10, colors[i], -1)
-        cv2.putText(out, labels[i], (int(cx)+12, int(cy)+5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors[i], 2)
-    cv2.polylines(out,
-                  [np.array(cpx, dtype=np.int32).reshape(-1, 1, 2)],
-                  True, (0, 255, 100), 2)
-    return out
-
-def _process_one(frame, corners, p):
-    try:
-        sz                        = p["warp_size"]
-        warped, M, M_inv, cpx     = _warp(frame, corners, sz)
-        p64, wm, bm               = _detect_pieces(warped, p)
-        fen                       = _fen_from_detection(p64)
-        raw_out                   = _render_raw(frame, cpx, p, p64, M_inv)
-        warp_out                  = _render_warp(warped, p, p64)
-        _camera.update_raw(_to_jpeg(raw_out, 78))
-        _camera.update_warp(_to_jpeg(warp_out, 90))
-        with _lock:
-            _state["pieces64"]     = p64
-            _state["detected_fen"] = fen
-            _state["frame_count"] += 1
-            _state["last_updated"] = time.time()
-            _state["error"]        = ""
-    except Exception as e:
-        with _lock:
-            _state["error"] = str(e)
-
-def _vision_loop():
-    """Background loop: re-processes the latest frame at ~8 fps."""
-    while True:
-        time.sleep(0.12)
-        with _lock:
-            frame   = _state["raw_frame"]
-            corners = list(_state["corners"])
-            p       = dict(_params)
-        if frame is None:
-            continue
-        _process_one(_undistort(frame, p), corners, p)
-
-def _force_reprocess():
-    with _lock:
-        frame   = _state["raw_frame"]
-        corners = list(_state["corners"])
-        p       = dict(_params)
-    if frame is not None:
-        _process_one(_undistort(frame, p), corners, p)
 
 # ── OpenCV fallback camera ────────────────────────────────────────────────────
 def _opencv_camera_loop(camera_index: int):
@@ -866,14 +656,7 @@ def index():
 
 @app.route("/api/stream/raw")
 def stream_raw():
-    return Response(_camera.mjpeg_stream("raw"),
-                    mimetype="multipart/x-mixed-replace; boundary=frame",
-                    headers={"Cache-Control": "no-cache",
-                             "X-Accel-Buffering": "no"})
-
-@app.route("/api/stream/warp")
-def stream_warp():
-    return Response(_camera.mjpeg_stream("warp"),
+    return Response(_camera.mjpeg_stream(),
                     mimetype="multipart/x-mixed-replace; boundary=frame",
                     headers={"Cache-Control": "no-cache",
                              "X-Accel-Buffering": "no"})
@@ -948,42 +731,6 @@ def api_fen_set():
         _state["fen_source"]   = "local"
         _state["last_updated"] = time.time()
         _state["frame_count"] += 1
-    return jsonify({"ok": True})
-
-# ── Vision params / corners ───────────────────────────────────────────────────
-@app.route("/api/params", methods=["GET"])
-def api_params_get():
-    return jsonify(dict(_params))
-
-@app.route("/api/params", methods=["POST"])
-def api_params_set():
-    data = request.get_json(silent=True) or {}
-    with _lock:
-        for k, v in data.items():
-            if k in _params:
-                _params[k] = type(_params[k])(v)
-    threading.Thread(target=_force_reprocess, daemon=True).start()
-    return jsonify({"ok": True})
-
-@app.route("/api/corners", methods=["GET"])
-def api_corners_get():
-    with _lock:
-        return jsonify({"corners": _state["corners"]})
-
-@app.route("/api/corners", methods=["POST"])
-def api_corners_set():
-    data = request.get_json(silent=True) or {}
-    c = data.get("corners")
-    if not c or len(c) != 4:
-        return jsonify({"ok": False}), 400
-    try:
-        c = [[float(x[0]), float(x[1])] for x in c]
-    except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 400
-    with _lock:
-        _state["corners"] = c
-    _save_corners(c)
-    threading.Thread(target=_force_reprocess, daemon=True).start()
     return jsonify({"ok": True})
 
 # ── Hardware routes ───────────────────────────────────────────────────────────
@@ -1520,14 +1267,6 @@ body.showcase #debug-view{display:none}
 .cam-hdr span{text-transform:none;letter-spacing:0;font-size:1em;color:var(--text)}
 .cam-wrap{position:relative}
 .cam-wrap img{width:100%;display:block;max-height:220px;object-fit:contain;background:#000}
-.corner-handle{
-  position:absolute;width:18px;height:18px;border-radius:50%;
-  transform:translate(-50%,-50%);cursor:grab;z-index:10;
-  border:2px solid #fff;display:flex;align-items:center;justify-content:center;
-  font-size:8px;font-weight:700;color:#fff;user-select:none;
-  box-shadow:0 0 8px #0008;
-}
-.corner-handle:active{cursor:grabbing}
 .cam-footer{font-size:.6em;color:var(--dim);padding:3px 9px;
              white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
@@ -1643,13 +1382,6 @@ body.showcase #debug-view{display:none}
 .tog-row input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
 
 /* ── Param groups ─────────────────────────────────────────────────── */
-.pg-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-@media(max-width:700px){.pg-grid{grid-template-columns:1fr}}
-.pg{background:var(--surf2);border:1px solid var(--border);border-radius:5px;padding:10px 12px}
-.pg-title{font-size:.62em;text-transform:uppercase;letter-spacing:.08em;
-          color:var(--accent);margin-bottom:8px;font-weight:700;
-          border-bottom:1px solid var(--border);padding-bottom:5px}
-
 /* ── Gantry ───────────────────────────────────────────────────────── */
 .dpad{display:grid;grid-template-columns:repeat(3,54px);
       grid-template-rows:repeat(3,54px);gap:4px;margin:12px auto;width:fit-content}
@@ -1799,8 +1531,6 @@ body.showcase #debug-view{display:none}
       <div class="pill-dot"></div>GAME
     </div>
   </div>
-  <button class="hbtn" onclick="triggerReprocess()">&#8635; Reprocess</button>
-  <button class="hbtn" onclick="saveCorners()">&#128204; Corners</button>
   <a href="/api/snapshot" class="hbtn">&#128247; Snap</a>
   <button class="estop-btn" id="estop-btn" onclick="doEstop()">&#9760; E-STOP</button>
 </div>
@@ -1853,7 +1583,7 @@ body.showcase #debug-view{display:none}
   <div class="cam-row">
     <div class="cam-card">
       <div class="cam-hdr">
-        Live Camera &mdash; drag corners to define board
+        Live Camera
         <span id="cam-ts">&#8212;</span>
       </div>
       <div class="cam-wrap" id="cam-wrap">
@@ -1863,13 +1593,13 @@ body.showcase #debug-view{display:none}
     </div>
     <div class="cam-card">
       <div class="cam-hdr">
-        Top-Down Board View
-        <span style="color:var(--ok)">MJPEG &#9679;</span>
+        Piece Detector View
+        <span style="color:var(--dim);font-size:.85em">from /perception/piece_debug</span>
       </div>
       <div class="cam-wrap">
-        <img src="/api/stream/warp" alt="warp" style="image-rendering:pixelated">
+        <img id="top-diff-img" src="/api/diff_frame" alt="piece detector heatmap" style="image-rendering:pixelated">
       </div>
-      <div class="cam-footer" id="corner-footer">Corners: &#8212;</div>
+      <div class="cam-footer">See Perception tab to tune detection thresholds.</div>
     </div>
   </div>
 
@@ -2068,19 +1798,7 @@ body.showcase #debug-view{display:none}
         </button>
       </div>
 
-      <div class="two-col" style="margin-bottom:8px">
-        <div class="card">
-          <div class="card-hdr">Corner Calibration</div>
-          <div class="card-body" id="corner-editor"></div>
-          <div class="card-body" style="padding-top:0">
-            <div class="btn-row">
-              <button class="btn primary" onclick="saveCorners()">&#128190; Save</button>
-              <button class="btn" onclick="resetCorners()">&#8635; Reset</button>
-              <button class="btn" onclick="triggerReprocess()">&#9881; Reprocess</button>
-            </div>
-          </div>
-        </div>
-        <div class="card">
+      <div class="card" style="margin-bottom:8px">
           <div class="card-hdr">Frame-Diff Detection</div>
           <div class="card-body">
             <div class="stat-row">
@@ -2104,10 +1822,9 @@ body.showcase #debug-view{display:none}
               game_manager matches changed squares to a legal move.
             </div>
           </div>
-        </div>
       </div>
 
-      <!-- Diff analysis section (fen_visualizer pipeline) -->
+      <!-- Diff analysis section -->
       <div class="card">
         <div class="card-hdr">Diff Analysis — Threshold Tuning</div>
         <div class="card-body">
@@ -2177,16 +1894,6 @@ body.showcase #debug-view{display:none}
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-hdr">Overlay Toggles</div>
-        <div class="card-body" id="overlay-togs"></div>
-      </div>
-      <div class="card">
-        <div class="card-hdr">Warp &amp; Lens Parameters</div>
-        <div class="card-body">
-          <div class="pg-grid" id="pg-grid"></div>
-        </div>
-      </div>
     </div><!-- /tab-perception -->
 
     <!-- ── GANTRY ────────────────────────────────────────────────── -->
@@ -2537,10 +2244,6 @@ body.showcase #debug-view{display:none}
 var uiMode     = 'debug';
 var activeTab  = 'game';
 var curStatus  = {};
-var corners    = [{fx:.10,fy:.10},{fx:.90,fy:.10},{fx:.90,fy:.90},{fx:.10,fy:.90}];
-var handles    = [];
-var dragging   = null;
-var curParams  = {};
 var heldKeys   = {};
 var jogTimer   = null;  // unused — kept for legacy safety
 var jogDx      = 0;
@@ -2597,176 +2300,6 @@ function updateBoards(fen) {
   } catch(e) {}
 }
 
-// ── Corner handles ────────────────────────────────────────────────
-var CH_COLORS = ['#f05050','#50e050','#5080ff','#f0d050'];
-var CH_LABELS = ['TL','TR','BR','BL'];
-
-function buildHandles() {
-  var wrap = document.getElementById('cam-wrap');
-  handles.forEach(function(h){ if(h.parentNode) h.parentNode.removeChild(h); });
-  handles = [];
-  corners.forEach(function(c, i) {
-    var el = document.createElement('div');
-    el.className = 'corner-handle';
-    el.style.background = CH_COLORS[i];
-    el.textContent = CH_LABELS[i];
-    wrap.appendChild(el);
-    handles.push(el);
-    el.addEventListener('mousedown', function(e) {
-      e.preventDefault();
-      dragging = {i:i, sx:e.clientX, sy:e.clientY, sfx:c.fx, sfy:c.fy};
-    });
-    el.addEventListener('touchstart', function(e) {
-      e.preventDefault();
-      var t = e.touches[0];
-      dragging = {i:i, sx:t.clientX, sy:t.clientY, sfx:c.fx, sfy:c.fy};
-    }, {passive:false});
-  });
-  posHandles();
-}
-
-function posHandles() {
-  var img = document.getElementById('cam-img');
-  var W = img.clientWidth, H = img.clientHeight;
-  corners.forEach(function(c, i) {
-    handles[i].style.left = (c.fx*W)+'px';
-    handles[i].style.top  = (c.fy*H)+'px';
-  });
-}
-
-function applyDrag(cx, cy) {
-  if (!dragging) return;
-  var img = document.getElementById('cam-img');
-  var W = img.clientWidth, H = img.clientHeight;
-  corners[dragging.i].fx = Math.min(1,Math.max(0, dragging.sfx+(cx-dragging.sx)/W));
-  corners[dragging.i].fy = Math.min(1,Math.max(0, dragging.sfy+(cy-dragging.sy)/H));
-  posHandles(); updateCornerInfo();
-}
-
-document.addEventListener('mousemove', function(e){ applyDrag(e.clientX, e.clientY); });
-document.addEventListener('mouseup',   function(){ if(dragging){ dragging=null; sendCorners(); }});
-document.addEventListener('touchmove', function(e){
-  if(!dragging) return; e.preventDefault();
-  applyDrag(e.touches[0].clientX, e.touches[0].clientY);
-},{passive:false});
-document.addEventListener('touchend', function(){ if(dragging){ dragging=null; sendCorners(); }});
-
-function updateCornerInfo() {
-  var t = corners.map(function(c,i){
-    return CH_LABELS[i]+'('+c.fx.toFixed(3)+','+c.fy.toFixed(3)+')';
-  }).join('  ');
-  document.getElementById('corner-footer').textContent = t;
-  corners.forEach(function(c,i) {
-    var ex = document.getElementById('ced-x'+i);
-    var ey = document.getElementById('ced-y'+i);
-    if(ex) ex.value = c.fx.toFixed(3);
-    if(ey) ey.value = c.fy.toFixed(3);
-  });
-}
-
-function sendCorners() {
-  fetch('/api/corners', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({corners:corners.map(function(c){return[c.fx,c.fy]})})});
-}
-function saveCorners()  { sendCorners(); }
-function resetCorners() {
-  corners = [{fx:.10,fy:.10},{fx:.90,fy:.10},{fx:.90,fy:.90},{fx:.10,fy:.90}];
-  posHandles(); updateCornerInfo(); sendCorners();
-}
-function loadCornersFromServer() {
-  fetch('/api/corners').then(function(r){return r.json();}).then(function(d){
-    if (d.corners && d.corners.length===4) {
-      corners = d.corners.map(function(c){return{fx:c[0],fy:c[1]};});
-      posHandles(); updateCornerInfo();
-    }
-  });
-}
-
-document.getElementById('cam-img').addEventListener('load', function(){ buildHandles(); posHandles(); });
-window.addEventListener('resize', posHandles);
-
-// ── Corner editor (perception tab) ───────────────────────────────
-function buildCornerEditor() {
-  var el = document.getElementById('corner-editor');
-  var html = '<div style="display:grid;grid-template-columns:auto 1fr 1fr;gap:5px 10px;align-items:center;font-size:.75em">';
-  html += '<div style="color:var(--dim)">Corner</div><div style="color:var(--dim)">X</div><div style="color:var(--dim)">Y</div>';
-  CH_LABELS.forEach(function(lbl,i) {
-    html += '<div style="color:'+CH_COLORS[i]+';font-weight:700">'+lbl+'</div>'+
-      '<input id="ced-x'+i+'" type="number" step="0.01" min="0" max="1" value="'+corners[i].fx.toFixed(3)+'"'+
-      ' style="background:#040408;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px"'+
-      ' onchange="setCornerXY('+i+',\'x\',+this.value)">'+
-      '<input id="ced-y'+i+'" type="number" step="0.01" min="0" max="1" value="'+corners[i].fy.toFixed(3)+'"'+
-      ' style="background:#040408;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px"'+
-      ' onchange="setCornerXY('+i+',\'y\',+this.value)">';
-  });
-  el.innerHTML = html + '</div>';
-}
-
-function setCornerXY(i, ax, v) {
-  if (ax==='x') corners[i].fx = Math.min(1,Math.max(0,v));
-  else          corners[i].fy = Math.min(1,Math.max(0,v));
-  posHandles(); updateCornerInfo();
-}
-
-// ── Overlay toggles ───────────────────────────────────────────────
-var OVLAY = [
-  {k:'show_grid',        l:'Show grid overlay'},
-  {k:'show_pieces',      l:'Show piece circles'},
-  {k:'undistort_enable', l:'Enable lens undistortion'},
-];
-function buildOverlayToggles(p) {
-  var el = document.getElementById('overlay-togs');
-  var html = '';
-  OVLAY.forEach(function(t) {
-    html += '<div class="tog-row">'+
-      '<input type="checkbox" id="ov_'+t.k+'" '+(p[t.k]?'checked':'')+
-      ' onchange="sendParam({'+JSON.stringify(t.k)+':this.checked?1:0})">'+
-      '<label for="ov_'+t.k+'">'+t.l+'</label></div>';
-  });
-  el.innerHTML = html;
-}
-
-// ── Param sliders ─────────────────────────────────────────────────
-var PARAM_GRP = [
-  {t:'Lens Correction', ps:[
-    {k:'undistort_k1',    l:'k1 (×100)',      mn:-80,mx:80, st:1},
-    {k:'undistort_k2',    l:'k2 (×100)',      mn:-50,mx:50, st:1},
-    {k:'undistort_focal', l:'Focal % width',  mn:40, mx:130,st:1},
-  ]},
-  {t:'Transform', ps:[
-    {k:'warp_size',       l:'Warp output size', mn:240,mx:800,st:40},
-  ]},
-];
-
-function buildParamSliders(p) {
-  var grid = document.getElementById('pg-grid');
-  var html = '';
-  PARAM_GRP.forEach(function(g) {
-    html += '<div class="pg"><div class="pg-title">'+g.t+'</div>';
-    g.ps.forEach(function(pr) {
-      var raw  = p[pr.k] !== undefined ? p[pr.k] : 0;
-      var disp = pr.scale ? Math.round(raw*pr.scale) : raw;
-      html += '<div class="sl-row">'+
-        '<label title="'+pr.k+'">'+pr.l+'</label>'+
-        '<input type="range" id="sl_'+pr.k+'" min="'+pr.mn+'" max="'+pr.mx+
-        '" step="'+pr.st+'" value="'+disp+'"'+
-        ' oninput="document.getElementById(\'sv_'+pr.k+'\').textContent=this.value"'+
-        ' onchange="onSlider(\''+pr.k+'\',+this.value,'+(pr.scale||1)+')">'+
-        '<span class="sv" id="sv_'+pr.k+'">'+disp+'</span></div>';
-    });
-    html += '</div>';
-  });
-  grid.innerHTML = html;
-}
-
-function onSlider(k, v, scale) { sendParam({[k]: scale>1 ? v/scale : v}); }
-function sendParam(d) {
-  fetch('/api/params',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(d)});
-}
-function triggerReprocess() { sendParam({}); }
 function capturePreMove() { doCaptureReference(); }
 
 // ── Capture Reference ─────────────────────────────────────────────
@@ -2906,24 +2439,23 @@ function applyToDetector() {
     .then(function(d){ if (!d.ok) alert('Apply failed: '+(d.msg||'')); });
 }
 
-// Refresh diff images and score data when on perception tab
+// Refresh diff heatmap image (top strip + Perception tab) always; score
+// data only while the Perception tab is actually visible.
 setInterval(function() {
+  var t = Date.now();
+  var topImg  = document.getElementById('top-diff-img');
+  var percImg = document.getElementById('diff-heatmap');
+  if (topImg)  topImg.src  = '/api/diff_frame?t=' + t;
+  if (percImg) percImg.src = '/api/diff_frame?t=' + t;
   if (activeTab !== 'perception') return;
   fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
     _squareScores = d.scores || {};
     renderScoreCanvas();
-    // Sync sliders from server if not being dragged
-    var elems = {s_display_threshold:d.display_threshold, s_shift_compensation:d.shift_compensation,
-                 s_clump_keep:d.clump_keep_per_group};
-    // (don't override while user is interacting — just update internal state)
     if (d.display_threshold !== undefined) _diffParams.display_threshold = d.display_threshold;
     if (d.shift_compensation !== undefined) _diffParams.shift_compensation = d.shift_compensation;
     if (d.clump_enable !== undefined) _diffParams.clump_enable = d.clump_enable;
     if (d.clump_keep_per_group !== undefined) _diffParams.clump_keep_per_group = d.clump_keep_per_group;
   });
-  // Refresh diff heatmap image
-  var img = document.getElementById('diff-heatmap');
-  if (img) img.src = '/api/diff_frame?t=' + Date.now();
 }, 1500);
 
 // ── Node health polling ───────────────────────────────────────────
@@ -3711,16 +3243,7 @@ function setLim(dotId, txtId, hwId, val) {
 }
 
 // ── Boot ──────────────────────────────────────────────────────────
-fetch('/api/params').then(function(r){return r.json();}).then(function(p){
-  curParams = p;
-  buildParamSliders(p);
-  buildOverlayToggles(p);
-});
 fetch('/api/tests/catalogue').then(function(r){return r.json();}).then(buildCatalogue);
-buildHandles();
-buildCornerEditor();
-loadCornersFromServer();
-updateCornerInfo();
 loadCalibState();
 buildCalibVerifySelect();
 drawCanvas(0, 0);
@@ -3745,7 +3268,6 @@ def main():
                         help="Initial display mode")
     args = parser.parse_args()
 
-    _load_corners()
     _load_calibration()
 
     # Static image
@@ -3761,8 +3283,7 @@ def main():
             print(f"  ⚠  Cannot load: {args.image}")
 
     # Background threads
-    threading.Thread(target=_vision_loop, daemon=True).start()
-    threading.Thread(target=_jog_loop,    daemon=True).start()
+    threading.Thread(target=_jog_loop, daemon=True).start()
 
     # ROS2 or OpenCV camera
     if not args.no_ros:
