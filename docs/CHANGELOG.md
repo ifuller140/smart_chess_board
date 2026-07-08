@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Chess OS: `api_calib_apply` now pushes calibrated board geometry (`board_origin_x_mm`, `board_origin_y_mm`, `square_size_mm`) to `motion_planner_node` live via ROS `SetParameters` — previously the calibration UI only updated chess_os's own local `board_calibration.json`, never the parameters that actually drive gantry moves during real games. Live-verified on the Pi via a synthetic `/gantry/pose` publish (Step 2 of the Chess OS architecture initiative).
 - Chess engine difficulty setting (Stockfish skill level) exposed from `chess_engine_node.py` and Chess OS
 - Pawn promotion handler in `game_manager_node.py` / Chess OS (promotion banner + piece-choice UI)
 - Chess OS: gantry calibration tests wired into the Tests tab
@@ -55,6 +56,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `scripts/` directory (single file relocated to `code/`)
 
 ### Fixed
+- Chess OS: `_RosNode` subscribed to the uncompressed `/camera/image_raw` topic, but the real camera backend (`camera_ros`) never actually emits frames on it — only `/camera/image_raw/compressed`. The raw camera preview had likely been silently dead over ROS. Switched to the compressed topic (same one `board_detector_node`/`piece_detector_node` already use) and decode with `cv2.imdecode`.
+- Chess OS: `api_capture_reference` always reported success (`session_reference_captured=True`) regardless of whether the underlying `/perception/capture_premove` service call actually succeeded — it only checked whether the Flask response was a tuple (the ROS-not-connected case), never the `ok` field. Now checks the actual result.
 - License declarations (`TODO: License declaration` → `MIT`, matching the root `LICENSE` file) across all `package.xml`/`setup.py` files
 - `game_manager_node.py` / `chess_engine_node.py` — the "In a real app, we'd..." mock comments flagged in earlier audits are gone; both are now real implementations (state machine + Stockfish integration)
 - Comprehensive agent-first documentation framework
