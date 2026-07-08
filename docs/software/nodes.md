@@ -125,18 +125,18 @@ Chess OS is not a ROS node — it's a Flask web application that acts as the **m
 **Services**:
 | Service | Type | Description |
 |---------|------|-------------|
-| `/servo/engage` | `std_srvs/Trigger` | Lower magnet (engage) |
-| `/servo/release` | `std_srvs/Trigger` | Raise magnet (release) |
+| `/servo/engage` | `std_srvs/Trigger` | Drag position — magnet actuates a piece |
+| `/servo/release` | `std_srvs/Trigger` | Clear position — no piece interaction |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `servo_pin` | int | 12 | BCM pin for PWM signal |
-| `engage_pwm` | float | 2.5 | Duty cycle for down position |
-| `release_pwm` | float | 7.5 | Duty cycle for up position |
+| `engage_angle_deg` | float | 145.0 | Servo angle for drag position |
+| `release_angle_deg` | float | 170.0 | Servo angle for clear position |
 | `movement_time` | float | 0.5 | Wait time after movement (s) |
 
-<!-- USER_ATTENTION: Calibrate engage_pwm and release_pwm for your setup -->
+Angles calibrated on real hardware via `code/test_z_servo.py`'s interactive sweep.
 
 ---
 

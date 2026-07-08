@@ -6,8 +6,12 @@ Uses pigpio's set_servo_pulsewidth() for jitter-free hardware-timed
 servo control (no software PWM).
 
 Services:
-  /servo/engage  (Trigger) — lower magnet to engage
-  /servo/release (Trigger) — raise magnet to disengage
+  /servo/engage  (Trigger) — drag position, magnet actuates a piece
+  /servo/release (Trigger) — clear position, magnet does not interact with pieces
+
+Positions are calibrated in degrees (see code/test_z_servo.py for the
+interactive sweep used to find them) and converted to a pigpio pulse
+width with the same 500-2500us / 0-180deg mapping as that script.
 
 Requires:
 - pigpio daemon running: sudo pigpiod
@@ -20,6 +24,15 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 from std_msgs.msg import String, Bool
 
+# SG90 pulse-width range, matches code/test_z_servo.py's calibration sweep
+MIN_PULSE_US = 500
+MAX_PULSE_US = 2500
+
+
+def angle_to_pulsewidth(degrees: float) -> int:
+    """Convert a 0-180 degree servo angle to a pigpio pulse width in microseconds."""
+    return int(MIN_PULSE_US + (degrees / 180.0) * (MAX_PULSE_US - MIN_PULSE_US))
+
 
 class ServoNode(Node):
     def __init__(self):
@@ -27,13 +40,13 @@ class ServoNode(Node):
 
         # Parameters
         self.declare_parameter('servo_pin', 12)
-        self.declare_parameter('engage_pulse_us', 500)    # Down position
-        self.declare_parameter('release_pulse_us', 1500)   # Up position
+        self.declare_parameter('engage_angle_deg', 145.0)   # Drag position — magnet actuates piece
+        self.declare_parameter('release_angle_deg', 170.0)  # Clear position — no piece interaction
         self.declare_parameter('movement_time', 0.5)
 
         self.servo_pin = self.get_parameter('servo_pin').value
-        self.engage_pw = self.get_parameter('engage_pulse_us').value
-        self.release_pw = self.get_parameter('release_pulse_us').value
+        self.engage_pw = angle_to_pulsewidth(self.get_parameter('engage_angle_deg').value)
+        self.release_pw = angle_to_pulsewidth(self.get_parameter('release_angle_deg').value)
         self.move_time = self.get_parameter('movement_time').value
 
         self.current_state = "unknown"
@@ -52,7 +65,8 @@ class ServoNode(Node):
 
         self.get_logger().info(
             f"Servo initialized on pin {self.servo_pin} "
-            f"(engage={self.engage_pw}µs, release={self.release_pw}µs)")
+            f"(engage={self.get_parameter('engage_angle_deg').value}deg/{self.engage_pw}us, "
+            f"release={self.get_parameter('release_angle_deg').value}deg/{self.release_pw}us)")
 
         # Services
         self.engage_srv = self.create_service(

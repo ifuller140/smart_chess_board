@@ -95,11 +95,12 @@ The servo raises and lowers a **permanent neodymium magnet** through the undersi
 ```yaml
 servo_node:
   ros__parameters:
-    servo_pin: 12           # Hardware PWM capable
-    engage_pulse_us: 500    # Down position — magnet approaches board (microseconds)
-    release_pulse_us: 1500  # Up position — magnet clear of board (microseconds)
-    movement_time: 0.5      # Seconds to wait for servo to reach position
+    servo_pin: 12              # Hardware PWM capable
+    engage_angle_deg: 145.0    # Drag position — magnet actuates a piece
+    release_angle_deg: 170.0   # Clear position — no piece interaction while moving
+    movement_time: 0.5         # Seconds to wait for servo to reach position
 ```
+Calibrated on real hardware via `code/test_z_servo.py`'s interactive angle sweep.
 
 > [!NOTE]
 > GPIO 12, 13, 18, 19 support hardware PWM. Using GPIO 12 for Z-axis servo.

@@ -245,15 +245,17 @@ clock_servo_node:
 ```yaml
 servo_node:
   ros__parameters:
-    servo_pin: 12             # BCM pin (hardware PWM)
-    engage_pulse_us: 500      # Down position — magnet close to board
-    release_pulse_us: 1500    # Up position — magnet away from board
-    movement_time: 0.5        # Seconds to wait for servo to reach position
+    servo_pin: 12              # BCM pin (hardware PWM)
+    engage_angle_deg: 145.0    # Drag position — magnet close to board
+    release_angle_deg: 170.0   # Clear position — magnet away from board
+    movement_time: 0.5         # Seconds to wait for servo to reach position
 ```
 
 > [!NOTE]
-> Calibrate `engage_pulse_us` so the magnet is close enough to the board
-> surface to attract a chess piece through the board material.
+> Calibrate `engage_angle_deg` so the magnet is close enough to the board
+> surface to attract a chess piece through the board material. Current
+> values (145°/170°) were found via `code/test_z_servo.py`'s interactive
+> angle sweep on real hardware.
 
 ---
 
