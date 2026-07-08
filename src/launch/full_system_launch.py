@@ -21,7 +21,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -81,6 +81,9 @@ def generate_launch_description():
 
         Node(package='chess_hw_interface', executable='gpio_watchdog_node',
              name='gpio_watchdog_node', output='screen'),
+
+        Node(package='chess_hw_interface', executable='test_runner_node',
+             name='test_runner_node', output='screen'),
 
         # ═══════════════════════════════════════════════════════
         # LAYER 2 — Gantry Control
@@ -150,6 +153,18 @@ def generate_launch_description():
                  'homing_timeout_s':        90.0,
              }],
              output='screen'),
+
+        # ═══════════════════════════════════════════════════════
+        # LAYER 5 — Chess OS (web UI)
+        # ═══════════════════════════════════════════════════════
+        # Uses ExecuteProcess rather than the Node action: chess_ui's argparse
+        # entrypoint isn't itself the rclpy node (it spins one on a background
+        # thread), so it doesn't expect the --ros-args launch_ros.Node injects.
+
+        ExecuteProcess(
+            cmd=['ros2', 'run', 'chess_ui', 'chess_ui'],
+            output='screen',
+        ),
 
         LogInfo(msg='All nodes launched — waiting for system to initialize...'),
     ])
