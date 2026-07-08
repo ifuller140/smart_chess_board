@@ -119,7 +119,7 @@ source install/setup.bash
 
 **Package build order** (colcon handles this automatically):
 
-1. `gantry_control_interfaces` — CMake: `MoveGantry.action`
+1. `chess_interfaces` — CMake: `MoveGantry.action`, `RequestMove.srv`, `BoardState.msg`
 2. `chess_hw_interface` — Stepper, servo, limit switch + test runner
 3. `chess_perception` — Camera and board detection
 4. `gantry_control` — Kinematics and motion planning

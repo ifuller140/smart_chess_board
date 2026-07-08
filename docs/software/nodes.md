@@ -114,7 +114,7 @@ Chess OS is not a ROS node — it's a Flask web application that acts as the **m
 
 ### servo_node
 
-**Purpose**: Control SG90 servo for Z-axis electromagnet lift.
+**Purpose**: Control SG90 servo for Z-axis permanent-magnet lift.
 
 | Property | Value |
 |----------|-------|

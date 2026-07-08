@@ -5,7 +5,7 @@
   <version>0.0.1</version>
   <description>Hardware interface for Smart Chess Board (Steppers, Servos, GPIO)</description>
   <maintainer email="ian@example.com">Ian</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>

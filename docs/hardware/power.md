@@ -8,7 +8,7 @@
 |------|---------|-------------|---------|
 | Pi rail | 5V | 3A | Raspberry Pi 4B only |
 | Motor rail | 12V | 2A | A4988 VMOT for both NEMA 11 steppers |
-| Servo/Magnet rail | 5V | 2A | SG90 servos + electromagnet |
+| Servo rail | 5V | 2A | SG90 servos (magnet is a passive permanent magnet — draws no power) |
 
 ## Critical Notes
 
@@ -24,7 +24,6 @@
 | Raspberry Pi 4B + camera | 0.8A | 1.2A |
 | NEMA 11 + A4988 (each) | 0.4A | 0.8A |
 | SG90 servo (each) | 0.15A | 0.7A |
-| Electromagnet | 0.4A | 0.5A |
 
 ## Troubleshooting Power Symptoms
 
@@ -32,7 +31,7 @@
 |---------|--------------|--------|
 | Stepper buzzes/jitters with weak torque | Motor rail sag or current-limit too low | Verify VMOT under load; retune A4988 current limit |
 | Random motion glitches | Missing common ground | Re-check ground bus continuity |
-| Servo jitters when motors step | Shared noisy rail | Isolate servo/magnet rail and add decoupling |
+| Servo jitters when motors step | Shared noisy rail | Isolate servo rail and add decoupling |
 | Pi brownout icon/reboots | Pi rail undersized | Use known-good 5V/3A USB-C PSU |
 
 ---

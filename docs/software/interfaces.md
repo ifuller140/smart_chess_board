@@ -2,12 +2,14 @@
 
 > **Custom message, service, and action definitions.**
 
+All custom `.msg`/`.srv`/`.action` definitions live in one consolidated package: **`src/chess_interfaces/`** (`ament_cmake` build type). Every other package (`chess_hw_interface`, `chess_perception`, `chess_logic`, `gantry_control`) depends on it and imports from `chess_interfaces.msg`/`.srv`/`.action` — there is no other package that owns interface definitions.
+
 ---
 
 ## Custom Messages
 
 ### BoardState.msg
-**Package**: `chess_perception`
+**Package**: `chess_interfaces`
 **File**: `msg/BoardState.msg`
 
 Represents the current state of the chess board.
@@ -40,72 +42,10 @@ Index 56 = a8,  Index 57 = b8,  ... Index 63 = h8
 
 ---
 
-### StepperCommand.msg
-**Package**: `chess_hw_interface`
-**File**: `msg/StepperCommand.msg` (to be created)
-
-Commands for stepper motors.
-
-```
-int32 steps_a           # Steps for motor A (+ = forward)
-int32 steps_b           # Steps for motor B (+ = forward)
-float32 step_delay      # Delay between steps (seconds)
-bool sync               # Move motors simultaneously
-```
-
----
-
-### StepperStatus.msg
-**Package**: `chess_hw_interface`
-**File**: `msg/StepperStatus.msg` (to be created)
-
-Status feedback from stepper motors.
-
-```
-std_msgs/Header header
-int32 position_a        # Current position motor A (steps from home)
-int32 position_b        # Current position motor B (steps from home)
-bool moving             # True if currently moving
-bool error              # True if error occurred
-string error_message    # Error description
-```
-
----
-
-### LimitSwitchState.msg
-**Package**: `chess_hw_interface`
-**File**: `msg/LimitSwitchState.msg` (to be created)
-
-State of all limit switches.
-
-```
-std_msgs/Header header
-bool x_min_triggered    # X-axis limit switch
-bool y_min_triggered    # Y-axis limit switch
-bool clock_hit          # Clock button pressed
-```
-
----
-
-### BoardGeometry.msg
-**Package**: `chess_perception`
-**File**: `msg/BoardGeometry.msg` (to be created)
-
-Detected board geometry in image coordinates.
-
-```
-std_msgs/Header header
-geometry_msgs/Point[4] corners    # [top-left, top-right, bottom-right, bottom-left]
-float32[9] homography_matrix      # 3x3 perspective transform (flattened)
-bool valid                        # True if board was detected
-```
-
----
-
 ## Custom Services
 
 ### RequestMove.srv
-**Package**: `chess_logic`
+**Package**: `chess_interfaces`
 **File**: `srv/RequestMove.srv`
 
 Request the best move from the chess engine.
@@ -113,31 +53,12 @@ Request the best move from the chess engine.
 ```
 # Request
 string fen               # Current board state in FEN notation
-float32 time_limit      # Maximum thinking time (seconds)
+float32 think_time_s     # How long the engine should think (seconds)
 ---
 # Response
 string best_move_uci     # Best move in UCI format (e.g., "e2e4")
-float32 think_time      # Actual time spent thinking
-int32 evaluation        # Position evaluation (centipawns)
-bool success            # True if move was found
-string message          # Error message if failed
-```
-
----
-
-### StartPlayer.srv
-**Package**: `chess_hw_interface`
-**File**: `srv/StartPlayer.srv` (to be created)
-
-Start the clock for a specific player.
-
-```
-# Request
-int8 player             # 1 = white, 2 = black
----
-# Response
-bool success
-float32 remaining_time  # Time remaining for that player
+float32 think_time       # Actual time spent thinking
+bool success             # True if move was found
 ```
 
 ---
@@ -145,53 +66,29 @@ float32 remaining_time  # Time remaining for that player
 ## Custom Actions
 
 ### MoveGantry.action
-**Package**: `gantry_control`
+**Package**: `chess_interfaces`
 **File**: `action/MoveGantry.action`
 
-Move the gantry to a specified position with optional magnet control.
+Move the gantry to a specified position with optional magnet engagement at the destination.
 
 ```
 # Goal
-float32 x_mm            # Target X position (mm from home)
-float32 y_mm            # Target Y position (mm from home)
-float32 speed_mm_s      # Movement speed (mm/s)
-bool engage_magnet      # Engage magnet at destination
-bool release_magnet     # Release magnet at destination
+float32 target_x_mm      # Target X position (mm from home)
+float32 target_y_mm      # Target Y position (mm from home)
+float32 speed_mm_s       # Movement speed (mm/s)
+bool engage_magnet       # Engage magnet at destination
 ---
 # Result
-bool success            # True if move completed
-string message          # Error message if failed
-float32 final_x_mm      # Actual final X position
-float32 final_y_mm      # Actual final Y position
+bool success             # True if move completed
+string message           # Error message if failed
 ---
 # Feedback
-float32 current_x_mm    # Current X position
-float32 current_y_mm    # Current Y position
-float32 percent_complete  # 0.0 to 1.0
+float32 current_x_mm     # Current X position
+float32 current_y_mm     # Current Y position
+float32 percent_complete # 0.0 to 1.0
 ```
 
----
-
-### ExecuteChessMove.action
-**Package**: `gantry_control`
-**File**: `action/ExecuteChessMove.action` (to be created)
-
-Execute a complete chess move (pick, move, place, optional capture).
-
-```
-# Goal
-string move_uci         # Move in UCI format (e.g., "e2e4")
-bool is_capture         # True if capturing a piece
-string captured_piece   # Square of captured piece if is_capture
----
-# Result
-bool success
-string message
----
-# Feedback
-string current_phase    # "approaching", "picking", "moving", "placing"
-float32 percent_complete
-```
+Note the goal fields are `target_x_mm`/`target_y_mm` (not `x_mm`/`y_mm`) — this was a real field-name mismatch bug between `gantry_kinematics_node` and this action definition, fixed in commit history; keep both in sync if you ever change one.
 
 ---
 
@@ -200,12 +97,14 @@ float32 percent_complete
 | Message Type | Package | Usage |
 |--------------|---------|-------|
 | `std_msgs/Header` | std_msgs | Timestamp and frame ID |
-| `std_msgs/Bool` | std_msgs | Boolean states |
-| `std_msgs/String` | std_msgs | Text messages |
-| `geometry_msgs/Point` | geometry_msgs | X/Y/Z coordinates |
-| `geometry_msgs/Pose` | geometry_msgs | Position + orientation |
+| `std_msgs/Bool` | std_msgs | Boolean states (e.g. `/emergency_stop`, limit switches) |
+| `std_msgs/String` | std_msgs | Text messages (e.g. FEN strings, servo state) |
+| `std_msgs/Float32` | std_msgs | Scalar values (e.g. clock times) |
+| `geometry_msgs/Point` | geometry_msgs | X/Y/Z coordinates (board corners) |
 | `sensor_msgs/Image` | sensor_msgs | Camera images |
-| `std_srvs/Trigger` | std_srvs | Simple trigger services |
+| `std_srvs/Trigger` | std_srvs | Simple trigger services (servo engage/release, clock pause/resume, capture reference, etc.) |
+
+Most hardware state (limit switches, clock times, servo state, node health) is published as plain `std_msgs` types on topic names that describe their purpose, rather than as custom message types — see `docs/software/nodes.md` for the full topic/service/action reference per node.
 
 ---
 
@@ -213,31 +112,28 @@ float32 percent_complete
 
 To add new message/service/action definitions:
 
-1. Create the `.msg`, `.srv`, or `.action` file in the appropriate `msg/`, `srv/`, or `action/` directory
+1. Create the `.msg`, `.srv`, or `.action` file under `src/chess_interfaces/msg/`, `srv/`, or `action/`.
 
-2. Update `package.xml`:
-```xml
-<build_depend>rosidl_default_generators</build_depend>
-<exec_depend>rosidl_default_runtime</exec_depend>
-<member_of_group>rosidl_interface_packages</member_of_group>
-```
-
-3. Update `CMakeLists.txt` (or equivalent for ament_python):
+2. Register it in `src/chess_interfaces/CMakeLists.txt`:
 ```cmake
-find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/YourMessage.msg"
-  "srv/YourService.srv"
-  "action/YourAction.action"
+  "msg/BoardState.msg"
+  "srv/RequestMove.srv"
+  "action/MoveGantry.action"
+  "msg/YourNewMessage.msg"
 )
 ```
 
+3. Make sure the consuming package's `package.xml` has `<depend>chess_interfaces</depend>` (all four consumer packages already do).
+
 4. Build and source:
 ```bash
-colcon build --packages-select <package>
+colcon build --packages-select chess_interfaces
 source install/setup.bash
 ```
 
+5. Import in Python as `from chess_interfaces.msg import YourNewMessage` (or `.srv` / `.action`).
+
 ---
 
-*See [configuration.md](configuration.md) for parameter references.*
+*See [configuration.md](configuration.md) for parameter references, and [nodes.md](nodes.md) for the full per-node topic/service/action listing.*

@@ -5,7 +5,7 @@
   <version>0.0.1</version>
   <description>Computer vision for Smart Chess Board</description>
   <maintainer email="ian@example.com">Ian</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>

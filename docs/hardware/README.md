@@ -39,7 +39,7 @@
 | A4988 Driver B | ⬜ | ⬜ | ⬜ | |
 | SG90 Z Servo | ⬜ | ⬜ | ⬜ | |
 | SG90 Clock Servo | ⬜ | ⬜ | ⬜ | |
-| Electromagnet | ⬜ | ⬜ | ⬜ | |
+| Permanent Magnet | ⬜ | ⬜ | ⬜ | Passive — no wiring beyond the Z-axis servo |
 | Limit Switch X | ⬜ | ⬜ | ⬜ | |
 | Limit Switch Y | ⬜ | ⬜ | ⬜ | |
 | Limit Switch Clock | ⬜ | ⬜ | ⬜ | |

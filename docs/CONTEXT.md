@@ -7,7 +7,7 @@
 Build an automated chess board that can:
 1. Detect when a human player makes a move (via camera)
 2. Calculate the optimal response (via chess engine)
-3. Physically move the piece (via CoreXY gantry with electromagnet)
+3. Physically move the piece (via CoreXY gantry with a servo-lowered permanent magnet)
 4. Capture pieces and move them to a graveyard area
 5. Manage game timing with physical chess clocks
 
@@ -227,9 +227,9 @@ Chess OS connects to ROS automatically if `rclpy` is importable and the ROS node
 | **Chess OS (main UI)** | `code/chess_os.py` |
 | Board calibration data | `board_calibration.json` (project root, created by Chess OS) |
 | GPIO pin config | `src/chess_hw_interface/config/pins.yaml` |
-| CV parameters | `src/chess_perception/config/cv_params.yaml` |
+| CV parameters | Declared as ROS parameters directly in `piece_detector_node.py` (no separate yaml file exists); tunable live via `/api/detector_params` in Chess OS |
 | Board coordinates | `src/gantry_control/config/board_map.yaml` |
-| Camera calibration | `src/chess_perception/config/calibration.npz` |
+| Camera calibration | Not yet generated — see "Step 2: Intrinsic Calibration" in `docs/features/vision-system.md`; output would land at `src/chess_perception/config/calibration.npz` once run |
 | Launch all | `src/launch/full_system_launch.py` |
 | Test scripts | `code/*.py` |
 | CAD exports | `cad/exports/` |

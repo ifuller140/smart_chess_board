@@ -11,8 +11,9 @@ An automated chess board that plays physical chess against a human opponent. Use
 
 1. **Read this file first** (you're doing it!)
 2. **Read** [docs/CONTEXT.md](docs/CONTEXT.md) for full project context
-3. **Check** [docs/hardware/pinout.md](docs/hardware/pinout.md) before any GPIO work
-4. **Review** [docs/software/architecture.md](docs/software/architecture.md) for system design
+3. **Read** [.agent/PROJECT_STATUS.md](.agent/PROJECT_STATUS.md) for the current living status list — what's done, what needs physical verification, and what's architecturally broken
+4. **Check** [docs/hardware/pinout.md](docs/hardware/pinout.md) before any GPIO work
+5. **Review** [docs/software/architecture.md](docs/software/architecture.md) for system design
 
 ## Repository Structure
 
@@ -35,8 +36,9 @@ smart_chess_board/
 │   ├── chess_perception/       # Computer vision nodes
 │   ├── chess_logic/            # Game rules & Stockfish engine
 │   ├── gantry_control/         # Motion control & kinematics
-│   └── gantry_control_interfaces/ # ROS 2 action/srv definitions (CMake)
-├── code/                        # Standalone scripts (calibration, testing, streaming)
+│   ├── chess_interfaces/       # ROS 2 msg/srv/action definitions (CMake)
+│   └── launch/                 # full_system_launch.py (brings up all 4 layers)
+├── code/                        # Standalone scripts + code/chess_os.py (main UI — architecture rework in progress, see .agent/PROJECT_STATUS.md)
 ├── setup/                       # System configuration files (sudoers, etc.)
 ├── cad/                         # CAD files & exports
 └── simulation/                  # Simulation environment
@@ -69,7 +71,7 @@ smart_chess_board/
 | `chess_perception` | Computer vision | `camera_node`, `board_detector_node`, `piece_detector_node` |
 | `chess_logic` | Game management | `game_manager_node`, `chess_engine_node` |
 | `gantry_control` | Motion control | `gantry_kinematics_node`, `motion_planner_node`, `homing_node` |
-| `gantry_control_interfaces` | ROS 2 interfaces | `MoveGantry.action`, `RequestMove.srv` |
+| `chess_interfaces` | ROS 2 interfaces | `MoveGantry.action`, `RequestMove.srv`, `BoardState.msg` |
 
 ## Critical Constraints
 
@@ -123,9 +125,12 @@ See `.agent/workflows/hardware-test.md` for the full test suite reference.
 
 ## Known Issues
 
-1. **Motor pins are placeholders** — `pins.yaml` needs actual BCM numbers verified against physical wiring
-2. **Camera position** — Exact mounting coordinates need hardware measurement
-3. **Homing sequence untested** — Limit switch positions TBD
+All node/logic implementation is complete (see `.agent/PROJECT_STATUS.md` for the full status list). What remains is physical calibration and verification, not missing code:
+
+1. **Gantry calibration** — `x_max_mm`, `board_origin_x/y_mm` in `homing_node`/`motion_planner_node` are placeholder defaults, need measurement on the physical rig
+2. **Camera calibration** — Intrinsic calibration (`calibration.npz`) has never been generated; capture/calibration scripts exist but haven't been run
+3. **Corner-routing BFS** — Implemented in `motion_planner_node`, untested with real pieces obstructing a path
+4. **Chess OS architecture** — Functionally complete but architecturally needs rework (duplicates vision/coordinate/calibration logic that already exists in the ROS packages); this is the current top-priority initiative, see `.agent/PROJECT_STATUS.md`
 
 ## Documentation Index
 
@@ -173,8 +178,9 @@ See `.agent/workflows/hardware-test.md` for the full test suite reference.
 - `deploy.md` — Full deploy with hardware/perception/full-system sub-sections
 - `hardware-test.md` — Hardware component testing
 - `code-review.md` — Code review checklist
-- `PROJECT_STATUS.md` — To-do tracker and strategic initiatives
+
+`.agent/PROJECT_STATUS.md` (not in `workflows/`) — the living master status list and strategic initiatives tracker; read this for "what's done vs. what's not" before starting any non-trivial task.
 
 ---
 
-*Last updated: 2026-05-03*
+*Last updated: 2026-07-08*

@@ -4,7 +4,7 @@
 
 ## CoreXY Gantry Overview
 
-The gantry uses a CoreXY belt configuration for X/Y motion, with a servo-actuated Z-axis for the electromagnet.
+The gantry uses a CoreXY belt configuration for X/Y motion, with a servo-actuated Z-axis for the permanent magnet.
 
 ```
                         ┌─────── Motor A
@@ -14,7 +14,7 @@ The gantry uses a CoreXY belt configuration for X/Y motion, with a servo-actuate
     │ ║   Y-axis carriage                 ║ │
     │ ║   ┌─────────────────────────────┐ ║ │
     │ ║   │                             │ ║ │
-    │ ║   │      ELECTROMAGNET          │ ║ │
+    │ ║   │      PERMANENT MAGNET       │ ║ │
     │ ║   │         HEAD                │ ║ │
     │ ║   │           ●                 │ ║ │
     │ ║   │                             │ ║ │
@@ -84,7 +84,7 @@ dY = (dA - dB) / 2
 
 ---
 
-## Z-Axis (Electromagnet Lift)
+## Z-Axis (Permanent Magnet Lift)
 
 ### Servo Mount Design
 ```
@@ -105,7 +105,7 @@ dY = (dA - dB) / 2
     │    ┌─────┴─────┐    │
     │    │ MAGNET    │    │
     │    │ HOLDER    │    │
-    │    │    ◉      │    │  ← Electromagnet
+    │    │    ◉      │    │  ← Permanent magnet
     │    └───────────┘    │
     └─────────────────────┘
 
@@ -156,15 +156,20 @@ cad/
 ```
 
 ### Key Files
-<!-- USER_ATTENTION: List your actual CAD files here -->
 
-| File | Description | Format |
-|------|-------------|--------|
-| `frame_assembly.step` | Complete frame assembly | STEP |
-| `carriage.stl` | X/Y carriage plate | STL |
-| `servo_mount.stl` | Servo mounting bracket | STL |
-| `magnet_holder.stl` | Electromagnet holder | STL |
-| `limit_switch_mount.stl` | Limit switch brackets | STL |
+Actual files under `cad/exports/STLs/` (non-exhaustive — see the directory for the full list, including printable chess pieces: `bishop.STL`, `horse.STL`, `king.STL`, `pawn.STL`, `queen.STL`, `rook.STL`):
+
+| File | Description |
+|------|-------------|
+| `Servo magnet holder.STL` | Z-axis servo + permanent-magnet mount |
+| `Camera holder.STL` | Camera mount bracket |
+| `Rail rider.STL` | Linear rail carriage |
+| `Corner SW 1.STL`, `Corner SW 2 motor.STL`, `Corner SW 2 motor controller.STL` | Frame corner brackets (motor-mounting variants) |
+| `Electronics peg board.STL` / `v2` | Pi/driver mounting board |
+| `clock face holder.STL`, `clock bottom V2.STL`, `Clock toy.STL` | Chess clock housing parts |
+| `Feet.stl` / `feet V3.STL` | Frame feet |
+
+Engineering drawings (`cad/exports/Engineering drawings/`, also as PDF in `cad/exports/pdfs/`): `Top`, `Bottom V1`, `Side 18in`, `Side 19in`. A DXF cut file is at `cad/exports/DXF/chess1.DXF`.
 
 ---
 
@@ -193,7 +198,7 @@ cad/
 5. **Z-Axis Assembly**
    - [ ] Mount servo to carriage
    - [ ] Attach linkage mechanism
-   - [ ] Install electromagnet holder
+   - [ ] Install magnet holder (`Servo magnet holder.STL`)
    - [ ] Test servo motion
 
 6. **Limit Switch Installation**

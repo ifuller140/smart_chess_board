@@ -7,14 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Chess engine difficulty setting (Stockfish skill level) exposed from `chess_engine_node.py` and Chess OS
+- Pawn promotion handler in `game_manager_node.py` / Chess OS (promotion banner + piece-choice UI)
+- Chess OS: gantry calibration tests wired into the Tests tab
+- `docs/software/nodes.md` and `.agent/PROJECT_INTEGRATION_PLAN.md` — full Chess OS integration reference and 5-phase implementation plan (game control backend, Chess OS API, Game Tab UI, Perception tab, polish)
+- Bench-test scripts for the Z-axis magnet servo (`code/test_z_servo.py`) — standalone pigpio sanity check ahead of physical calibration
 - `test_clock_display.py` — TM1637 dual-display integration test via ROS topics (clock/display subtest)
 - Corner-based obstacle routing (`_route_via_corner`) in `motion_planner_node.py` — BFS on 9×9 corner grid avoids bumping adjacent pieces when carrying the magnet
 - `HomingNode`: `x_max_mm`, `steps_per_mm`, and all homing speeds now exposed as ROS parameters
 - Chess OS: Reset Position button + `/api/stepper/reset_position` endpoint
 - Chess OS: Live limit switch status with updated labels (X Home/Right, Y Home/Front)
+- `docs/features/vision-system.md` — comprehensive vision doc covering ROS perception stack, FEN visualizer (port 5000), MJPEG stream server (port 8080), calibration, and standalone scripts
+- `setup/` directory for system configuration files (sudoers rule)
+- `code/camera_stream_server.py` — MJPEG stream server consolidated into `code/`
 
 ### Changed
-- **COORDINATE SYSTEM CHANGE**: Origin (0,0) is now **bottom-left** (from player's perspective).  
+- **COORDINATE SYSTEM CHANGE**: Origin (0,0) is now **bottom-left** (from player's perspective).
   Previously origin was at bottom-right (where limit switches are). New system:
   - **+X = rightward** toward h-file / X limit switch (right side)
   - **+Y = backward** toward rank 8 / camera tower (away from player)
@@ -23,23 +31,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Y LIMIT SWITCH POSITION**: Y limit at Y=0 (front, player's side) — unchanged, homing drives −Y.
 - `homing_node.py`: X homing direction reversed (+X approach, −X backoff), Prusa precision approach uses `batch_size_prec=4` (≤1mm overshoot), drives gantry to (0,0) after both limits found, then resets stepper driver counter via `/stepper/reset_position`
 - `motion_planner_node.py`: `_square_to_mm()` formula corrected to `x = origin_x + col * sq_size` (was `origin_x − col * sq_size`); default `board_origin_x_mm` updated from 200.0 → 20.0; `board_edge_safe_x_mm` updated from 5.0 → 230.0 (right of h-file)
+- Interface definitions consolidated into a single `chess_interfaces` package (`BoardState.msg`, `RequestMove.srv`, `MoveGantry.action`) — the "unified interfaces package" goal from `.agent/PROJECT_STATUS.md` is satisfied under this name, not the originally proposed `smart_chess_interfaces`
 - All documentation updated to reflect new coordinate system and limit switch locations
-
-
-- `docs/features/vision-system.md` — comprehensive vision doc covering ROS perception stack, FEN visualizer (port 5000), MJPEG stream server (port 8080), calibration, and standalone scripts
-- `setup/` directory for system configuration files (sudoers rule)
-- `code/camera_stream_server.py` — MJPEG stream server consolidated into `code/`
-
-### Changed
-- `CLAUDE.md` — updated repo structure, corrected magnet description (permanent, not electromagnet), updated docs index
-- `README.md` — fixed AGENTS.md reference (file is CLAUDE.md), updated Quick Start with correct paths and commands
-- `deploy.md` — rewritten with clear Hardware / Perception / Full System sub-deployment sections; includes web port references
-- `docs/CONTEXT.md` — updated file locations reference
-- `docs/features/README.md` — updated to reference vision-system.md
+- `CLAUDE.md` — updated repo structure, corrected magnet description (permanent, not electromagnet), updated docs index, fixed `chess_interfaces` package name (previously incorrectly listed as `gantry_control_interfaces`)
+- `README.md` — fixed AGENTS.md reference (file is CLAUDE.md), updated Quick Start with correct paths and commands, fixed `chess_interfaces` package name
+- `deploy.md` — rewritten with clear Hardware / Perception / Full System sub-deployment sections; includes web port references; fixed package build order naming
+- `docs/CONTEXT.md` — updated file locations reference; removed references to `cv_params.yaml`/`calibration.npz` (neither file exists — CV params are ROS parameters, not a yaml file)
+- `docs/features/README.md` — updated to reference vision-system.md; status badges corrected to reflect actual implementation state
+- `docs/software/interfaces.md` — rewritten to describe the actual `chess_interfaces` package instead of stale pre-consolidation per-package ownership
+- `docs/features/magnet-system.md` and all hardware docs (`wiring.md`, `power.md`, `mechanical.md`, `hardware/README.md`, `software/nodes.md`) — corrected from a described electromagnet design (GPIO + transistor circuit) to the actual permanent-magnet, servo-only design
 - `PROJECT_STATUS.md` moved from root to `.agent/PROJECT_STATUS.md`
 - `smart-chess-hw-tests.sudoers` moved from root to `setup/`
 
 ### Removed
+- `src/chess_perception_upload/` — dead, colcon-ignored duplicate of `chess_perception` with a colliding package name
+- Orphaned duplicate interface files not used by any build: `gantry_control/action/MoveGantry.action`, `chess_logic/srv/RequestMove.srv`
+- Hardcoded sudo password fallback (`fuller`) in `run_hw_test.sh` and `code/fix_video_permissions.sh` — now requires `CHESS_SUDO_PASS` env var or passwordless sudo
 - `docs/software/ros2_architecture_legacy.md` — superseded by current architecture docs
 - `docs/vision_system_guide.md` — content merged into `docs/features/vision-system.md`
 - `docs/features/vision-calibration.md` — content merged into `docs/features/vision-system.md`
@@ -47,6 +54,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `scripts/` directory (single file relocated to `code/`)
 
 ### Fixed
+- License declarations (`TODO: License declaration` → `MIT`, matching the root `LICENSE` file) across all `package.xml`/`setup.py` files
+- `game_manager_node.py` / `chess_engine_node.py` — the "In a real app, we'd..." mock comments flagged in earlier audits are gone; both are now real implementations (state machine + Stockfish integration)
 - Comprehensive agent-first documentation framework
 - `AGENTS.md` as primary agent entry point
 - `docs/` directory with hardware, software, and feature documentation
@@ -62,11 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Outdated limit switch defaults in software docs
 
 ### Planned
-<!-- USER_ATTENTION: Add your planned features here -->
-- Motor calibration and testing
-- Camera-based board detection
-- Piece identification system
-- Full game loop implementation
+- Physical calibration verification (`x_max_mm`, `board_origin_x/y_mm`) on real hardware
+- Corner-routing BFS fallback verification with real pieces on the board
+- Chess OS / `code/` architecture consolidation — see the initiative in `.agent/PROJECT_STATUS.md`
 
 ---
 

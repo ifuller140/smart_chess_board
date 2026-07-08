@@ -132,26 +132,22 @@ scp pi@raspberrypi:~/test.jpg .
 
 Expected: Clear image of the chess board area.
 
-### 5. Test Electromagnet
+### 5. Test Magnet (Servo-Actuated, Permanent Magnet)
+
+The magnet is permanent, not an electromagnet — there's no GPIO pin to toggle. "Testing the magnet" means testing the Z-axis servo that raises/lowers it, via the real hardware test suite:
 
 ```bash
-# WARNING: Keep magnet away from sensitive electronics
-python3 -c "
-import RPi.GPIO as GPIO
-import time
-MAGNET_PIN = 26  # Update with your pin
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(MAGNET_PIN, GPIO.OUT)
-print('Magnet ON for 2 seconds...')
-GPIO.output(MAGNET_PIN, GPIO.HIGH)
-time.sleep(2)
-GPIO.output(MAGNET_PIN, GPIO.LOW)
-print('Magnet OFF')
-GPIO.cleanup()
-"
+./run_hw_test.sh --category magnet --subtest full
 ```
 
-Expected: Magnet engages (should attract steel).
+Or directly via ROS services (with `servo_node` running):
+
+```bash
+ros2 service call /servo/engage std_srvs/srv/Trigger {}   # lower — should attract a nearby piece
+ros2 service call /servo/release std_srvs/srv/Trigger {}  # raise — should release it
+```
+
+Expected: Servo moves to the engage position and a piece placed underneath is gripped; release lifts clear.
 
 ---
 

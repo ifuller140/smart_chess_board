@@ -5,7 +5,7 @@
   <version>0.0.1</version>
   <description>Kinematics and motion planning for CoreXY Smart Chess Board</description>
   <maintainer email="ian@example.com">Ian</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>

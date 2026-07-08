@@ -127,9 +127,10 @@ smart_chess_board/
 │   ├── chess_perception/     # Camera + board detection nodes
 │   ├── chess_logic/          # Stockfish + game state machine
 │   ├── gantry_control/       # CoreXY kinematics + motion planning
-│   └── gantry_control_interfaces/  # ROS 2 message/service/action definitions
+│   ├── chess_interfaces/     # ROS 2 message/service/action definitions
+│   └── launch/               # full_system_launch.py
 ├── docs/                  # All documentation
-├── code/                  # Standalone calibration and utility scripts
+├── code/                  # Standalone scripts + chess_os.py (main UI)
 ├── setup/                 # System configuration (sudoers)
 ├── cad/                   # CAD files
 └── .agent/workflows/      # Deployment and testing guides

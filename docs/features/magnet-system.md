@@ -1,10 +1,19 @@
-# Electromagnet Piece Pickup System
+# Permanent Magnet Piece Pickup System
 
 > **Z-axis mechanism and magnet control for piece manipulation.**
 
 ## Overview
 
-The piece pickup system uses a servo-actuated arm to lower an electromagnet onto chess pieces. The magnet grips the piece (which has a steel disc or magnet embedded), and the servo raises it for transport.
+The piece pickup system uses a servo-actuated arm to lower a **permanent magnet** onto chess pieces (each piece has a steel disc or magnet embedded in its base). Unlike an electromagnet, the magnet itself has no power connection — pickup and release are controlled entirely by the servo's position: lowering the magnet close enough to the piece lets it grip magnetically, and raising it back up breaks the grip. There is no GPIO pin dedicated to magnet power.
+
+This is implemented today by `src/chess_hw_interface/chess_hw_interface/nodes/servo_node.py`, which exposes two services:
+
+| Service | Type | Effect |
+|---------|------|--------|
+| `/servo/engage` | `std_srvs/Trigger` | Lowers the servo to `engage_pulse_us` (down position) — magnet is close enough to grip a piece |
+| `/servo/release` | `std_srvs/Trigger` | Raises the servo to `release_pulse_us` (up position) — magnet lifts away, releasing the piece |
+
+The node also publishes its current state (`"engaged"` / `"released"`) on `/servo/state`, and subscribes to `/emergency_stop` to immediately stop sending pulses if triggered.
 
 ## Mechanical Design
 
@@ -33,14 +42,14 @@ The piece pickup system uses a servo-actuated arm to lower an electromagnet onto
      │         │             │             │
      │         │   ┌─────┐   │             │
      │         │   │     │   │             │
-     │         │   │  ◉  │   │◄──────────── Electromagnet
+     │         │   │  ◉  │   │◄──────────── Permanent magnet
      │         │   │     │   │             │
      │         │   └─────┘   │             │
      │         └─────────────┘             │
      └─────────────────────────────────────┘
 
      RAISED POSITION              LOWERED POSITION
-     (Servo at 0°)                (Servo at 90°)
+     (Released — up)              (Engaged — down)
      
          ╭─●                           ╭─●
          │                              ╲
@@ -54,109 +63,18 @@ The piece pickup system uses a servo-actuated arm to lower an electromagnet onto
 
 ## Servo Control
 
-### PWM Configuration
+### PWM Configuration (`src/chess_hw_interface/config/pins.yaml` → `servo_node`)
 
-| Position | Servo Angle | Duty Cycle | Pulse Width |
-|----------|-------------|------------|-------------|
-| UP (released) | 0° | 2.5% | 500µs |
-| DOWN (engaged) | 90° | 7.5% | 1500µs |
+| Position | Parameter | Default | Meaning |
+|----------|-----------|---------|---------|
+| DOWN (engaged) | `engage_pulse_us` | 500µs | Magnet close enough to the piece to grip |
+| UP (released) | `release_pulse_us` | 1500µs | Magnet lifted clear, piece released |
+| — | `servo_pin` | GPIO 12 (BCM) | Hardware PWM pin |
+| — | `movement_time` | 0.5s | Time allowed for the servo to reach position before pulses stop |
 
-<!-- USER_ATTENTION: Calibrate these values for your linkage geometry -->
+<!-- USER_ATTENTION: Calibrate engage_pulse_us / release_pulse_us for your linkage geometry -->
 
-### Control Implementation
-
-```python
-import RPi.GPIO as GPIO
-
-class ServoController:
-    def __init__(self, pin=12, freq=50):
-        self.pin = pin
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(pin, GPIO.OUT)
-        self.pwm = GPIO.PWM(pin, freq)
-        self.pwm.start(0)
-        
-        # Calibrated positions
-        self.UP_DUTY = 2.5
-        self.DOWN_DUTY = 7.5
-        self.MOVE_TIME = 0.5  # seconds
-    
-    def raise_magnet(self):
-        """Raise the magnet (release piece)"""
-        self.pwm.ChangeDutyCycle(self.UP_DUTY)
-        time.sleep(self.MOVE_TIME)
-        self.pwm.ChangeDutyCycle(0)  # Stop PWM signal
-    
-    def lower_magnet(self):
-        """Lower the magnet (engage piece)"""
-        self.pwm.ChangeDutyCycle(self.DOWN_DUTY)
-        time.sleep(self.MOVE_TIME)
-        self.pwm.ChangeDutyCycle(0)
-    
-    def cleanup(self):
-        self.pwm.stop()
-        GPIO.cleanup(self.pin)
-```
-
----
-
-## Electromagnet Control
-
-### Specifications
-
-| Parameter | Value |
-|-----------|-------|
-| Voltage | 5V DC |
-| Current | ~400mA |
-| Holding Force | 2.5 kg |
-| Control | Via transistor/MOSFET |
-
-### Circuit
-
-```
-                                    ┌──────────────┐
-                                    │ ELECTROMAGNET│
-    5V PSU (+) ────────────────────┤ (+)          │
-                                    │              │
-                                    │ (-)          │
-                                    └───────┬──────┘
-                                            │
-                                1N4007      │
-                             ┌───┤◄├───┐    │
-                             │         │    │
-                             └────┬────┘    │
-                                  │         │
-    GPIO Pin ──────[1kΩ]──────────┤ B       │
-                                  │   NPN   │
-                              C ──┴─────────┘
-                              │
-                              E
-                              │
-    GND ──────────────────────┴─────────────────
-```
-
-### Control Implementation
-
-```python
-class ElectromagnetController:
-    def __init__(self, pin):
-        self.pin = pin
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.LOW)
-    
-    def engage(self):
-        """Turn on magnet to grip piece"""
-        GPIO.output(self.pin, GPIO.HIGH)
-    
-    def release(self):
-        """Turn off magnet to release piece"""
-        GPIO.output(self.pin, GPIO.LOW)
-    
-    def cleanup(self):
-        GPIO.output(self.pin, GPIO.LOW)
-        GPIO.cleanup(self.pin)
-```
+`servo_node.py` uses `pigpio`'s `set_servo_pulsewidth()` for jitter-free hardware-timed PWM (not software PWM / `RPi.GPIO`), and stops sending pulses immediately after each move to avoid servo jitter/heat.
 
 ---
 
@@ -166,25 +84,21 @@ class ElectromagnetController:
 
 ```
 1. Move gantry to source square (X,Y)
-2. Lower servo (Z down)
-3. Enable electromagnet
-4. Wait for magnet to grip (50-100ms)
-5. Raise servo (Z up)
-6. Move gantry to destination (X,Y)
-7. Lower servo (Z down)
-8. Disable electromagnet
-9. Wait for piece to release (50ms)
-10. Raise servo (Z up)
+2. Call /servo/engage  — lower magnet, grip piece
+3. Wait for movement_time (servo settles)
+4. Move gantry to destination (X,Y)
+5. Call /servo/release — raise magnet, release piece
+6. Wait for movement_time (servo settles)
 ```
+
+There is no separate "enable magnet" step — steps 2 and 5 are the entire pickup/release mechanism, driven purely by servo angle.
 
 ### Timing Parameters
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Servo movement time | 500ms | Full swing up/down |
-| Magnet engage delay | 100ms | Ensure magnetic grip |
-| Magnet release delay | 50ms | Ensure piece released |
-| Approach speed | 5 mm/s | Slow final approach |
+| Servo movement time | 500ms (`movement_time`) | Full swing up/down |
+| Approach speed | 5 mm/s | Slow final approach so pieces aren't knocked over |
 
 ---
 
@@ -192,27 +106,13 @@ class ElectromagnetController:
 
 ### Z-Axis Travel
 
-<!-- USER_ATTENTION: Measure and update these values -->
+<!-- USER_ATTENTION: Measure and update these values on the physical rig -->
 
-| Position | Height from board | Servo angle |
-|----------|-------------------|-------------|
-| Safe travel | 20mm | 0° |
-| Piece contact | 2mm | ~80° |
-| Magnet engaged | 0mm | 90° |
+The two positions that matter are just `engage_pulse_us` (down/grip) and `release_pulse_us` (up/clear) in `pins.yaml`. There is no separate "safe travel height" parameter today — the gantry only moves in X/Y at the release height.
 
 ### Square-Specific Adjustments
 
-Some squares may need height adjustment:
-- Board may not be perfectly flat
-- Different piece heights (King vs Pawn)
-
-```yaml
-# Height offsets per square (mm) - optional
-square_z_offsets:
-  a1: 0.0
-  e4: 0.5  # Slightly higher if needed
-  # ...
-```
+Not currently implemented. If the board surface isn't perfectly flat or piece heights vary enough to matter, a future per-square Z offset could be added to `pins.yaml` or `board_map.yaml`, but no such mechanism exists in the code today.
 
 ---
 
@@ -220,15 +120,15 @@ square_z_offsets:
 
 ### Magnetic Compatibility
 
-Pieces must have magnetic response:
+Pieces must have magnetic response for the permanent magnet to grip them:
 
 | Method | Pros | Cons |
 |--------|------|------|
-| Steel disc in base | Cheap, works with electromagnet | May be too light |
-| Magnet in base | Strong grip | Polarity matters |
-| Steel-weighted base | Heavy = stable | Higher magnet force needed |
+| Steel disc in base | Cheap, works well with a permanent magnet | May be too light on its own |
+| Magnet in base | Strong grip | Polarity/orientation matters |
+| Steel-weighted base | Heavy = stable | Needs a stronger magnet to lift |
 
-<!-- USER_ATTENTION: Specify your piece type and magnet compatibility -->
+<!-- USER_ATTENTION: Specify your actual piece type and magnet compatibility -->
 
 ### Piece Dimensions
 
@@ -251,38 +151,31 @@ Pieces must have magnetic response:
 
 | Situation | Detection | Recovery |
 |-----------|-----------|----------|
-| Piece not gripped | Position sensor (if available) | Retry pickup |
-| Piece dropped | Unexpected mass change | Re-home, alert user |
-| Collision | Limit switch trigger | Emergency stop |
-| Wrong piece | Post-move vision check | Undo and retry |
+| Piece not gripped | No position sensor today — would need post-move vision check | Retry pickup |
+| Piece dropped | No mass/position sensing today | Re-home, alert user |
+| Collision | Limit switch trigger | Emergency stop (`/emergency_stop`) |
+| Wrong piece moved | Post-move vision check (`chess_perception`) | Undo and retry |
 
 ### Recovery Sequence
 
 ```
-1. Raise Z to safe height
-2. Release magnet
-3. Re-home if position uncertain
-4. Alert user if unrecoverable
+1. Call /servo/release (raise to safe/released position)
+2. Re-home if position uncertain
+3. Alert user if unrecoverable
 ```
 
 ---
 
 ## Power Considerations
 
-### Current Draw
+Since the magnet itself draws no current (it's passive/permanent), the only active-current component here is the servo:
 
 | Component | Active Current | Idle Current |
 |-----------|----------------|--------------|
 | Servo (moving) | 500mA peak | 10mA |
 | Servo (holding) | 100mA | 10mA |
-| Electromagnet | 400mA | 0mA |
-| **Total peak** | **900mA** | **10mA** |
 
-### Power Sequencing
-
-Never activate servo and magnet simultaneously at startup:
-1. Raise servo first (no magnet)
-2. Then enable magnet control
+See `docs/hardware/power.md` for the full system power budget.
 
 ---
 
@@ -290,12 +183,12 @@ Never activate servo and magnet simultaneously at startup:
 
 | Symptom | Cause | Solution |
 |---------|-------|----------|
-| Piece not picked up | Z too high | Calibrate servo angle |
+| Piece not picked up | `engage_pulse_us` too high (magnet not low enough) | Lower `engage_pulse_us`, recalibrate |
 | Piece knocked over | Approach too fast | Reduce approach speed |
-| Magnet doesn't hold | Insufficient current | Check power supply |
-| Servo jitters | Power instability | Add capacitor |
-| Piece slides off | Magnet too weak | Use stronger magnet |
+| Magnet doesn't hold piece | Piece too far from magnet, or piece's steel disc/magnet too weak | Adjust `engage_pulse_us` or piece magnetic insert |
+| Servo jitters | Power instability, or pulses left active too long | Check power supply; confirm `set_servo_pulsewidth(pin, 0)` runs after each move |
+| Piece slides off during travel | Approach/travel speed too high | Reduce gantry speed while piece is engaged |
 
 ---
 
-*See [servo specs](../hardware/components.md#sg90-micro-servo) for hardware details.*
+*See [servo specs](../hardware/components.md#sg90-micro-servo) for hardware details, and `src/chess_hw_interface/chess_hw_interface/nodes/servo_node.py` for the current implementation.*

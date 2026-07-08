@@ -152,34 +152,9 @@ The A4988 only requires 2 GPIO pins per motor (STEP and DIR):
 
 ---
 
-## Electromagnet Wiring
+## Magnet
 
-The electromagnet draws ~400mA, which is too much for GPIO. Use a transistor:
-
-```
-                                           ┌──────────────┐
-                                           │ ELECTROMAGNET│
-    5V PSU (+) ────────────────────────────┤ (+)          │
-                                           │              │
-    RASPBERRY PI        2N2222             │ (-)          │
-    ┌──────────┐       ┌─────┐             └───────┬──────┘
-    │          │   C   │     │ E                   │
-    │ GPIO XX ─┼──────┤  B   ├─────────────────────┘
-    │          │   │   │     │
-    │   GND ───┼───┼───┴─────┴─────────────────────── PSU (-)
-    │          │   │
-    └──────────┘   │
-                 1kΩ resistor between GPIO and transistor base
-```
-
-<!-- USER_ATTENTION: Assign a GPIO pin for electromagnet control and update pinout.md -->
-
-### Alternative: MOSFET Control
-If using a logic-level MOSFET (e.g., IRLZ44N):
-- Gate → GPIO (direct, no resistor needed)
-- Source → GND
-- Drain → Electromagnet (-)
-- Add flyback diode (1N4007) across electromagnet terminals
+The piece-pickup magnet is a **permanent magnet**, not an electromagnet — it has no power connection and needs no GPIO pin, transistor, or MOSFET driver. It's mounted directly on the Z-axis servo arm; pickup/release is controlled entirely by servo angle (see `docs/features/magnet-system.md` and `src/chess_hw_interface/chess_hw_interface/nodes/servo_node.py`). The only wiring here is the servo's standard 3-pin (signal/5V/GND) connection, covered under Servo Wiring above.
 
 ---
 
@@ -243,8 +218,9 @@ Repeat for all three limit switches (X-MIN, Y-MIN, CLOCK).
 │         │                  │                                    │
 │         ▼                  ▼                                    │
 │  ┌─────────────┐    ┌─────────────┐                            │
-│  │ A4988 ×2    │    │ Servo +     │                            │
-│  │             │    │ Electromagnet│                            │
+│  │ A4988 ×2    │    │ Servos      │                            │
+│  │             │    │ (magnet is  │                            │
+│  │             │    │  passive)   │                            │
 │  └─────────────┘    └─────────────┘                            │
 │                                                                 │
 │  ════════════════════════════════════════════════════════════  │
@@ -262,8 +238,7 @@ Repeat for all three limit switches (X-MIN, Y-MIN, CLOCK).
 |------------|---------|-------|-------|
 | Pi USB-C power | 3A | 18-20 AWG | Use quality cable |
 | Motor power | 500mA×2 | 22 AWG | Per motor |
-| Servo power | 1A peak | 22 AWG | |
-| Electromagnet | 400mA | 22 AWG | |
+| Servo power | 1A peak | 22 AWG | Magnet is passive — no separate wiring needed |
 | GPIO signals | <20mA | 26-28 AWG | Dupont jumpers OK |
 | Limit switches | <1mA | 26-28 AWG | Dupont jumpers OK |
 

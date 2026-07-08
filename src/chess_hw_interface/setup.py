@@ -20,7 +20,7 @@ setup(
     maintainer='Ian',
     maintainer_email='ian@example.com',
     description='Hardware interface for Smart Chess Board',
-    license='TODO: License declaration',
+    license='MIT',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [

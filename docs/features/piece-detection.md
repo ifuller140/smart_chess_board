@@ -2,6 +2,9 @@
 
 > **Computer vision pipeline for board state detection.**
 
+> [!NOTE]
+> **Superseded by [vision-system.md](vision-system.md).** This document describes an early design (Hough-line board detection, HSV color thresholding) that predates the actual `chess_perception` implementation. `vision-system.md` documents the current ROS perception stack, calibration workflow, and web interfaces. This page is kept for background on FEN encoding and move-detection edge cases (castling, en passant, promotion), which are still accurate, but don't treat the detection-algorithm sections below as current.
+
 ## Overview
 
 The vision system captures images of the chess board and determines the position and type of each piece. The pipeline uses classical computer vision techniques (no machine learning) for simplicity and reliability.
