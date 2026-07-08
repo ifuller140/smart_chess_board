@@ -13,8 +13,8 @@
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Coordinate/config fix (`board_map.yaml` + `x_max_mm` reconciliation) | 🔄 in progress |
-| 2 | `game_manager_node` permanent-death & correctness bugs | ⬜ not started |
+| 1 | Coordinate/config fix (`board_map.yaml` + `x_max_mm` reconciliation) | ✅ done 2026-07-08 |
+| 2 | `game_manager_node` permanent-death & correctness bugs | 🔄 in progress |
 | 3 | Safety: blocking executors defeat e-stop; action double-terminal bug; test-runner interlock | ⬜ not started |
 | 4 | First live-motor session + remaining `gantry_control` findings (castling snapshot, corner-BFS start, graveyard reset, physical calibration) | ⬜ not started |
 | 5 | `chess_perception` fixes | ⬜ not started |
@@ -32,6 +32,9 @@
 **Fix:** rewrite yaml to match the code's own already-correct convention/defaults, rename the edge param, add `homing_node`'s `x_max_mm` to yaml, fix the stray 300 fallback.
 
 **Verification:** `ros2 param get` on the Pi for all three nodes — no live motor movement (deferred to Phase 3/4 for safety).
+
+**Status: ✅ DONE (2026-07-08).** Commit `0c4d8df` pushed to `ros-dev`, pulled and rebuilt on the Pi (`colcon build --symlink-install --packages-select gantry_control`, clean, 5.7s). Live-verified: launched `gantry_kinematics_node` and `motion_planner_node` standalone (no pigpio dependency) with `board_map.yaml`, confirmed via `ros2 param get` — `x_max_mm=250.0`, `y_max_mm=250.0`, `board_origin_x_mm=20.0`, `board_origin_y_mm=20.0`, `board_edge_safe_x_mm=230.0`, `graveyard_origin_x_mm=230.0`, `square_size_mm=25.0`. Hand-checked bounds: e2/e4 (col 4) → x=120mm, h1/h8 (col 7) → x=195mm, both now within `[0, 250]` (h-file was previously rejected at 375mm). Verification processes were killed afterward; the 5 pre-existing production nodes (`camera_node`, `board_detector_node`, `piece_detector_node`, `chess_os`, `test_runner_node`) were untouched throughout.
+`homing_node`'s corrected `x_max_mm` param was **not** live-verified — `pigpiod` isn't running on the Pi and `sudo -n pigpiod` confirmed it needs an interactive password not available this session. Verified via static code/yaml inspection only; revisit when pigpiod is available (Phase 3/4).
 
 ### Phase 2 — `game_manager_node` fixes
 **File:** `src/chess_logic/chess_logic/nodes/game_manager_node.py`

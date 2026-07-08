@@ -3,6 +3,8 @@
 > **The Central Brain**: This document tracks the heartbeat of the project. All agents should consult and update this file.
 >
 > Last full audit: 2026-07-08. Previous version of this file (dated 2026-05-08) had drifted significantly from reality — several "to-do" items below had already been completed in commits between 2026-05-08 and 2026-07-01, and the "In a real app, we'd..." mock-code concern in `game_manager_node.py` no longer applies. Re-verify anything below against the actual code before assuming it's stale again; this file decays fast.
+>
+> **The 2026-07-08 audit found the system not ready for a real game** (2 live-confirmed blockers + ~30 further findings across all 5 packages). Remediation is tracked phase-by-phase in [.agent/IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) — check that file for current phase status before starting any audit-related work.
 
 ## Master Status List
 
@@ -74,13 +76,18 @@ Empty as of 2026-07-08 — the Chess OS / `code/` architecture consolidation (In
 
 **All 5 steps of the Chess OS architecture consolidation are now done and live-verified on the Pi.** `code/` contains only genuine standalone tools with no ROS duplication; Chess OS is a real, installable, launchable ROS package.
 
-### 2. Physical Calibration & Verification
+### 2. Audit Remediation (2026-07-08 audit) — 🔄 IN PROGRESS, see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
 
-**Problem**: Several correctly-implemented features have never been proven against the real hardware.
-- [ ] Measure and set `x_max_mm`, `board_origin_x/y_mm` on physical hardware
-- [ ] Test corner routing on actual board with pieces — verify BFS fallback behavior
-- [ ] Run camera intrinsic calibration once and commit/verify `calibration.npz` workflow
-- [ ] Confirm Chess OS game-control services end-to-end on the Pi
+**Problem**: full logic/system audit found the coordinate config broken (5/8 files unreachable), `game_manager_node`'s game loop permanently dying on homing failure or game end, blocking-executor patterns defeating e-stop across every hardware node, and a long tail of further correctness bugs in `gantry_control`, `chess_perception`, and `chess_ui`.
+
+- [x] **Phase 1** (2026-07-08): Fixed `board_map.yaml` coordinate-system mismatch (yaml documented the old bottom-right-origin convention while the code implements bottom-left-origin), the `board_edge_safe_x_mm` param-name mismatch, and the 3-way `x_max_mm` disagreement (homing_node 240 / config 250 / gantry_kinematics_node.py's own fallback 300) — now all consistently 250mm. Live-verified on the Pi via `ros2 param get` against freshly-built `gantry_control` — `motion_planner_node` and `gantry_kinematics_node` both confirmed loading the corrected values (no live motor movement attempted; deferred to Phase 3/4 for safety per the audit's own judgment). `homing_node`'s param wasn't live-verified this session — `pigpiod` isn't running on the Pi and starting it needs an interactive sudo password that isn't available non-interactively; verified via code/yaml inspection only.
+- [ ] **Phase 2**: `game_manager_node` permanent-death & correctness bugs (homing-failure/game-end thread death, resign race, motion-failure desync, stale-event correlation, promotion timeout, clock-hit failure surfacing)
+- [ ] **Phase 3**: Safety — blocking executors defeat e-stop across all hardware nodes; `gantry_kinematics_node` double-terminal-goal bug; hardware-test cancellation/GPIO interlock
+- [ ] **Phase 4**: First live-motor verification session + remaining `gantry_control` findings (castling stale-snapshot, corner-BFS-can't-start, graveyard reset) + physical measurement of `x_max_mm`/`board_origin_x/y_mm`
+- [ ] **Phase 5**: `chess_perception` fixes
+- [ ] **Phase 6**: `chess_ui` fixes (e-stop clear, live param push, SSE queue, jog timeout)
+- [ ] Run camera intrinsic calibration once and commit/verify `calibration.npz` workflow (folded into Phase 4/7)
+- [ ] Confirm Chess OS game-control services end-to-end on the Pi (folded into Phase 2 verification)
 
 ### 3. Ongoing Documentation Hygiene
 
