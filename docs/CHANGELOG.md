@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- `chess_interfaces/action/RunHardwareTest` and a new `test_runner_node` in `chess_hw_interface`, exposed at `/hw_test/run` — ROS-native hardware test orchestration replacing Chess OS's in-process `_TestRunner` subprocess management. Live-verified on the Pi: full chain from `/api/tests/run` through the ROS action to `run_hw_test.sh` and back, feedback streamed line-by-line (Step 3 of the Chess OS architecture initiative).
 - Chess OS: `api_calib_apply` now pushes calibrated board geometry (`board_origin_x_mm`, `board_origin_y_mm`, `square_size_mm`) to `motion_planner_node` live via ROS `SetParameters` — previously the calibration UI only updated chess_os's own local `board_calibration.json`, never the parameters that actually drive gantry moves during real games. Live-verified on the Pi via a synthetic `/gantry/pose` publish (Step 2 of the Chess OS architecture initiative).
 - Chess engine difficulty setting (Stockfish skill level) exposed from `chess_engine_node.py` and Chess OS
 - Pawn promotion handler in `game_manager_node.py` / Chess OS (promotion banner + piece-choice UI)
