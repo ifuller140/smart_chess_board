@@ -19,12 +19,12 @@
 | 4 | First live-motor session + remaining `gantry_control` findings (castling snapshot, corner-BFS start, graveyard reset, physical calibration) | ⬜ not started (gantry power currently off) |
 | 5 | `chess_perception` fixes | ✅ done 2026-07-09 |
 | 6 | `chess_ui` fixes (e-stop clear, live param push, SSE queue, jog timeout) | ✅ done 2026-07-09 |
-| 7 | Corner-visibility + manual-override UI (see Phase 8e, folded in together) | ⬜ not started |
-| 8a | Vision robustness: lock camera exposure/white-balance | ⬜ not started |
-| 8b | Vision robustness: stability-gated post-move capture | ⬜ not started |
-| 8c | Vision robustness: perspective-aware ROI + multi-modal (color+structure) scoring | ⬜ not started |
-| 8d | Vision robustness: confidence-scored legal-move matching | ⬜ not started |
-| 8e | Vision robustness: remaining developer tuning UI + corner-visibility tie-in | ⬜ not started |
+| 7 | Corner-visibility + manual-override UI (folded into Phase 8e) | ✅ done 2026-07-09 |
+| 8a | Vision robustness: lock camera exposure/white-balance | ✅ done 2026-07-09 |
+| 8b | Vision robustness: stability-gated post-move capture | ✅ done 2026-07-09 |
+| 8c | Vision robustness: perspective-aware ROI + multi-modal (color+structure) scoring | ✅ done 2026-07-09 (mechanism; real-board ROI-bias tuning still needs the user) |
+| 8d | Vision robustness: confidence-scored legal-move matching | ✅ done 2026-07-09 |
+| 8e | Vision robustness: remaining developer tuning UI + corner-visibility tie-in | ✅ done 2026-07-09 (tuning log deferred, see notes) |
 
 ## Phase details
 
@@ -173,6 +173,22 @@ Note: not summing raw scores over the whole board for the "unexplained" penalty 
 - **Correct move despite unrelated noise**: synthetic scores with `e2`/`e4` high (150 each, a real e2e4 move) *plus* an unrelated elevated `d5` (40, simulating hand-shadow/perspective bleed that doesn't belong to any move's footprint). Log: `Top candidate moves: e2e4=268.0, e2e3=-20.8, c2c3=-304.6` → `Inferred move: e2e4`. The correct move won by a wide, clearly-separated margin despite the extra noise.
 - **Declines to guess on pure noise**: synthetic scores with only low-level background noise everywhere (nothing resembling a real move). Log: `Top candidate moves: c2c3=11.4, g1h3=10.5, a2a3=10.5` → `No confident move match (best=c2c3 score=11.4 < min=15.0)` — correctly returned `None` instead of confidently picking an arbitrary legal move.
 - Production stack (`camera_node`/`board_detector_node`/`piece_detector_node`/`chess_os`/`test_runner_node`) confirmed untouched throughout; `chess_ui` restarted afterward to pick up the new `move_candidates` subscription/display (has nothing to show yet since `game_manager_node` isn't running in production this session — Phase 4 prerequisite).
+
+#### Phase 8e — Remaining developer tuning UI + corner-visibility/manual-override tie-in (Phase 7)
+**Status: ✅ DONE (core), live-verified on the Pi 2026-07-09 — turn-by-turn tuning log deferred (see below).** Commit `158c356`.
+
+Two additions, both in `chess_ui`'s Perception tab:
+
+- **Corner-overlay visibility**: `board_detector_node` already publishes an annotated corner-detection debug image (`/perception/board_debug` — TL/TR/BR/BL markers + board outline) that `chess_ui` never displayed anywhere. New `/api/corner_frame` route + live image in a new "Board Corners" card, refreshed on the same 1.5s interval as the existing piece-diff heatmap.
+- **Manual corner-drag override** (the Phase 7 item, folded in here): restores the manual-corner-calibration workflow removed during the 2026-07-08 Chess OS consolidation on the premise that automatic detection made it redundant — a premise broken by the camera-framing bug fixed earlier this session (automatic detection had been silently broken by it the whole time, with no fallback available). `board_detector_node` now subscribes to `/perception/manual_corners_override` (`geometry_msgs/Polygon`, 4 points in TL/TR/BR/BL order, full-resolution pixel coordinates) — when set, `_detect_tick()` uses it directly instead of running automatic detection that tick (constructing a real `BoardGeometry` via `cv2.getPerspectiveTransform`, so downstream consumers see no difference from an automatic detection); an empty `Polygon` clears the override and resumes automatic detection. Deliberately a **correction path, not the primary input** — automatic detection stays the default. `chess_ui` gets a draggable-corner canvas overlaid on a raw camera snapshot (tracks native image pixel coordinates internally, independent of CSS display scaling, so dragging stays accurate regardless of window size) plus Apply/Clear buttons and a live status indicator.
+
+**Live-verified on the Pi** through the real running system (curl, as the UI would):
+- Pushed a manual override via `/api/perception/manual_corners` — `/perception/board_geometry` immediately reflected the exact pushed coordinates (`(50,50)/(590,50)/(590,430)/(50,430)`), confirmed via `ros2 topic echo`.
+- Cleared it via `/api/perception/manual_corners/clear` — `board_geometry` immediately reverted to genuine automatic detection (different, freshly-computed corner values), confirmed automatic detection was really running again, not just frozen on the last manual value.
+- **Found a real, live bug while testing this** (not caused by this phase — pre-existing, now visible for the first time thanks to the new corner-overlay): with automatic detection active, `/api/corner_frame` sometimes shows the detector locking onto a strong *internal* sub-rectangle of the grid (roughly the board's right half) instead of the true outer board boundary, rather than "no board detected" or the full 8×8 outline. Demonstrated the manual override genuinely fixing this live: pushed corners eyeballed from the actual full-board extent visible in that exact frame, and `/api/corner_frame` immediately showed the correct full-board outline instead. This is direct, concrete evidence of why this phase's fallback matters, discovered *by* the visibility feature this phase adds. Not fixed (that's automatic-detection accuracy tuning, arguably parked under Phase 8c/a general "corner detection accuracy" bucket, not scoped in the original Phase 8 plan) — logged as a new finding instead.
+- Cleared the test override afterward (a rough eyeballed estimate, not a proper drag-calibration) so production isn't left on an unofficial hand-picked value — left on genuine automatic detection, matching the phase's own "correction path, not primary input" design intent. A real calibration via the new drag UI is up to the user whenever convenient.
+
+**Deferred, not implemented this session**: the turn-by-turn tuning log (recent N turns' raw per-channel scores + inferred move + confidence, retained in `chess_ui` state for post-hoc review) from the original plan. Lower priority than the corner-visibility/override work above given session time, and less urgent now that `/game_manager/move_candidates` (Phase 8d) already surfaces per-turn reasoning live — a persistent log adds convenience, not new capability. Can be picked up in a future session if still wanted.
 
 ---
 *Created 2026-07-08 from the full audit. Update the status table and add session notes under each phase as work lands.*
