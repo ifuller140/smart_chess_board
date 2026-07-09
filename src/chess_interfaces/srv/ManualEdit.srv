@@ -1,0 +1,14 @@
+# Manually correct the authoritative board state — a backup for when
+# automatic vision-based move detection misreads the physical board. Applied
+# under the game loop thread's control (same event-handoff pattern as
+# /game/resign and /game/new_game), not directly from the service callback.
+# FEN-replacement only (not structured move/capture/castling actions) — this
+# is what a drag-and-drop board editor naturally produces. Castling rights
+# and en-passant target are whatever the submitted FEN says (a full FEN
+# string, not just the piece-placement field) — the caller is responsible
+# for those if they matter; a plain drag-edit UI will typically submit them
+# cleared/default.
+string fen
+---
+bool success
+string message

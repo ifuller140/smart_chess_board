@@ -116,16 +116,28 @@ def register_routes(app):
 
     @app.route("/api/fen", methods=["POST"])
     def api_fen_set():
+        """Forwards to /api/game/manual_edit — kept as a backward-compatible
+        alias. Previously this only wrote chess_ui's own local display dict,
+        never game_manager_node's authoritative board, and was silently
+        clobbered within ~2s by its periodic FEN republish — see
+        api_game_manual_edit() for the real fix."""
+        return api_game_manual_edit()
+
+    @app.route("/api/game/manual_edit", methods=["POST"])
+    def api_game_manual_edit():
+        """Manually correct the authoritative board (Advanced tab) — a
+        backup for when automatic vision-based move detection misreads the
+        physical board. Actually mutates game_manager_node's board via
+        /game/manual_edit, unlike the old /api/fen."""
         data = request.get_json(silent=True) or {}
         fen  = data.get("fen", "").strip()
         if not fen:
-            return jsonify({"ok": False}), 400
-        with state._lock:
-            state._state["game_fen"]     = fen
-            state._state["fen_source"]   = "local"
-            state._state["last_updated"] = time.time()
-            state._state["frame_count"] += 1
-        return jsonify({"ok": True})
+            return jsonify({"ok": False, "msg": "fen is required"}), 400
+        node = ros_client.ros_node
+        if node is None:
+            return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+        ok, msg = node.call_manual_edit(fen)
+        return jsonify({"ok": ok, "msg": msg})
 
     # ── Hardware routes ───────────────────────────────────────────────────
     @app.route("/api/hw/servo/engage", methods=["POST"])

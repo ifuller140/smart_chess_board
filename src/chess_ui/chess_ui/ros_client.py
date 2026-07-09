@@ -31,6 +31,12 @@ try:
 except ImportError:
     HAS_RCL_PARAMS = False
 
+try:
+    from chess_interfaces.srv import ManualEdit
+    HAS_MANUAL_EDIT = True
+except ImportError:
+    HAS_MANUAL_EDIT = False
+
 # Set by app.main() once ROS is (or isn't) initialized; read by routes.py.
 ros_node = None
 
@@ -91,6 +97,8 @@ if HAS_ROS:
             self._svc_game_new      = self.create_client(Trigger, "/game/new_game")
             self._svc_game_resign   = self.create_client(Trigger, "/game/resign")
             self._svc_ack_resume    = self.create_client(Trigger, "/game/ack_resume")
+            self._svc_manual_edit   = (self.create_client(ManualEdit, "/game/manual_edit")
+                                        if HAS_MANUAL_EDIT else None)
             self._svc_cap_reference = self.create_client(Trigger, "/perception/capture_premove")
             # Detector parameter client (optional — requires rcl_interfaces)
             self._svc_detector_params = None
@@ -526,6 +534,25 @@ if HAS_ROS:
                 return False, "Service not available"
             future = client.call_async(Trigger.Request())
             # Poll — the background rclpy.spin thread processes the response
+            deadline = time.monotonic() + timeout
+            while not future.done():
+                if time.monotonic() > deadline:
+                    return False, "Timeout"
+                time.sleep(0.05)
+            r = future.result()
+            return r.success, r.message
+
+        def call_manual_edit(self, fen: str, timeout: float = 2.0):
+            """Like call_svc() but for ManualEdit.srv, which needs a `fen`
+            field on the request (call_svc() only knows how to build an
+            empty Trigger.Request())."""
+            if self._svc_manual_edit is None:
+                return False, "chess_interfaces ManualEdit.srv not available"
+            if not self._svc_manual_edit.wait_for_service(timeout_sec=0.5):
+                return False, "Service not available"
+            req = ManualEdit.Request()
+            req.fen = fen
+            future = self._svc_manual_edit.call_async(req)
             deadline = time.monotonic() + timeout
             while not future.done():
                 if time.monotonic() > deadline:

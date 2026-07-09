@@ -87,7 +87,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 
-from chess_interfaces.srv import RequestMove, SetClockTimes
+from chess_interfaces.srv import ManualEdit, RequestMove, SetClockTimes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -191,6 +191,13 @@ class GameManagerNode(Node):
         self._flag_loser            = ''        # 'WHITE' or 'BLACK'
         self._new_game_event        = threading.Event()
         self._resign_event          = threading.Event()
+        # Manual board correction (see _svc_manual_edit()) — a backup for
+        # when automatic vision-based move detection misreads the physical
+        # board. Validated synchronously in the service callback; the actual
+        # mutation happens in the game-loop thread, same pattern as resign/
+        # new_game, to avoid racing the loop's own reads/writes of _board.
+        self._manual_edit_event     = threading.Event()
+        self._pending_manual_fen    = None
 
         # Set by _load_persisted_state() when a saved game is resumed; blocks
         # the next clock press until the operator confirms (via /game/ack_resume)
@@ -284,6 +291,7 @@ class GameManagerNode(Node):
         self.create_service(Trigger, '/game/new_game',    self._svc_new_game)
         self.create_service(Trigger, '/game/resign',      self._svc_resign)
         self.create_service(Trigger, '/game/ack_resume',  self._svc_ack_resume)
+        self.create_service(ManualEdit, '/game/manual_edit', self._svc_manual_edit)
 
         # Tells chess_ui whether a resumed game is waiting on operator
         # confirmation (see _resumed_pending_ack above).
@@ -440,6 +448,27 @@ class GameManagerNode(Node):
                 if self._state not in (GS.GAME_OVER,):
                     self._abort_pub.publish(Bool(data=True))
                     self._end_game('Resignation')
+                continue
+
+            # Manual board correction (from Chess OS's Advanced tab, via
+            # /game/manual_edit) — validated already in _svc_manual_edit();
+            # applied here so it can't race the loop's own board reads/writes.
+            # Gives MOTION_ERROR/GAME_OVER a real recovery path (correct the
+            # board, keep playing) instead of only a full /game/new_game reset.
+            if self._manual_edit_event.is_set():
+                self._manual_edit_event.clear()
+                fen = self._pending_manual_fen
+                self._pending_manual_fen = None
+                if fen:
+                    self._board = chess.Board(fen)
+                    self._pre_move_fen = fen
+                    self._move_history.append(f'EDIT:{fen.split(" ")[0]}')
+                    self._pub_move_history()
+                    self._publish_board_fen()
+                    self._persist_state()
+                    self.get_logger().warn(f'Manual board edit applied: {fen}')
+                    self._transition(GS.WAITING_PLAYER_MOVE)
+                    self._do_capture_premove()
                 continue
 
             # Check for flag fall at any point
@@ -1129,6 +1158,35 @@ class GameManagerNode(Node):
         self._clock_hit_event.set()  # unblock any wait currently in progress
         response.success = True
         response.message = "Resignation requested"
+        return response
+
+    def _svc_manual_edit(self, request, response):
+        """Manually correct the board (see ManualEdit.srv) — validated here
+        synchronously so the HTTP/service caller gets an immediate accurate
+        result; the actual _board mutation happens in the game-loop thread
+        (see the manual_edit_event handling at the top of _game_loop)."""
+        allowed = (GS.IDLE, GS.WAITING_PLAYER_MOVE, GS.MOTION_ERROR, GS.GAME_OVER)
+        if self._state not in allowed:
+            response.success = False
+            response.message = (f"Cannot manually edit board from state {self._state} "
+                                 f"— only allowed from {', '.join(allowed)}")
+            return response
+        fen = request.fen.strip()
+        try:
+            board = chess.Board(fen)
+        except ValueError as e:
+            response.success = False
+            response.message = f"Invalid FEN: {e}"
+            return response
+        if not board.is_valid():
+            response.success = False
+            response.message = f"Position not legal (chess.Board.status()={board.status()})"
+            return response
+        self._pending_manual_fen = board.fen()
+        self._manual_edit_event.set()
+        self._clock_hit_event.set()  # unblock any wait currently in progress
+        response.success = True
+        response.message = "Manual edit accepted"
         return response
 
     def _svc_ack_resume(self, request, response):

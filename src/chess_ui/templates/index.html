@@ -455,6 +455,7 @@ body.showcase #debug-view{display:none}
     <button class="tab-btn" data-tab="gantry">Gantry</button>
     <button class="tab-btn" data-tab="hardware">Hardware</button>
     <button class="tab-btn" data-tab="tests">Tests</button>
+    <button class="tab-btn" data-tab="advanced">Advanced</button>
   </div>
 
   <!-- Tab panels -->
@@ -1156,6 +1157,29 @@ body.showcase #debug-view{display:none}
       </div>
     </div><!-- /tab-tests -->
 
+    <!-- ── ADVANCED ──────────────────────────────────────────────── -->
+    <div class="tab-panel" id="tab-advanced">
+      <div class="card" style="max-width:520px;margin:0 auto">
+        <div class="checklist-title">Manual Board Correction</div>
+        <div style="font-size:.75em;color:var(--dim);margin-bottom:10px;line-height:1.5">
+          Backup for when the camera misreads the physical board. Drag pieces
+          here to match reality, then Apply — this replaces the game's
+          authoritative position directly (captures, castling rights, and
+          en passant are not inferred from a drag-edit; only use this to
+          correct a clearly wrong reading). Only available when it's safe to
+          do so (not mid-motion/mid-capture).
+        </div>
+        <div id="adv-board" style="width:100%;max-width:400px;margin:0 auto 12px"></div>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+          <button class="btn" onclick="advResetStart()">Reset to start</button>
+          <button class="btn" onclick="advClear()">Clear board</button>
+          <button class="btn" onclick="advSyncFromLive()">Sync from live game</button>
+          <button class="btn primary" onclick="advApply()">Apply correction</button>
+        </div>
+        <div id="adv-status" style="font-size:.75em;color:var(--dim);margin-top:8px;text-align:center"></div>
+      </div>
+    </div><!-- /tab-advanced -->
+
   </div><!-- /tab-area -->
 </div><!-- /debug-view -->
 
@@ -1173,6 +1197,7 @@ var testSSE    = null;
 var catalogue  = {};
 var board      = null;
 var scBoard    = null;
+var advBoard   = null;
 
 // Workspace constants — origin at bottom-left, +X=rightward, +Y=backward
 // a1 = (BO_X, BO_Y), h8 = (BO_X+7*SQ, BO_Y+7*SQ)
@@ -1207,6 +1232,12 @@ document.querySelectorAll('.tab-btn').forEach(function(btn) {
     // native drag-ghost behavior as the only visible response. Re-run setup
     // now that the tab (and therefore the image) has real layout size.
     if (t === 'perception') _cornerCanvasSetup();
+    // Same class of bug Phase 8f/8g hit with the corner-drag canvas:
+    // chessboard.js measures its container's width at init/position time,
+    // and a hidden tab (display:none) reports 0 — advBoard was initialized
+    // on page load while this tab was hidden, so it needs an explicit
+    // resize() once the tab (and therefore its real width) becomes visible.
+    if (t === 'advanced' && advBoard) advBoard.resize();
   });
 });
 
@@ -1224,6 +1255,12 @@ $(function() {
   };
   board   = Chessboard('board',    $.extend({}, cfg, {position:'start'}));
   scBoard = Chessboard('sc-board', $.extend({}, cfg, {position:'start'}));
+  advBoard = Chessboard('adv-board', $.extend({}, cfg, {
+    position: 'start',
+    draggable: true,
+    sparePieces: true,
+    dropOffBoard: 'trash',
+  }));
 });
 
 function updateBoards(fen) {
@@ -1277,6 +1314,41 @@ function ackResume() {
     .then(function(d){
       if (!d.ok) { alert('Acknowledge failed: '+(d.msg||d.message||'unknown')); }
     }).catch(function(){ alert('ROS not connected'); });
+}
+
+// ── Advanced tab: manual board correction ──────────────────────────
+function advResetStart() { if (advBoard) advBoard.position('start', false); }
+function advClear()      { if (advBoard) advBoard.clear(false); }
+function advSyncFromLive() {
+  // Pull in whatever the live game currently shows, so a small correction
+  // doesn't require rebuilding the whole position from scratch.
+  fetch('/api/status').then(function(r){return r.json();}).then(function(d){
+    if (advBoard && d.fen) advBoard.position(d.fen.split(' ')[0], false);
+  }).catch(function(){});
+}
+function advApply() {
+  if (!advBoard) return;
+  var placement = advBoard.fen();
+  // chessboard.js's .fen() only returns the piece-placement field — fill in
+  // the rest of a full FEN with permissive defaults (white to move, no
+  // castling/en-passant rights assumed) per this feature's documented
+  // limitation: a drag-edit doesn't know what castling rights should still
+  // apply, so it conservatively clears them rather than guessing.
+  var fen = placement + ' w - - 0 1';
+  if (!confirm('Apply this position as the game\'s current board? '
+             + 'This replaces the live game state directly.')) return;
+  var statusEl = document.getElementById('adv-status');
+  fetch('/api/game/manual_edit', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({fen: fen}),
+  }).then(function(r){return r.json();}).then(function(d){
+    if (statusEl) {
+      statusEl.textContent = d.ok ? 'Applied ✓' : ('Failed: '+(d.msg||'unknown'));
+      statusEl.style.color = d.ok ? 'var(--ok)' : 'var(--err)';
+    }
+  }).catch(function(){
+    if (statusEl) { statusEl.textContent = 'ROS not connected'; statusEl.style.color = 'var(--err)'; }
+  });
 }
 
 function confirmGameAct(action, msg) {
