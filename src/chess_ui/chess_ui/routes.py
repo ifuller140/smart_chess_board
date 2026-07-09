@@ -87,6 +87,7 @@ def register_routes(app):
                 "move_candidates":            s["move_candidates"],
                 "manual_corners_active":      s["manual_corners_active"],
                 "manual_corners_points":      s["manual_corners_points"],
+                "resume_pending_ack":         s["resume_pending_ack"],
             })
 
     @app.route("/api/snapshot")
@@ -384,6 +385,12 @@ def register_routes(app):
     def api_game_resign():
         """Resign the current game."""
         return _call_svc("_svc_game_resign")
+
+    @app.route("/api/game/ack_resume", methods=["POST"])
+    def api_game_ack_resume():
+        """Confirm the physical board matches a resumed (crash-recovered)
+        saved game — required before the next clock press is accepted."""
+        return _call_svc("_svc_ack_resume")
 
     @app.route("/api/game/settings", methods=["POST"])
     def api_game_settings():

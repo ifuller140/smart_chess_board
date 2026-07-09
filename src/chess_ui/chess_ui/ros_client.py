@@ -64,6 +64,7 @@ if HAS_ROS:
             self.create_subscription(String,  "/perception/reference_status",self._on_ref_status,     10)
             self.create_subscription(String,  "/game_manager/capture_progress", self._on_capture_progress, 10)
             self.create_subscription(String,  "/game_manager/move_candidates", self._on_move_candidates, 10)
+            self.create_subscription(Bool,    "/game_manager/resume_pending_ack", self._on_resume_pending_ack, 10)
 
             # ── Publishers ─────────────────────────────────────────────
             self.vel_pub       = self.create_publisher(Twist,    "/stepper/velocity",       10)
@@ -89,6 +90,7 @@ if HAS_ROS:
             self._svc_game_start    = self.create_client(Trigger, "/game/start")
             self._svc_game_new      = self.create_client(Trigger, "/game/new_game")
             self._svc_game_resign   = self.create_client(Trigger, "/game/resign")
+            self._svc_ack_resume    = self.create_client(Trigger, "/game/ack_resume")
             self._svc_cap_reference = self.create_client(Trigger, "/perception/capture_premove")
             # Detector parameter client (optional — requires rcl_interfaces)
             self._svc_detector_params = None
@@ -253,6 +255,10 @@ if HAS_ROS:
         def _on_state(self, msg):
             with state._lock:
                 state._state["game_state"] = msg.data.strip()
+
+        def _on_resume_pending_ack(self, msg):
+            with state._lock:
+                state._state["resume_pending_ack"] = bool(msg.data)
 
         def _on_turn(self, msg):
             with state._lock:

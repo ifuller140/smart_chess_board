@@ -122,6 +122,10 @@ _state = {
     # drag handles at the last-applied position on page load instead of
     # always resetting to the default inset rectangle.
     "manual_corners_points":       None,
+    # True after game_manager_node resumes a persisted game (crash/restart
+    # recovery) until the operator confirms the physical board matches via
+    # /game/ack_resume — see game_manager_node.py's _load_persisted_state().
+    "resume_pending_ack":          False,
 }
 
 # Diff detection params — pushed to piece_detector_node via SetParameters

@@ -10,6 +10,7 @@ find_package(action_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BoardState.msg"
   "srv/RequestMove.srv"
+  "srv/SetClockTimes.srv"
   "action/MoveGantry.action"
   "action/RunHardwareTest.action"
   DEPENDENCIES std_msgs geometry_msgs action_msgs

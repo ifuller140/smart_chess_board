@@ -47,6 +47,15 @@ Published Topics:
     stability wait, e.g. "Stabilizing: 2/3 consistent reads" — for chess_ui display
   /game_manager/move_candidates  (String) — JSON list of the top-3 scored legal moves
     from the last _do_validate_move() call, e.g. [{"uci":"e2e4","score":142.3}, ...]
+  /game_manager/resume_pending_ack (Bool) — True after resuming a persisted game
+    (see _load_persisted_state()) until /game/ack_resume is called
+
+Game-state persistence:
+  Board/history/clock are snapshotted to game_state_file (param, default
+  ~/.chess/game_state.json) on every accepted move — see _persist_state()/
+  _load_persisted_state(). A crash or Pi restart resumes into
+  WAITING_PLAYER_MOVE (never mid-motion/mid-capture) and blocks the next
+  clock press until /game/ack_resume confirms the physical board matches.
 
 Subscribed Topics:
   /limit_switch/clock_hit      (Bool)   — human pressed chess clock
@@ -65,18 +74,20 @@ Service Clients:
 """
 
 import json
+import os
 import threading
 import time
 from collections import Counter
+from pathlib import Path
 
 import chess
 import rclpy
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 
-from chess_interfaces.srv import RequestMove
+from chess_interfaces.srv import RequestMove, SetClockTimes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -136,6 +147,17 @@ class GameManagerNode(Node):
         # move when nothing actually explains the observed scores (e.g. a
         # spurious clock press with no real move made).
         self.declare_parameter('min_confident_match_score', 15.0)
+        # Where to persist board/history/clock so a crash or Pi restart can
+        # resume instead of losing the whole game (see _persist_state()/
+        # _load_persisted_state()). Deliberately under the home dir, not the
+        # repo tree — this is runtime state, not calibration config.
+        self.declare_parameter('game_state_file', str(Path.home() / '.chess' / 'game_state.json'))
+        # Mirrors chess_clock_node's own time_per_player_s default — used only
+        # to judge whether a clock-time restore on resume is safe (see
+        # _load_persisted_state(): only restored if the live clock still
+        # looks like a fresh start, so a game_manager-only crash can't roll
+        # back a clock that chess_clock_node itself never lost track of).
+        self.declare_parameter('time_per_player_s', 600.0)
 
         self._think_time        = self.get_parameter('engine_think_time_s').value
         self._cap_timeout       = self.get_parameter('board_capture_timeout_s').value
@@ -144,6 +166,8 @@ class GameManagerNode(Node):
         self._home_timeout      = self.get_parameter('homing_timeout_s').value
         self._match_noise_floor = float(self.get_parameter('match_noise_floor').value)
         self._min_match_score   = float(self.get_parameter('min_confident_match_score').value)
+        self._state_file        = Path(self.get_parameter('game_state_file').value)
+        self._configured_time_per_player = float(self.get_parameter('time_per_player_s').value)
 
         # Live-reconfigure: without this, engine_think_time_s pushed via
         # SetParameters (Chess OS's game-settings UI) only updated ROS's
@@ -168,8 +192,22 @@ class GameManagerNode(Node):
         self._new_game_event        = threading.Event()
         self._resign_event          = threading.Event()
 
+        # Set by _load_persisted_state() when a saved game is resumed; blocks
+        # the next clock press until the operator confirms (via /game/ack_resume)
+        # that the physical board actually matches the resumed position —
+        # a resumed FEN is trusted for game logic but was never re-verified
+        # against physical reality after whatever crash/restart happened.
+        self._resumed_pending_ack = False
+
         # Move history (UCI strings, one per half-move)
         self._move_history: list = []
+
+        # Latest known clock times (from chess_clock_node's own topics) —
+        # cached only so _load_persisted_state() can judge whether a
+        # clock-time restore is safe; game_manager_node does not own clock
+        # timing itself.
+        self._latest_white_time = None
+        self._latest_black_time = None
 
         # Latest values from subscriptions
         self._latest_changed_squares: set = set()   # chess.Square indices from perception
@@ -227,19 +265,30 @@ class GameManagerNode(Node):
             String, '/game_manager/clock_event', self._on_clock_event, 10)
         self.create_subscription(
             Bool, '/motion/done', self._on_motion_done, 10)
+        self.create_subscription(
+            Float32, '/clock/white_time', self._on_white_time, 10)
+        self.create_subscription(
+            Float32, '/clock/black_time', self._on_black_time, 10)
 
         # ── Service clients ───────────────────────────────────────────────
         self._home_client      = self.create_client(Trigger, '/gantry/home')
         self._capture_client   = self.create_client(Trigger, '/camera/capture')
         self._premove_client   = self.create_client(Trigger, '/perception/capture_premove')
         self._clock_hit_client = self.create_client(Trigger, '/clock/hit')
+        self._set_clock_times_client = self.create_client(SetClockTimes, '/clock/set_times')
         self._engine_client    = self.create_client(
             RequestMove, '/chess_engine/request_move')
 
         # ── Game control services (called by Chess OS) ────────────────────
-        self.create_service(Trigger, '/game/start',    self._svc_start_game)
-        self.create_service(Trigger, '/game/new_game', self._svc_new_game)
-        self.create_service(Trigger, '/game/resign',   self._svc_resign)
+        self.create_service(Trigger, '/game/start',       self._svc_start_game)
+        self.create_service(Trigger, '/game/new_game',    self._svc_new_game)
+        self.create_service(Trigger, '/game/resign',      self._svc_resign)
+        self.create_service(Trigger, '/game/ack_resume',  self._svc_ack_resume)
+
+        # Tells chess_ui whether a resumed game is waiting on operator
+        # confirmation (see _resumed_pending_ack above).
+        self._resume_ack_pub = self.create_publisher(
+            Bool, '/game_manager/resume_pending_ack', 10)
 
         # Publish initial FEN so piece_detector starts with correct state
         self._publish_board_fen()
@@ -260,10 +309,21 @@ class GameManagerNode(Node):
     def _on_clock_hit(self, msg: Bool):
         """Human pressed the chess clock button."""
         if msg.data:
+            if self._resumed_pending_ack:
+                self.get_logger().warn(
+                    'Clock hit ignored — a resumed game is waiting for operator '
+                    'confirmation (see chess_ui) that the physical board matches.')
+                return
             state = self._state
             if state in (GS.IDLE, GS.WAITING_PLAYER_MOVE, GS.PROMOTION_WAIT):
                 self.get_logger().info(f'Clock hit received (state={state})')
                 self._clock_hit_event.set()
+
+    def _on_white_time(self, msg: Float32):
+        self._latest_white_time = float(msg.data)
+
+    def _on_black_time(self, msg: Float32):
+        self._latest_black_time = float(msg.data)
 
     def _on_changed_squares(self, msg: String):
         """Receive a changed-squares reading from piece_detector_node.
@@ -343,7 +403,13 @@ class GameManagerNode(Node):
         self._verify_starting_position()
         # Capture the starting-position board as the initial pre-move reference
         self._do_capture_premove()
-        self.get_logger().info('Ready. Waiting for human to make first move then press clock...')
+
+        if self._load_persisted_state():
+            self._transition(GS.WAITING_PLAYER_MOVE)
+            self.get_logger().warn(
+                'Resumed saved game — waiting for operator ack, then clock press to continue...')
+        else:
+            self.get_logger().info('Ready. Waiting for human to make first move then press clock...')
 
         # ── Main game loop ────────────────────────────────────────────────
         while rclpy.ok():
@@ -356,6 +422,9 @@ class GameManagerNode(Node):
                 self._board = chess.Board()
                 self._pre_move_fen = chess.STARTING_FEN
                 self._move_history.clear()
+                self._resumed_pending_ack = False
+                self._resume_ack_pub.publish(Bool(data=False))
+                self._clear_persisted_state()
                 self._publish_board_fen()
                 self._pub_move_history()
                 self._transition(GS.IDLE)
@@ -433,6 +502,7 @@ class GameManagerNode(Node):
                 self._move_history.append(human_move.uci())
                 self._pub_move_history()
                 self._publish_board_fen()
+                self._persist_state()
                 self.get_logger().info(
                     f'Human move accepted: {human_move.uci()}  '
                     f'Board: {self._board.fen().split(" ")[0]}')
@@ -501,6 +571,7 @@ class GameManagerNode(Node):
                 self._move_history.append(computer_move.uci())
                 self._pub_move_history()
                 self._publish_board_fen()
+                self._persist_state()
 
                 # If computer promoted (black pawn to rank 1), wait for user
                 if needs_promotion_wait:
@@ -916,6 +987,105 @@ class GameManagerNode(Node):
         self.get_logger().info(f'Final position: {self._board.fen()}')
         self.get_logger().info(
             f'Move history: {" ".join(m.uci() for m in self._board.move_stack)}')
+        # Nothing meaningful left to resume once a game has actually ended.
+        self._clear_persisted_state()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Game-state persistence (crash/restart resume)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _persist_state(self):
+        """Atomically snapshot board/history/clock so a crash or Pi restart
+        can resume instead of losing the whole game. Called from every place
+        that already mutates+republishes the board (human move, computer
+        move accepted) — not a periodic timer, so there's no race with the
+        loop's own writes."""
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                'state':          self._state,
+                'fen':            self._board.fen(),
+                'pre_move_fen':   self._pre_move_fen,
+                'move_history':   self._move_history,
+                'white_time_s':   self._latest_white_time,
+                'black_time_s':   self._latest_black_time,
+                'saved_at':       time.time(),
+            }
+            tmp = self._state_file.with_suffix('.tmp')
+            tmp.write_text(json.dumps(payload, indent=2))
+            os.replace(tmp, self._state_file)
+        except Exception as e:
+            self.get_logger().warn(f'Could not persist game state: {e}')
+
+    def _clear_persisted_state(self):
+        """Remove the persisted snapshot — nothing to resume after a fresh
+        new-game reset or a real game-over."""
+        try:
+            self._state_file.unlink(missing_ok=True)
+        except Exception as e:
+            self.get_logger().warn(f'Could not clear persisted game state: {e}')
+
+    def _load_persisted_state(self) -> bool:
+        """Load a previously-persisted game if resumable. Called once, early
+        in the game loop, before entering the normal wait-for-first-move
+        path. Only ever resumes into WAITING_PLAYER_MOVE (the caller
+        transitions there) — a saved mid-motion/mid-capture state can't be
+        trusted against real hardware after a crash, so those (and IDLE/
+        GAME_OVER, which have nothing worth resuming) are all treated the
+        same as "nothing to resume". Returns True if a game was resumed."""
+        if not self._state_file.exists():
+            return False
+        try:
+            data = json.loads(self._state_file.read_text())
+        except Exception as e:
+            self.get_logger().warn(f'Could not read persisted game state: {e}')
+            return False
+
+        saved_state = data.get('state')
+        fen = data.get('fen')
+        if saved_state in (None, GS.IDLE, GS.GAME_OVER) or not fen:
+            return False
+        try:
+            board = chess.Board(fen)
+        except ValueError as e:
+            self.get_logger().warn(f'Persisted FEN invalid, ignoring resume: {e}')
+            return False
+
+        self._board = board
+        self._pre_move_fen = data.get('pre_move_fen', fen)
+        self._move_history = list(data.get('move_history', []))
+        self._pub_move_history()
+        self._publish_board_fen()
+        self._resumed_pending_ack = True
+        self._resume_ack_pub.publish(Bool(data=True))
+        self.get_logger().warn(
+            f'Resumed a saved game (was {saved_state}) — {len(self._move_history)} '
+            f'half-moves. Verify the physical board matches before pressing the clock '
+            f'(/game/ack_resume in chess_ui).')
+
+        # Conservative clock restore: only if the live clock still looks like
+        # a fresh start (both times within 1s of the configured default) —
+        # a game_manager-only crash shouldn't roll back an already-correct
+        # clock that chess_clock_node itself never lost track of.
+        w, b = self._latest_white_time, self._latest_black_time
+        default = self._configured_time_per_player
+        if (w is not None and b is not None
+                and abs(w - default) < 1.0 and abs(b - default) < 1.0
+                and data.get('white_time_s') is not None
+                and data.get('black_time_s') is not None):
+            if self._set_clock_times_client.wait_for_service(timeout_sec=2.0):
+                req = SetClockTimes.Request()
+                req.white_time_s = float(data['white_time_s'])
+                req.black_time_s = float(data['black_time_s'])
+                self._set_clock_times_client.call_async(req)
+                self.get_logger().info('Restored persisted clock times.')
+            else:
+                self.get_logger().warn('/clock/set_times unavailable — clock not restored.')
+        else:
+            self.get_logger().warn(
+                'Live clock does not look freshly-started — skipping clock-time '
+                'restore to avoid rolling back an already-correct clock.')
+        return True
 
     # ─────────────────────────────────────────────────────────────────────
     # Game Control Services (called by Chess OS)
@@ -923,6 +1093,10 @@ class GameManagerNode(Node):
 
     def _svc_start_game(self, request, response):
         """Trigger a clock-hit event from the UI — starts game or unblocks PROMOTION_WAIT."""
+        if self._resumed_pending_ack:
+            response.success = False
+            response.message = "Resumed game needs operator acknowledgment first (/game/ack_resume)"
+            return response
         if self._state in (GS.IDLE, GS.PROMOTION_WAIT):
             self._clock_hit_event.set()
             response.success = True
@@ -955,6 +1129,17 @@ class GameManagerNode(Node):
         self._clock_hit_event.set()  # unblock any wait currently in progress
         response.success = True
         response.message = "Resignation requested"
+        return response
+
+    def _svc_ack_resume(self, request, response):
+        """Operator confirms the physical board matches a resumed saved game
+        (see _load_persisted_state()) — required before the next clock press
+        is accepted."""
+        self._resumed_pending_ack = False
+        self._resume_ack_pub.publish(Bool(data=False))
+        response.success = True
+        response.message = "Resume acknowledged"
+        self.get_logger().info('Resumed game acknowledged by operator.')
         return response
 
     def _pub_move_history(self):

@@ -463,6 +463,17 @@ body.showcase #debug-view{display:none}
     <!-- ── GAME ─────────────────────────────────────────────────── -->
     <div class="tab-panel active" id="tab-game">
 
+      <!-- Resumed-game acknowledgment banner (crash/restart recovery) -->
+      <div class="promo-banner" id="resume-banner">
+        <div class="promo-title">&#9888; Resumed Saved Game</div>
+        <div style="font-size:.8em;color:#c9d1d9;margin-bottom:10px">
+          A saved game was resumed after a restart. <b>Verify the physical board
+          matches the position shown</b> before continuing — the clock will not
+          respond until you acknowledge.
+        </div>
+        <button class="btn primary" onclick="ackResume()">&#10003; Board verified — continue</button>
+      </div>
+
       <!-- Promotion banner -->
       <div class="promo-banner" id="promo-banner">
         <div class="promo-title">&#9837; Pawn Promotion</div>
@@ -1258,6 +1269,13 @@ function gameAct(action) {
   fetch(url, {method:'POST'}).then(function(r){return r.json();})
     .then(function(d){
       if (!d.ok) { alert('Game action failed: '+(d.msg||d.message||'unknown')); }
+    }).catch(function(){ alert('ROS not connected'); });
+}
+
+function ackResume() {
+  fetch('/api/game/ack_resume', {method:'POST'}).then(function(r){return r.json();})
+    .then(function(d){
+      if (!d.ok) { alert('Acknowledge failed: '+(d.msg||d.message||'unknown')); }
     }).catch(function(){ alert('ROS not connected'); });
 }
 
@@ -2210,6 +2228,12 @@ function pollStatus() {
       });
       var mhEl = document.getElementById('move-hist');
       if (mhEl) { mhEl.innerHTML = mh; mhEl.scrollTop = mhEl.scrollHeight; }
+    }
+
+    // ── Resumed-game banner ────────────────────────────────────────
+    var resumeBanner = document.getElementById('resume-banner');
+    if (resumeBanner) {
+      resumeBanner.className = 'promo-banner' + (d.resume_pending_ack ? ' visible' : '');
     }
 
     // ── Promotion banner ──────────────────────────────────────────

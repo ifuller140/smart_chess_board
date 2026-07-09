@@ -26,9 +26,10 @@ Topics Subscribed:
   /game_manager/turn  (std_msgs/String) — "WHITE" or "BLACK" (whose turn)
 
 Services:
-  /clock/reset  (Trigger) — reset both clocks to full time
-  /clock/pause  (Trigger) — pause the active clock
-  /clock/resume (Trigger) — resume the paused clock
+  /clock/reset      (Trigger)        — reset both clocks to full time
+  /clock/pause      (Trigger)        — pause the active clock
+  /clock/resume     (Trigger)        — resume the paused clock
+  /clock/set_times  (SetClockTimes)  — restore specific remaining times (game_manager_node resume path)
 
 Parameters:
   time_per_player_s (float) — initial time per player in seconds (default 600)
@@ -40,6 +41,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
+
+from chess_interfaces.srv import SetClockTimes
 
 
 class ChessClockNode(Node):
@@ -85,6 +88,7 @@ class ChessClockNode(Node):
         self.create_service(Trigger, '/clock/reset', self._srv_reset)
         self.create_service(Trigger, '/clock/pause', self._srv_pause)
         self.create_service(Trigger, '/clock/resume', self._srv_resume)
+        self.create_service(SetClockTimes, '/clock/set_times', self._srv_set_times)
 
         # ---- 1Hz tick timer ----
         self._timer = self.create_timer(1.0, self._tick)
@@ -178,6 +182,21 @@ class ChessClockNode(Node):
         self._resume()
         response.success = True
         response.message = f'Clock resumed ({self._clock_state})'
+        return response
+
+    def _srv_set_times(self, request, response):
+        """Restore both clocks to specific remaining times (game_manager_node's
+        resume-after-crash path only — see SetClockTimes.srv). Does not touch
+        _init_time (the full-reset value) or _clock_state; the caller is
+        expected to only invoke this while the clock is still STOPPED."""
+        self._white_time = max(0.0, float(request.white_time_s))
+        self._black_time = max(0.0, float(request.black_time_s))
+        self._flag_fired = False
+        self._publish()
+        response.success = True
+        response.message = (f'Clock times restored: white={self._white_time:.0f}s '
+                             f'black={self._black_time:.0f}s')
+        self.get_logger().info(response.message)
         return response
 
     # ------------------------------------------------------------------
