@@ -271,27 +271,36 @@ def register_routes(app):
                 "shift_compensation":   state._params.get("shift_compensation", 1.0),
                 "clump_enable":         int(state._params.get("clump_enable", 0)),
                 "clump_keep_per_group": int(state._params.get("clump_keep_per_group", 1)),
+                "roi_bias":             state._params.get("roi_bias", 0.0),
+                "edge_weight":          state._params.get("edge_weight", 0.0),
             })
 
     @app.route("/api/detector_params", methods=["POST"])
     def api_detector_params():
-        """Push diff threshold + compensation + clump settings to piece_detector_node."""
+        """Push diff threshold + compensation + clump + perspective-ROI/edge
+        settings to piece_detector_node."""
         data = request.get_json(silent=True) or {}
         thresh       = float(data.get("diff_threshold", 18.0))
         comp         = float(data.get("shift_compensation", 1.0))
         clump_enable = bool(data.get("clump_enable", False))
         clump_keep   = int(data.get("clump_keep_per_group", 1))
+        roi_bias     = float(data.get("roi_bias", 0.0))
+        edge_weight  = float(data.get("edge_weight", 0.0))
         with state._lock:
             state._params["display_threshold"]    = thresh
             state._params["shift_compensation"]   = comp
             state._params["clump_enable"]         = int(clump_enable)
             state._params["clump_keep_per_group"] = clump_keep
+            state._params["roi_bias"]             = roi_bias
+            state._params["edge_weight"]          = edge_weight
         node = ros_client.ros_node
         if node is not None and ros_client.HAS_RCL_PARAMS:
-            node.request_detector_params(thresh, comp, clump_enable, clump_keep)
+            node.request_detector_params(thresh, comp, clump_enable, clump_keep,
+                                          roi_bias, edge_weight)
             return jsonify({"ok": True,
                             "msg": f"Applied threshold={thresh}, comp={comp}, "
-                                   f"clump={clump_enable}(keep={clump_keep})"})
+                                   f"clump={clump_enable}(keep={clump_keep}), "
+                                   f"roi_bias={roi_bias}, edge_weight={edge_weight}"})
         elif node is not None:
             return jsonify({"ok": False,
                             "msg": "rcl_interfaces not available — params stored locally only"}), 503

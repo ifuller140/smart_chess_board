@@ -106,6 +106,8 @@ _params = {
     "shift_compensation":   1.0,
     "clump_enable":          0,
     "clump_keep_per_group":  1,
+    "roi_bias":              0.0,
+    "edge_weight":           0.0,
 }
 
 # ── Jog state — background thread publishes velocity to /stepper/velocity ───────

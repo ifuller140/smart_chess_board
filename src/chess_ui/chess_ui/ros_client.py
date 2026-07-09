@@ -330,13 +330,16 @@ if HAS_ROS:
                 state._state["capture_progress"] = msg.data
 
         def request_detector_params(self, threshold, compensation,
-                                    clump_enable=False, clump_keep=1):
+                                    clump_enable=False, clump_keep=1,
+                                    roi_bias=0.0, edge_weight=0.0):
             if HAS_RCL_PARAMS:
                 self._pending_detector_params = {
                     "diff_threshold":            threshold,
                     "global_shift_compensation": compensation,
                     "clump_enable":              clump_enable,
                     "clump_keep_per_group":      clump_keep,
+                    "roi_bias_fraction":         roi_bias,
+                    "edge_diff_weight":          edge_weight,
                 }
 
         def request_game_manager_params(self, think_time_s: float):
@@ -396,6 +399,8 @@ if HAS_ROS:
                     "global_shift_compensation": ParameterType.PARAMETER_DOUBLE,
                     "clump_enable":              ParameterType.PARAMETER_BOOL,
                     "clump_keep_per_group":      ParameterType.PARAMETER_INTEGER,
+                    "roi_bias_fraction":         ParameterType.PARAMETER_DOUBLE,
+                    "edge_diff_weight":          ParameterType.PARAMETER_DOUBLE,
                 },
             ):
                 self._pending_detector_params = None

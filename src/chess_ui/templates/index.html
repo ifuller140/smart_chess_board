@@ -736,12 +736,25 @@ body.showcase #debug-view{display:none}
                     oninput="onDiffSlider('clump_keep_per_group',+this.value);document.getElementById('vb_clump_keep').textContent=this.value">
                   <span class="vb" id="vb_clump_keep">1</span>
                 </div>
+                <div class="slider-row">
+                  <label title="Shifts each square's sampled ROI toward whichever edge of the warped image actually projects a piece's board-contact point (the only part of its silhouette the homography maps correctly — the rest 'leans' due to piece height, worse on far ranks). Sign/direction depends on physical camera geometry -- tune against the real board while watching the yellow ROI boxes on the piece-debug heatmap. 0 = no bias (today's centered crop).">ROI bias (perspective lean)</label>
+                  <input type="range" id="s_roi_bias" min="-0.4" max="0.4" step="0.02" value="0"
+                    oninput="onDiffSlider('roi_bias',+this.value);document.getElementById('vb_roi_bias').textContent=(+this.value).toFixed(2)">
+                  <span class="vb" id="vb_roi_bias">0.00</span>
+                </div>
+                <div class="slider-row">
+                  <label title="Weight for a second evidence channel: Sobel gradient-magnitude (structure/edge) diff, combined with the LAB color diff above. Structure is far less sensitive to lighting/exposure drift than raw color. 0 = color-only (today's behavior).">Edge/structure weight</label>
+                  <input type="range" id="s_edge_weight" min="0" max="2" step="0.05" value="0"
+                    oninput="onDiffSlider('edge_weight',+this.value);document.getElementById('vb_edge_weight').textContent=(+this.value).toFixed(2)">
+                  <span class="vb" id="vb_edge_weight">0.00</span>
+                </div>
                 <div class="btn-row" style="margin-top:8px">
                   <button class="btn primary" onclick="applyToDetector()">&#9881; Apply to Actual Detector</button>
                 </div>
                 <div style="font-size:.62em;color:var(--dim);margin-top:6px;line-height:1.5">
                   Pushes <code>diff_threshold</code>, <code>global_shift_compensation</code>,
-                  and <code>clump_enable</code> to <code>piece_detector_node</code> via ROS set_parameters.
+                  <code>clump_enable</code>, <code>roi_bias_fraction</code>, and
+                  <code>edge_diff_weight</code> to <code>piece_detector_node</code> via ROS set_parameters.
                 </div>
               </div>
             </div>
@@ -1211,7 +1224,7 @@ function sendGameSettings() {
 }
 
 // ── Diff score canvas ─────────────────────────────────────────────
-var _diffParams = {display_threshold:18.0, shift_compensation:1.0, clump_enable:0, clump_keep_per_group:1};
+var _diffParams = {display_threshold:18.0, shift_compensation:1.0, clump_enable:0, clump_keep_per_group:1, roi_bias:0.0, edge_weight:0.0};
 var _squareScores = {};
 
 function onDiffSlider(key, val) {
@@ -1301,7 +1314,9 @@ function applyToDetector() {
       diff_threshold:     _diffParams.display_threshold,
       shift_compensation: _diffParams.shift_compensation,
       clump_enable:       _diffParams.clump_enable,
-      clump_keep_per_group: _diffParams.clump_keep_per_group
+      clump_keep_per_group: _diffParams.clump_keep_per_group,
+      roi_bias:           _diffParams.roi_bias,
+      edge_weight:        _diffParams.edge_weight
     })
   }).then(function(r){return r.json();})
     .then(function(d){ if (!d.ok) alert('Apply failed: '+(d.msg||'')); });

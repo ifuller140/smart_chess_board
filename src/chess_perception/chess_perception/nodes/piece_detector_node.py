@@ -69,6 +69,20 @@ class PieceDetectorNode(Node):
         self.declare_parameter('global_shift_compensation', 1.0)
         self.declare_parameter('clump_enable',              False)
         self.declare_parameter('clump_keep_per_group',      1)
+        # Perspective-aware ROI: shifts each square's sampled vertical window
+        # toward whichever edge actually projects reliably through the
+        # homography (a piece's board-contact point, not its leaning upper
+        # body) — see _compute_square_scores()'s docstring. Sign/magnitude is
+        # a physical-camera-geometry fact this needs tuning against the real
+        # board to get right (positive = shift toward the bottom of the
+        # warped image, negative = toward the top) — 0.0 = today's centered
+        # crop, unchanged.
+        self.declare_parameter('roi_bias_fraction',       0.0)
+        # Weight for a second, independent structure/edge evidence channel
+        # (Sobel gradient-magnitude diff) combined with the existing LAB
+        # color diff — structure is far less sensitive to lighting/exposure
+        # shifts than raw color. 0.0 = today's pure-color behavior, unchanged.
+        self.declare_parameter('edge_diff_weight',        0.0)
 
         self._diff_threshold     = float(self.get_parameter('diff_threshold').value)
         self._premove_count      = int(self.get_parameter('premove_avg_count').value)
@@ -77,6 +91,8 @@ class PieceDetectorNode(Node):
         self._shift_compensation = float(self.get_parameter('global_shift_compensation').value)
         self._clump_enable       = bool(self.get_parameter('clump_enable').value)
         self._clump_keep         = int(self.get_parameter('clump_keep_per_group').value)
+        self._roi_bias           = float(self.get_parameter('roi_bias_fraction').value)
+        self._edge_weight        = float(self.get_parameter('edge_diff_weight').value)
 
         self._latest_msg:     Optional[object]      = None
         self._latest_image:   Optional[np.ndarray]  = None
@@ -279,6 +295,10 @@ class PieceDetectorNode(Node):
                 self._clump_enable = bool(p.value)
             elif p.name == 'clump_keep_per_group':
                 self._clump_keep = int(p.value)
+            elif p.name == 'roi_bias_fraction':
+                self._roi_bias = float(p.value)
+            elif p.name == 'edge_diff_weight':
+                self._edge_weight = float(p.value)
         return SetParametersResult(successful=True)
 
     # ── Clump Filter ───────────────────────────────────────────────────────────
@@ -343,6 +363,33 @@ class PieceDetectorNode(Node):
 
     # ── Frame Diff ──────────────────────────────────────────────────────────
 
+    def _square_roi_bounds(self, row: int, col: int) -> tuple:
+        """Pixel bounds (x1, y1, x2, y2) of the sampled ROI for warped-image
+        square (row, col), including the perspective-lean bias.
+
+        A piece is a physical object with height, so it doesn't sit flush
+        with the board plane the homography is computed for — only its
+        board-contact point projects correctly through the warp; the rest of
+        its silhouette "leans" in the warped image, worse for ranks farther
+        from the camera. roi_bias_fraction shifts the vertical sampling
+        window within the square (not its size) toward whichever edge that
+        contact point actually falls on — a physical-camera-geometry fact
+        that needs tuning against the real board, hence a signed, tunable
+        parameter rather than a hardcoded direction. 0.0 keeps the original
+        centered crop unchanged. Horizontal (file) bounds are never biased —
+        perspective lean runs along the rank/depth axis, not left-right.
+        """
+        size    = self._warp_size
+        sq_px   = size // 8
+        margin  = max(2, sq_px // 8)
+        bias_px = int(round(self._roi_bias * sq_px))
+
+        x1 = col * sq_px + margin
+        x2 = (col + 1) * sq_px - margin
+        y1 = max(row * sq_px, row * sq_px + margin + bias_px)
+        y2 = min((row + 1) * sq_px, (row + 1) * sq_px - margin + bias_px)
+        return x1, y1, x2, y2
+
     def _compute_square_scores(
         self,
         warped_cur: np.ndarray,
@@ -351,33 +398,45 @@ class PieceDetectorNode(Node):
         """
         Return list of (chess.Square, diff_score) for all 64 squares.
 
-        diff_score is the mean per-pixel LAB distance within each square's
-        interior region (with a small margin to avoid border artifacts).
-        The L channel is weighted more heavily as it captures piece
-        presence/absence reliably regardless of piece color.
+        diff_score combines two channels within each square's ROI (see
+        _square_roi_bounds() for the perspective-bias-adjusted crop):
+          - LAB color diff (as before): mean per-pixel LAB distance, L
+            channel weighted more heavily as it captures piece presence/
+            absence reliably regardless of piece color.
+          - Gradient-magnitude (Sobel) structure diff, weighted by
+            edge_diff_weight (default 0.0 — no effect unless tuned on):
+            responds to local contrast/structure rather than absolute pixel
+            values, so it's far less sensitive to lighting/exposure drift
+            than raw color — a second, independent line of evidence for the
+            same "did this square actually change" question.
 
         Squares are iterated in image order (row 0 = rank 8, row 7 = rank 1).
         """
-        size   = self._warp_size
-        sq_px  = size // 8
-        margin = max(2, sq_px // 8)
-
         cur_lab = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2LAB).astype(np.float32)
         pre_lab = cv2.cvtColor(warped_pre, cv2.COLOR_BGR2LAB).astype(np.float32)
-
         diff = np.abs(cur_lab - pre_lab)
         # L channel: piece presence/absence. a/b channels: color shifts (smaller weight)
         diff_map = diff[:, :, 0] + 0.4 * diff[:, :, 1] + 0.4 * diff[:, :, 2]
 
+        edge_diff_map = None
+        if self._edge_weight > 0.0:
+            cur_gray = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2GRAY)
+            pre_gray = cv2.cvtColor(warped_pre, cv2.COLOR_BGR2GRAY)
+            cur_grad = cv2.magnitude(
+                cv2.Sobel(cur_gray, cv2.CV_32F, 1, 0, ksize=3),
+                cv2.Sobel(cur_gray, cv2.CV_32F, 0, 1, ksize=3))
+            pre_grad = cv2.magnitude(
+                cv2.Sobel(pre_gray, cv2.CV_32F, 1, 0, ksize=3),
+                cv2.Sobel(pre_gray, cv2.CV_32F, 0, 1, ksize=3))
+            edge_diff_map = np.abs(cur_grad - pre_grad)
+
         results = []
         for row in range(8):
             for col in range(8):
-                y1 = row * sq_px + margin
-                y2 = (row + 1) * sq_px - margin
-                x1 = col * sq_px + margin
-                x2 = (col + 1) * sq_px - margin
-                roi   = diff_map[y1:y2, x1:x2]
-                score = float(np.mean(roi))
+                x1, y1, x2, y2 = self._square_roi_bounds(row, col)
+                score = float(np.mean(diff_map[y1:y2, x1:x2]))
+                if edge_diff_map is not None:
+                    score += self._edge_weight * float(np.mean(edge_diff_map[y1:y2, x1:x2]))
                 # Image row 0 = rank 8 (top of board), row 7 = rank 1 (bottom)
                 sq = chess.square(col, 7 - row)
                 results.append((sq, score))
@@ -408,6 +467,16 @@ class PieceDetectorNode(Node):
         for i in range(9):
             cv2.line(debug, (i * sq_px, 0), (i * sq_px, size), (80, 80, 80), 1)
             cv2.line(debug, (0, i * sq_px), (size, i * sq_px), (80, 80, 80), 1)
+
+        # Actual sampled ROI per square, only drawn distinctly from the grid
+        # when a perspective bias is active (roi_bias_fraction != 0) — makes
+        # the bias direction/magnitude visible for tuning against the real
+        # board instead of a value picked blind.
+        if abs(self._roi_bias) > 1e-6:
+            for row in range(8):
+                for col in range(8):
+                    x1, y1, x2, y2 = self._square_roi_bounds(row, col)
+                    cv2.rectangle(debug, (x1, y1), (x2, y2), (255, 255, 0), 1)
 
         # Per-square diff score annotation
         for sq, score in square_scores:
