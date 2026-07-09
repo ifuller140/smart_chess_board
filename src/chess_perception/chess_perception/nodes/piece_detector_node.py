@@ -31,7 +31,11 @@ Services:
 
 Parameters:
   diff_threshold     (float) — mean per-square LAB diff to flag as changed (default 18.0)
-  premove_avg_count  (int)   — frames to average for a stable reference (default 1)
+  premove_avg_count  (int)   — frames to average for a stable reference (default 1).
+                                When > 1, capture_premove responds immediately and
+                                accumulates one frame per subsequent detection tick
+                                (non-blocking); progress is reported on
+                                /perception/reference_status.
   warp_size          (int)   — warped board side length in pixels (default 400)
   detection_hz       (float) — processing rate in Hz (default 2.0)
 """
@@ -79,6 +83,12 @@ class PieceDetectorNode(Node):
         self._board_corners:  Optional[np.ndarray]  = None
         self._premove_warped: Optional[np.ndarray]  = None
         self._premove_frames: list                   = []
+        # When True, _detect_tick captures+warps each incoming frame into
+        # _premove_frames instead of running normal diff detection, until
+        # premove_avg_count frames are collected — then averages them into
+        # _premove_warped. Non-blocking: spread across consecutive ticks
+        # rather than blocking the capture_premove service call itself.
+        self._premove_accumulating = False
         self._lock = threading.Lock()
 
         self.create_subscription(
@@ -140,10 +150,18 @@ class PieceDetectorNode(Node):
 
         with self._lock:
             self._latest_image = frame
-            corners  = self._board_corners.copy() if self._board_corners is not None else None
-            premove  = self._premove_warped.copy() if self._premove_warped is not None else None
+            corners       = self._board_corners.copy() if self._board_corners is not None else None
+            premove       = self._premove_warped.copy() if self._premove_warped is not None else None
+            accumulating  = self._premove_accumulating
 
-        if corners is None or premove is None:
+        if corners is None:
+            return
+
+        if accumulating:
+            self._accumulate_premove_frame(frame, corners)
+            return
+
+        if premove is None:
             return
 
         warped = self._warp_board(frame, corners)
@@ -187,9 +205,14 @@ class PieceDetectorNode(Node):
         Called by game_manager_node when it's about to enter WAITING_PLAYER_MOVE
         (i.e. at game start and after the computer finishes each of its moves).
 
-        The current frame is averaged with up to premove_avg_count previous
-        captures for a stable reference. Each call resets the accumulation
-        so the reference always reflects the current board state.
+        If premove_avg_count <= 1 (the default), captures and finalizes a single
+        frame immediately — zero behavior change from before. If > 1, this kicks
+        off non-blocking accumulation: _detect_tick captures+warps one frame per
+        subsequent detection tick (instead of running diff detection) until
+        premove_avg_count frames are collected, then averages them into the
+        final reference. This responds immediately rather than blocking the
+        service call for the ~premove_avg_count/detection_hz seconds accumulation
+        takes — progress is reported on /perception/reference_status.
         """
         with self._lock:
             if self._latest_image is None or self._board_corners is None:
@@ -205,17 +228,44 @@ class PieceDetectorNode(Node):
             response.message = 'Perspective warp failed — check board corner calibration'
             return response
 
-        # Reset accumulation on each service call so the reference is always fresh
-        self._premove_frames = []
-        self._premove_frames.append(warped.astype(np.float32))
-        self._premove_warped = warped.copy()
+        with self._lock:
+            self._premove_frames = [warped.astype(np.float32)]
+            if self._premove_count <= 1:
+                self._premove_accumulating = False
+                self._premove_warped = warped.copy()
+                msg = 'Pre-move reference captured (1/1 frames)'
+            else:
+                self._premove_accumulating = True
+                msg = f'Pre-move reference: accumulating (1/{self._premove_count} frames)...'
 
-        msg = f'Pre-move reference captured (1/{self._premove_count} frames)'
         self._status_pub.publish(String(data=msg))
         response.success = True
         response.message = msg
         self.get_logger().info(msg)
         return response
+
+    def _accumulate_premove_frame(self, frame: np.ndarray, corners: np.ndarray):
+        """Add one more frame to the in-progress premove average (see _srv_capture_premove)."""
+        warped = self._warp_board(frame, corners)
+        if warped is None:
+            return
+
+        with self._lock:
+            self._premove_frames.append(warped.astype(np.float32))
+            count = len(self._premove_frames)
+            target = self._premove_count
+            done = count >= target
+            if done:
+                averaged = np.mean(self._premove_frames, axis=0).astype(np.uint8)
+                self._premove_warped = averaged
+                self._premove_accumulating = False
+
+        if done:
+            msg = f'Pre-move reference captured ({count}/{target} frames, averaged)'
+            self.get_logger().info(msg)
+        else:
+            msg = f'Pre-move reference: accumulating ({count}/{target} frames)...'
+        self._status_pub.publish(String(data=msg))
 
     # ── Parameter callback ─────────────────────────────────────────────────────
 

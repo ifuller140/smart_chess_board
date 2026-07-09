@@ -11,7 +11,12 @@ Detection runs at reduced resolution (detection_scale=0.5 → 320x240 at
 640x480 input) to keep Pi 4 CPU below 30%.
 
 Published Topics:
-  /perception/board_geometry  (chess_interfaces/BoardState) — 4 corners
+  /perception/board_geometry  (chess_interfaces/BoardState) — 4 corners.
+    header.stamp is the time of the last genuinely fresh detection, not the
+    current frame's time — if a tick's detection fails and cached corners
+    are republished, the stamp does NOT advance, so consumers can measure
+    corner staleness themselves (now - stamp) instead of every publish
+    looking equally fresh.
   /perception/board_debug     (sensor_msgs/Image)           — annotated frame
 """
 
@@ -43,6 +48,11 @@ class BoardDetectorNode(Node):
 
         self._detector     = BoardDetector()
         self._last_corners = None
+        # Wall-clock time of the last genuinely fresh detection (not a
+        # cached republish) — published as board_msg.header.stamp so
+        # downstream consumers can tell "just detected" from "detected a
+        # while ago and republished because this tick's detection failed."
+        self._last_fresh_stamp = None
 
         # Store latest compressed message — JPEG is ~30x smaller than raw,
         # avoiding 11MB/s DDS deserialization overhead per subscriber.
@@ -92,24 +102,37 @@ class BoardDetectorNode(Node):
             self.get_logger().error(f'Image decode error: {e}')
             return
 
-        # Detect at reduced resolution
+        # Detect at reduced resolution. Pass the previous detection's corners
+        # (scaled into this tick's detection-resolution space) so the
+        # detector can anchor TL/TR/BR/BL labeling to them instead of
+        # re-deriving pure-geometric labels every tick — see
+        # BoardDetector.detect()'s docstring for why that flips labels on a
+        # near-symmetric board.
         if self._det_scale < 1.0:
-            small    = cv2.resize(cv_image, None,
-                                  fx=self._det_scale, fy=self._det_scale)
-            geometry = self._detector.detect(small)
+            small = cv2.resize(cv_image, None,
+                                fx=self._det_scale, fy=self._det_scale)
+            prev_scaled = (self._last_corners * self._det_scale
+                           if self._last_corners is not None else None)
+            geometry = self._detector.detect(small, previous_corners=prev_scaled)
             if geometry is not None:
                 geometry.corners = geometry.corners / self._det_scale
         else:
-            geometry = self._detector.detect(cv_image)
+            geometry = self._detector.detect(cv_image, previous_corners=self._last_corners)
 
         if geometry is not None:
             self._last_corners = geometry.corners.copy()
+            self._last_fresh_stamp = msg.header.stamp
 
         # Publish geometry (current or cached)
         corners = geometry.corners if geometry is not None else self._last_corners
         if corners is not None:
             board_msg = BoardState()
             board_msg.header = msg.header
+            # Stamp reflects when these corners were actually detected, not
+            # this tick's frame time — lets downstream tell a fresh
+            # detection from a stale cached republish (finding: previously
+            # every publish used the current frame's timestamp regardless).
+            board_msg.header.stamp = self._last_fresh_stamp
             corners_list = []
             for i in range(4):
                 p = Point()

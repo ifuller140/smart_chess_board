@@ -5,8 +5,8 @@ Vision Pipeline Integration Test.
 Tests the full perception pipeline end-to-end:
   1. Camera node can capture and publish images
   2. Board detector can detect corners from the camera feed
-  3. Piece detector publishes a BoardState with a valid FEN string
-  4. Reference capture service is callable
+  3. Pre-move reference capture service is callable
+  4. Piece detector flags a changed square after a piece is moved
   5. Debug image is published
 
 This test requires:
@@ -39,10 +39,9 @@ class VisionTestNode(Node):
 
         self.image_received    = False
         self.geometry_received = False
-        self.board_state_received = False
+        self.changed_squares_received = False
         self.debug_received    = False
-        self.latest_fen        = ''
-        self.latest_piece_count = 0
+        self.latest_changed_squares = ''
         self.geometry_corner_count = 0
 
         self.create_subscription(
@@ -50,13 +49,13 @@ class VisionTestNode(Node):
         self.create_subscription(
             BoardState, '/perception/board_geometry', self._on_geometry, 10)
         self.create_subscription(
-            BoardState, '/perception/board_state', self._on_board_state, 10)
+            String, '/perception/changed_squares', self._on_changed_squares, 10)
         self.create_subscription(
             Image, '/perception/piece_debug', self._on_debug, 10)
 
         self._capture_client = self.create_client(Trigger, '/camera/capture')
         self._ref_client     = self.create_client(
-            Trigger, '/perception/capture_reference')
+            Trigger, '/perception/capture_premove')
 
     def _on_image(self, msg):
         self.image_received = True
@@ -66,10 +65,9 @@ class VisionTestNode(Node):
         self.geometry_corner_count = sum(
             1 for p in msg.corners if p.x > 0 or p.y > 0)
 
-    def _on_board_state(self, msg):
-        self.board_state_received = True
-        self.latest_fen = msg.fen
-        self.latest_piece_count = sum(1 for p in msg.pieces if p != 0)
+    def _on_changed_squares(self, msg):
+        self.changed_squares_received = True
+        self.latest_changed_squares = msg.data.strip()
 
     def _on_debug(self, msg):
         self.debug_received = True
@@ -85,7 +83,7 @@ class VisionTestNode(Node):
             return bool(future.result().success)
         return False
 
-    def call_capture_reference(self) -> bool:
+    def call_capture_premove(self) -> bool:
         if not self._ref_client.wait_for_service(timeout_sec=5.0):
             return False
         future = self._ref_client.call_async(Trigger.Request())
@@ -182,7 +180,7 @@ class VisionPipelineTest(HardwareTest):
                 failure_message='NO CRNS',
             ),
             TestStep(
-                name='Reference Baseline Capture',
+                name='Pre-move Reference Capture',
                 display_text='REF CAP',
                 action=self._test_reference_capture,
                 wait_for_input=True,
@@ -192,14 +190,14 @@ class VisionPipelineTest(HardwareTest):
                 failure_message='REF FAIL',
             ),
             TestStep(
-                name='Piece Detection FEN',
+                name='Changed-Square Detection',
                 display_text='PIECE DET',
                 action=self._test_piece_detection,
                 wait_for_input=True,
                 input_type='clock',
                 timeout_seconds=30.0,
-                success_message='FEN OK',
-                failure_message='NO FEN',
+                success_message='DIFF OK',
+                failure_message='NO DIFF',
             ),
         ]
 
@@ -244,46 +242,50 @@ class VisionPipelineTest(HardwareTest):
 
     def _test_reference_capture(self) -> bool:
         print()
-        print('  REFERENCE BASELINE CAPTURE')
+        print('  PRE-MOVE REFERENCE CAPTURE')
         print('  --------------------------')
-        print('  Remove ALL pieces from the board.')
-        print('  Press clock button to capture empty-board reference...')
+        print('  Set up the board in any position (pieces or empty — the current')
+        print('  state just becomes the baseline the next capture is diffed against).')
+        print('  Press clock button to capture the pre-move reference...')
 
-        ok = self._node.call_capture_reference()
+        ok = self._node.call_capture_premove()
         if ok:
-            print('  ✓ Empty board reference captured')
+            print('  ✓ Pre-move reference captured')
         else:
             print('  ✗ Reference capture failed')
         return ok
 
     def _test_piece_detection(self) -> bool:
         print()
-        print('  PIECE DETECTION TEST')
-        print('  --------------------')
-        print('  Place chess pieces on the board (starting position or any setup).')
-        print('  Press clock button to test piece detection...')
+        print('  CHANGED-SQUARE DETECTION TEST')
+        print('  ------------------------------')
+        print('  Move exactly one piece to a different square.')
+        print('  Press clock button to test change detection...')
 
-        self._node.board_state_received = False
+        self._node.changed_squares_received = False
         self._node.call_capture()
         time.sleep(3.0)
 
-        if not self._node.board_state_received:
-            print('  ✗ No /perception/board_state received')
+        if not self._node.changed_squares_received:
+            print('  ✗ No /perception/changed_squares received')
             return False
 
-        fen = self._node.latest_fen
-        pieces = self._node.latest_piece_count
-        print(f'  ✓ Board state received')
-        print(f'    FEN: {fen}')
-        print(f'    Pieces detected: {pieces}')
+        changed = self._node.latest_changed_squares
+        print(f'  ✓ Changed-squares message received')
+        print(f'    Squares: {changed!r}')
         print(f'    Debug image: view /perception/piece_debug in rqt')
 
-        # Basic FEN validation
+        if not changed:
+            print('  ✗ No squares flagged as changed — expected at least one after moving a piece')
+            return False
+
+        # Basic sanity check: every entry parses as a real chess square
         try:
             import chess
-            chess.Board(fen)
-            print('  ✓ FEN is valid (parseable by python-chess)')
+            for sq in changed.split(','):
+                chess.parse_square(sq.strip())
+            print('  ✓ Changed squares are valid square names')
             return True
         except Exception as e:
-            print(f'  ✗ FEN is invalid: {e}')
+            print(f'  ✗ Invalid square name in changed-squares list: {e}')
             return False

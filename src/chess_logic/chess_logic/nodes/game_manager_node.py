@@ -63,6 +63,7 @@ import time
 
 import chess
 import rclpy
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
@@ -110,6 +111,12 @@ class GameManagerNode(Node):
         self._cap_timeout  = self.get_parameter('board_capture_timeout_s').value
         self._move_timeout = self.get_parameter('motion_timeout_s').value
         self._home_timeout = self.get_parameter('homing_timeout_s').value
+
+        # Live-reconfigure: without this, engine_think_time_s pushed via
+        # SetParameters (Chess OS's game-settings UI) only updated ROS's
+        # parameter-server bookkeeping, not self._think_time, so the push
+        # had zero effect until the process was restarted.
+        self.add_on_set_parameters_callback(self._on_params_changed)
 
         # ── Python-chess board ────────────────────────────────────────────
         self._board = chess.Board()          # authoritative game state
@@ -839,6 +846,13 @@ class GameManagerNode(Node):
     def _publish_board_fen(self):
         """Publish the current authoritative board FEN to piece_detector and visualizer."""
         self._fen_pub.publish(String(data=self._board.fen()))
+
+    def _on_params_changed(self, params):
+        for p in params:
+            if p.name == 'engine_think_time_s':
+                self._think_time = float(p.value)
+                self.get_logger().info(f'engine_think_time_s updated to {self._think_time}s')
+        return SetParametersResult(successful=True)
 
     def _verify_starting_position(self):
         """

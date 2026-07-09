@@ -42,7 +42,7 @@ graph TB
     GM -->|capture| CAM
     CAM -->|image| BD
     BD -->|geometry| PD
-    PD -->|board_state| GM
+    PD -->|changed_squares| GM
 
     GM -->|execute_move| MP
     MP -->|MoveGantry| GK
@@ -72,10 +72,10 @@ graph TB
 4. board_detector_node finds grid corners
          │
          ▼
-5. piece_detector_node identifies pieces → FEN
+5. piece_detector_node diffs against the pre-move reference → changed squares
          │
          ▼
-6. game_manager_node compares FEN to previous state
+6. game_manager_node matches changed squares against its legal-move list
          │
          ├── Invalid move → Signal error, wait for correction
          │
@@ -182,7 +182,7 @@ chess_perception        gantry_control
 | `/stepper/status` | std_msgs/String | stepper_driver | gantry_kinematics |
 | `/limit_switch/state` | LimitSwitchState | limit_switch | gantry_kinematics, game_manager |
 | `/camera/image_raw` | sensor_msgs/Image | camera | board_detector |
-| `/perception/board_state` | BoardState | piece_detector | game_manager |
+| `/perception/changed_squares` | std_msgs/String | piece_detector | game_manager |
 | `/gantry/pose` | geometry_msgs/Point | gantry_kinematics | motion_planner |
 
 ### Services (Request/Reply)

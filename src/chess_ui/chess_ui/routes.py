@@ -178,8 +178,19 @@ def register_routes(app):
 
     @app.route("/api/hw/estop/clear", methods=["POST"])
     def api_estop_clear():
+        """Clear the local UI flag AND the latched emergency_stop on every
+        hardware node — previously this only did the former, so the gantry/
+        servo stayed silently unresponsive after a real e-stop until the ROS
+        processes were manually restarted."""
         with state._lock:
             state._state["estop_active"] = False
+        node = ros_client.ros_node
+        if node is not None:
+            try:
+                if ros_client.HAS_ROS:
+                    node.estop_pub.publish(ros_client.Bool(data=False))
+            except Exception as e:
+                return jsonify({"ok": False, "msg": str(e)}), 500
         return jsonify({"ok": True})
 
     @app.route("/api/stepper/reset_position", methods=["POST"])
@@ -322,16 +333,20 @@ def register_routes(app):
     # ── Gantry jog routes ────────────────────────────────────────────────────
     @app.route("/api/gantry/jog/start", methods=["POST"])
     def api_gantry_jog_start():
-        """Start continuous jog. Background thread publishes velocity at 20 Hz."""
+        """Start (or heartbeat-refresh) continuous jog. Background thread
+        publishes velocity at 20 Hz; the frontend re-calls this periodically
+        while a direction is held, and jog_loop() auto-stops if this refresh
+        stops arriving (closed tab, dropped connection, etc.)."""
         data  = request.get_json(silent=True) or {}
         dx    = float(data.get("dx", 0))
         dy    = float(data.get("dy", 0))
         speed = float(data.get("speed", 50))
         with state._jog_lock:
-            state._jog["dx"]     = max(-1.0, min(1.0, dx))
-            state._jog["dy"]     = max(-1.0, min(1.0, dy))
-            state._jog["speed"]  = max(5.0, min(100.0, speed))
-            state._jog["active"] = True
+            state._jog["dx"]           = max(-1.0, min(1.0, dx))
+            state._jog["dy"]           = max(-1.0, min(1.0, dy))
+            state._jog["speed"]        = max(5.0, min(100.0, speed))
+            state._jog["active"]       = True
+            state._jog["last_refresh"] = time.time()
         return jsonify({"ok": True})
 
     @app.route("/api/gantry/jog/stop", methods=["POST"])

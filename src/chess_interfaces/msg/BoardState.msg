@@ -1,4 +1,5 @@
+# Detected board geometry. header.stamp is the time of the last genuinely
+# fresh detection (see board_detector_node.py) — compare against now() to
+# tell a fresh detection from a stale cached republish.
 std_msgs/Header header
-int8[64] pieces          # 8x8 flattened array (0=empty, 1=white pawn, etc.)
-string fen               # FEN string representation
-geometry_msgs/Point[4] corners # Board corners in image coordinates
+geometry_msgs/Point[4] corners # Board corners in image coordinates, order TL/TR/BR/BL

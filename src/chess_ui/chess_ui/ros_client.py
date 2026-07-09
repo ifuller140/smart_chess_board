@@ -159,6 +159,15 @@ if HAS_ROS:
             goal = _RHT.Goal()
             goal.category = category
             goal.subtest  = subtest
+            # Drain any leftover items from a previous run whose SSE stream
+            # disconnected mid-test — otherwise the next /api/tests/stream
+            # client would immediately receive that stale result instead of
+            # this run's live output.
+            while not self._test_queue.empty():
+                try:
+                    self._test_queue.get_nowait()
+                except queue.Empty:
+                    break
             self._test_running     = True
             self._test_last_run    = f"{category}/{subtest}"
             self._test_goal_handle = None
@@ -292,8 +301,8 @@ if HAS_ROS:
             try:
                 with state._lock:
                     state._state["square_scores"] = json.loads(msg.data)
-            except Exception:
-                pass
+            except Exception as e:
+                self.get_logger().debug(f'square_scores decode failed: {e}')
 
         def _on_diff_img(self, msg):
             try:
@@ -304,8 +313,8 @@ if HAS_ROS:
                 if ok:
                     with state._lock:
                         state._state["diff_frame"] = bytes(buf)
-            except Exception:
-                pass
+            except Exception as e:
+                self.get_logger().debug(f'diff_img decode failed: {e}')
 
         def _on_ref_status(self, msg):
             with state._lock:
@@ -341,40 +350,56 @@ if HAS_ROS:
                 }
 
         def _check_pending(self):
-            if HAS_RCL_PARAMS:
-                self._apply_pending_params(
-                    self._pending_detector_params,
-                    self._svc_detector_params,
-                    {
-                        "diff_threshold":            ParameterType.PARAMETER_DOUBLE,
-                        "global_shift_compensation": ParameterType.PARAMETER_DOUBLE,
-                        "clump_enable":              ParameterType.PARAMETER_BOOL,
-                        "clump_keep_per_group":      ParameterType.PARAMETER_INTEGER,
-                    },
-                )
+            if not HAS_RCL_PARAMS:
+                return
+            # Only clear each pending dict once _apply_pending_params actually
+            # sent the request — if the target's SetParameters service isn't
+            # ready yet (e.g. still starting up), keep it pending and retry
+            # on the next 0.2s tick instead of silently discarding the push
+            # (previously: unconditionally cleared here regardless of
+            # whether the service was ready, so a push that arrived before
+            # the target node was fully up was lost forever with no error).
+            if self._apply_pending_params(
+                self._pending_detector_params,
+                self._svc_detector_params,
+                "piece_detector_node",
+                {
+                    "diff_threshold":            ParameterType.PARAMETER_DOUBLE,
+                    "global_shift_compensation": ParameterType.PARAMETER_DOUBLE,
+                    "clump_enable":              ParameterType.PARAMETER_BOOL,
+                    "clump_keep_per_group":      ParameterType.PARAMETER_INTEGER,
+                },
+            ):
                 self._pending_detector_params = None
-                self._apply_pending_params(
-                    self._pending_game_manager_params,
-                    self._svc_game_manager_params,
-                    {"engine_think_time_s": ParameterType.PARAMETER_DOUBLE},
-                )
+
+            if self._apply_pending_params(
+                self._pending_game_manager_params,
+                self._svc_game_manager_params,
+                "game_manager_node",
+                {"engine_think_time_s": ParameterType.PARAMETER_DOUBLE},
+            ):
                 self._pending_game_manager_params = None
-                self._apply_pending_params(
-                    self._pending_motion_planner_params,
-                    self._svc_motion_planner_params,
-                    {
-                        "board_origin_x_mm": ParameterType.PARAMETER_DOUBLE,
-                        "board_origin_y_mm": ParameterType.PARAMETER_DOUBLE,
-                        "square_size_mm":    ParameterType.PARAMETER_DOUBLE,
-                    },
-                )
+
+            if self._apply_pending_params(
+                self._pending_motion_planner_params,
+                self._svc_motion_planner_params,
+                "motion_planner_node",
+                {
+                    "board_origin_x_mm": ParameterType.PARAMETER_DOUBLE,
+                    "board_origin_y_mm": ParameterType.PARAMETER_DOUBLE,
+                    "square_size_mm":    ParameterType.PARAMETER_DOUBLE,
+                },
+            ):
                 self._pending_motion_planner_params = None
 
-        def _apply_pending_params(self, params, client, type_map):
+        def _apply_pending_params(self, params, client, target_name, type_map) -> bool:
+            """Returns True once the update has been sent (or there was
+            nothing to send) — False means "keep retrying", i.e. the caller
+            must NOT clear the pending value yet."""
             if params is None or client is None:
-                return
+                return True
             if not client.service_is_ready():
-                return
+                return False
             req = SetParameters.Request()
             for name, value in params.items():
                 pv = ParameterValue()
@@ -390,7 +415,21 @@ if HAS_ROS:
                 p.name = name
                 p.value = pv
                 req.parameters.append(p)
-            client.call_async(req)
+            future = client.call_async(req)
+            future.add_done_callback(
+                lambda f, target=target_name: self._log_param_result(f, target))
+            return True
+
+        def _log_param_result(self, future, target_name: str):
+            try:
+                results = future.result().results
+            except Exception as e:
+                self.get_logger().warn(f'{target_name} param push failed: {e}')
+                return
+            for r in results:
+                if not r.successful:
+                    self.get_logger().warn(
+                        f'{target_name} rejected a param push: {r.reason}')
 
         def call_svc(self, client, timeout: float = 2.0):
             if not client.wait_for_service(timeout_sec=0.5):
@@ -407,15 +446,33 @@ if HAS_ROS:
 
 
 def jog_loop():
-    """20 Hz loop: publish velocity to /stepper/velocity while jog is active."""
+    """20 Hz loop: publish velocity to /stepper/velocity while jog is active.
+
+    Watchdog: if /api/gantry/jog/start hasn't refreshed last_refresh within
+    state.JOG_WATCHDOG_TIMEOUT_S, auto-stop and zero the velocity — guards
+    against a closed tab / dropped connection leaving the gantry jogging
+    indefinitely (no mouseup/keyup/blur ever fires in that case)."""
     while True:
         time.sleep(0.05)
         with state._jog_lock:
             if not state._jog["active"]:
                 continue
-            dx, dy, spd = state._jog["dx"], state._jog["dy"], state._jog["speed"]
+            stale = (time.time() - state._jog["last_refresh"]) > state.JOG_WATCHDOG_TIMEOUT_S
+            if stale:
+                state._jog["active"] = False
+            else:
+                dx, dy, spd = state._jog["dx"], state._jog["dy"], state._jog["speed"]
         node = ros_node
         if node is None:
+            continue
+        if stale:
+            try:
+                if HAS_ROS:
+                    node.vel_pub.publish(Twist())
+                    node.get_logger().warn(
+                        'Jog watchdog: no refresh received, auto-stopping')
+            except Exception:
+                pass
             continue
         MAX_VEL = 600.0
         try:

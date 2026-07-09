@@ -51,6 +51,7 @@ from typing import List, Optional, Tuple
 import chess
 import rclpy
 from action_msgs.msg import GoalStatus
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
@@ -155,6 +156,13 @@ class MotionPlannerNode(Node):
             cols           = self.get_parameter('graveyard_cols').value,
         )
 
+        # Live-reconfigure: without this, values pushed via SetParameters
+        # (e.g. board calibration from the Chess OS UI) only update ROS's
+        # parameter-server bookkeeping — this node's own cached attributes
+        # (used by every coordinate calculation) stayed frozen at whatever
+        # was read at startup until the process was restarted.
+        self.add_on_set_parameters_callback(self._on_params_changed)
+
         # ── Publishers ──────────────────────────────────────────────────────
         self._done_pub  = self.create_publisher(Bool, '/motion/done', 10)
 
@@ -178,6 +186,24 @@ class MotionPlannerNode(Node):
             f'a1=({self.origin_x}, {self.origin_y})mm, '
             f'sq={self.sq_size}mm, speed={self.move_speed}mm/s, '
             f'safe_edge_x={self.edge_x}mm')
+
+    def _on_params_changed(self, params):
+        for p in params:
+            if p.name == 'square_size_mm':
+                self.sq_size = float(p.value)
+            elif p.name == 'board_origin_x_mm':
+                self.origin_x = float(p.value)
+            elif p.name == 'board_origin_y_mm':
+                self.origin_y = float(p.value)
+            elif p.name == 'move_speed_mm_s':
+                self.move_speed = float(p.value)
+            elif p.name == 'board_edge_safe_x_mm':
+                self.edge_x = float(p.value)
+        self.get_logger().info(
+            f'Params updated — a1=({self.origin_x}, {self.origin_y})mm, '
+            f'sq={self.sq_size}mm, speed={self.move_speed}mm/s, '
+            f'safe_edge_x={self.edge_x}mm')
+        return SetParametersResult(successful=True)
 
     # ─────────────────────────────────────────────────────────────────────
     # Command Handling

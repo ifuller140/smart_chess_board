@@ -22,7 +22,7 @@ TEST_CATALOGUE: Dict[str, List[str]] = {
     "camera": ["full"],
     "magnet": ["full"],
     "clock":  ["full", "integration", "display"],
-    "vision": ["full", "corners", "board", "pieces", "squares", "fen"],
+    "vision": ["full", "corners", "board", "squares"],
 }
 
 # ── Gantry workspace constants ────────────────────────────────────────────────
@@ -97,7 +97,13 @@ _params = {
 }
 
 # ── Jog state — background thread publishes velocity to /stepper/velocity ───────
-_jog: dict = {"dx": 0.0, "dy": 0.0, "speed": 50.0, "active": False}
+# last_refresh is a watchdog heartbeat: the frontend re-POSTs jog/start
+# periodically while a direction is held, and jog_loop() auto-stops if it
+# hasn't heard one in JOG_WATCHDOG_TIMEOUT_S — otherwise a closed tab /
+# dropped connection (no mouseup/keyup ever fires) would leave the gantry
+# jogging indefinitely.
+JOG_WATCHDOG_TIMEOUT_S = 0.8
+_jog: dict = {"dx": 0.0, "dy": 0.0, "speed": 50.0, "active": False, "last_refresh": 0.0}
 _jog_lock = threading.Lock()
 
 

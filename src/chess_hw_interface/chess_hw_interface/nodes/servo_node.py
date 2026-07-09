@@ -96,6 +96,9 @@ class ServoNode(Node):
             self.emergency_stop = True
             self.get_logger().warn("EMERGENCY STOP: Stopping servo")
             self.pi.set_servo_pulsewidth(self.servo_pin, 0)
+        elif self.emergency_stop:
+            self.emergency_stop = False
+            self.get_logger().info("Emergency stop cleared")
 
     def set_servo(self, pulse_width_us: int) -> bool:
         """Set servo position using hardware-timed PWM."""

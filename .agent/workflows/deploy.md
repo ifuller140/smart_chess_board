@@ -208,10 +208,10 @@ Open `http://smart-chess-pi:8080/` to see the raw MJPEG camera feed.
 
 **Calibration:**
 
-Before running piece detection, capture the empty-board reference:
+Before a game, capture the current board as the pre-move reference (game_manager_node also does this automatically each turn):
 
 ```bash
-ros2 service call /perception/capture_reference std_srvs/srv/Trigger {}
+ros2 service call /perception/capture_premove std_srvs/srv/Trigger {}
 ```
 
 See `docs/features/vision-system.md` for the full calibration procedure.

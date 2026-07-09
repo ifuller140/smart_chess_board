@@ -79,7 +79,7 @@ ros2 node list
 ### View Topics
 ```bash
 ros2 topic list
-ros2 topic echo /perception/board_state
+ros2 topic echo /perception/changed_squares
 ```
 
 ## Development Workflow

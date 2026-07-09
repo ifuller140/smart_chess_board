@@ -119,8 +119,8 @@ cd ~/dev/smart_chess_board
 ./run_hw_test.sh --category gantry --subtest full
 
 # Vision-specific tests
-./run_hw_test.sh --test vision_fen
 ./run_hw_test.sh --test vision_board
+./run_hw_test.sh --test vision_corners
 ```
 
 See `.agent/workflows/hardware-test.md` for the full test suite reference.

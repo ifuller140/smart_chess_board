@@ -50,9 +50,7 @@ from .tests.test_clock_integration import ClockIntegrationTest
 from .tests.test_vision_detailed import (
     CameraCornerDetectionTest,
     BoardDetectionTest,
-    ColorPieceDetectionTest,
     SquareMappingTest,
-    FENBoardDisplayTest,
 )
 
 
@@ -208,9 +206,7 @@ CATEGORY_REGISTRY: Dict[str, Dict[str, Type[HardwareTest]]] = {
         'full':    VisionPipelineTest,
         'corners': CameraCornerDetectionTest,
         'board':   BoardDetectionTest,
-        'pieces':  ColorPieceDetectionTest,
         'squares': SquareMappingTest,
-        'fen':     FENBoardDisplayTest,
     },
 }
 
@@ -229,9 +225,7 @@ LEGACY_TEST_ALIASES = {
     'vision': ('vision', 'full'),
     'vision_corners': ('vision', 'corners'),
     'vision_board':   ('vision', 'board'),
-    'vision_pieces':  ('vision', 'pieces'),
     'vision_squares': ('vision', 'squares'),
-    'vision_fen':     ('vision', 'fen'),
 }
 
 

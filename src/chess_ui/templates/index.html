@@ -1334,8 +1334,20 @@ startNodeHealthPoll();
 // ── Gantry controls ───────────────────────────────────────────────
 function getJogSpeed() { return +document.getElementById('jog-speed').value; }
 
+var jogHeartbeatTimer = null;
+
 function startJog(dx, dy) {
   jogDx = dx; jogDy = dy;
+  _sendJogStart(dx, dy);
+  // Server-side watchdog (state.JOG_WATCHDOG_TIMEOUT_S) auto-stops the
+  // gantry if this heartbeat stops arriving — guards against a closed tab
+  // or dropped connection leaving it jogging indefinitely.
+  if (jogHeartbeatTimer) clearInterval(jogHeartbeatTimer);
+  jogHeartbeatTimer = setInterval(function() {
+    if (jogDx !== 0 || jogDy !== 0) _sendJogStart(jogDx, jogDy);
+  }, 300);
+}
+function _sendJogStart(dx, dy) {
   fetch('/api/gantry/jog/start', {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({dx: dx, dy: dy, speed: getJogSpeed()})
@@ -1343,6 +1355,7 @@ function startJog(dx, dy) {
 }
 function stopJog() {
   jogDx = 0; jogDy = 0;
+  if (jogHeartbeatTimer) { clearInterval(jogHeartbeatTimer); jogHeartbeatTimer = null; }
   fetch('/api/gantry/jog/stop', {method:'POST'});
 }
 

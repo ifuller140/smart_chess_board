@@ -256,7 +256,7 @@ Angles calibrated on real hardware via `code/test_z_servo.py`'s interactive swee
 
 ### camera_node
 
-**Purpose**: Capture images from Raspberry Pi camera.
+**Purpose**: Fallback camera backend (`use_camera_ros:=False`) — the default is the external `camera_ros` package launched directly by `perception_launch.py`, not this node. Captures Pi camera / V4L2 frames.
 
 | Property | Value |
 |----------|-------|
@@ -267,24 +267,29 @@ Angles calibrated on real hardware via `code/test_z_servo.py`'s interactive swee
 **Services**:
 | Service | Type | Description |
 |---------|------|-------------|
-| `/camera/capture` | `std_srvs/Trigger` | Capture single image |
+| `/camera/capture` | `std_srvs/Trigger` | Capture and publish a fresh frame |
 
 **Publications**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/camera/image_raw` | `sensor_msgs/Image` | Captured image |
+| `/camera/image_raw` | `sensor_msgs/Image` | Captured frame, uncompressed |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Same frame, JPEG — board_detector_node/piece_detector_node only consume this one |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `resolution` | int[2] | [640, 480] | Image resolution [width, height] |
-| `camera_id` | int | 0 | Camera device ID |
+| `use_picamera2` | bool | true | Try picamera2/GStreamer backends before falling back to V4L2 |
+| `camera_id` | int | 0 | V4L2 device index |
+| `width` / `height` | int | 1640 / 1232 | Capture resolution (full-sensor 2x2-binned) |
+| `fps` | float | 5.0 | Streaming frame rate |
+| `jpeg_quality` | int | 80 | Compressed-topic JPEG quality |
+| `calibration_file` | string | "" | Path to lens calibration file; empty = skip undistortion |
 
 ---
 
 ### board_detector_node
 
-**Purpose**: Detect chess board grid and corners.
+**Purpose**: Detect the board's 4 corners each tick and publish their pixel coordinates.
 
 | Property | Value |
 |----------|-------|
@@ -295,25 +300,27 @@ Angles calibrated on real hardware via `code/test_z_servo.py`'s interactive swee
 **Subscriptions**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/camera/image_raw` | `sensor_msgs/Image` | Input image |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Live camera feed |
 
 **Publications**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/perception/board_geometry` | `BoardGeometry` | Board corners and transformation |
+| `/perception/board_geometry` | `chess_interfaces/BoardState` | 4 corners (TL/TR/BR/BL); `header.stamp` is the time of the last genuinely fresh detection, not the current publish — lets consumers detect staleness |
+| `/perception/board_debug` | `sensor_msgs/Image` | Annotated frame with corner markers |
 
 **Parameters**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `canny_threshold1` | int | 50 | Canny edge lower threshold |
-| `canny_threshold2` | int | 150 | Canny edge upper threshold |
-| `hough_threshold` | int | 100 | Hough line threshold |
+| `detection_scale` | float | 0.25 | Downscale factor for detection (full res only for the final corner coordinates) |
+| `detection_hz` | float | 2.0 | Detection tick rate |
+
+> New-frame corners are relabeled by nearest-neighbor match to the previous detection instead of a pure geometric heuristic every tick — prevents a near-symmetric board from flipping which corner is TL vs BL between frames (falls back to the geometric heuristic if the board apparently moved far, or on the first-ever detection).
 
 ---
 
 ### piece_detector_node
 
-**Purpose**: Detect chess pieces via occupancy + color classification and publish FEN. Uses game-state-assisted piece typing (subscribes to `/game_manager/board_fen` for authoritative board state).
+**Purpose**: Frame-diff change detection — NOT color/piece-type classification. Compares a warped "pre-move reference" capture against a fresh post-move capture and reports which squares' LAB color changed enough to flag as moved. `game_manager_node` matches the changed-squares set against its own legal-move list to determine which move was played; the authoritative FEN lives there, not in vision.
 
 | Property | Value |
 |----------|-------|
@@ -324,31 +331,32 @@ Angles calibrated on real hardware via `code/test_z_servo.py`'s interactive swee
 **Subscriptions**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/camera/image_raw` | `sensor_msgs/Image` | Live camera feed |
-| `/perception/board_geometry` | `BoardState` | Board corners (from board_detector) |
-| `/game_manager/board_fen` | `std_msgs/String` | Authoritative FEN for piece typing |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Live camera feed |
+| `/perception/board_geometry` | `chess_interfaces/BoardState` | Board corners (from board_detector_node) |
 
 **Publications**:
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/perception/board_state` | `BoardState` | Detected FEN + 64-element piece array |
-| `/perception/piece_debug` | `sensor_msgs/Image` | Annotated warped board (W/B overlays) |
-| `/perception/reference_status` | `std_msgs/String` | Reference baseline capture progress |
+| `/perception/changed_squares` | `std_msgs/String` | Comma-separated changed square names, e.g. `"e2,e4"` |
+| `/perception/piece_debug` | `sensor_msgs/Image` | Per-square diff heatmap overlay |
+| `/perception/reference_status` | `std_msgs/String` | Pre-move reference capture progress |
+| `/perception/square_scores` | `std_msgs/String` | JSON per-square raw diff scores (debug/tuning) |
 
 **Services**:
 | Service | Type | Description |
 |---------|------|-------------|
-| `/perception/capture_reference` | `Trigger` | Capture empty-board baseline (call before game) |
+| `/perception/capture_premove` | `Trigger` | Capture the current board as the pre-move reference. `game_manager_node` calls this automatically each turn. |
 
-**Parameters**:
+**Parameters** (live-reconfigurable via `SetParameters` — has `add_on_set_parameters_callback`):
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `occupancy_diff_threshold` | int | 25 | Pixel diff threshold for piece detection |
-| `white_piece_brightness` | float | 0.65 | Brightness percentile for white piece classification |
-| `reference_capture_count` | int | 5 | Frames to average for baseline |
-| `warp_size` | int | 400 | Warped board size in pixels |
-
-> **Pre-game setup**: Call `/perception/capture_reference` 5+ times with empty board before starting a game.
+| `diff_threshold` | float | 18.0 | Mean per-square LAB diff to flag as changed |
+| `premove_avg_count` | int | 1 | Frames to average into the reference. When > 1, `capture_premove` returns immediately and accumulates one frame per detection tick (non-blocking); progress on `/perception/reference_status` |
+| `global_shift_compensation` | float | 1.0 | Subtracts `median(scores) × factor` from all scores — cancels whole-camera vibration |
+| `clump_enable` | bool | false | Group adjacent flagged squares (perspective bleed) and keep only the top-scoring ones per group |
+| `clump_keep_per_group` | int | 1 | Squares kept per clump when `clump_enable` is set (castling needs ≥4) |
+| `warp_size` | int | 400 | Warped board side length in pixels |
+| `detection_hz` | float | 2.0 | Detection tick rate |
 
 ---
 
@@ -370,7 +378,7 @@ Angles calibrated on real hardware via `code/test_z_servo.py`'s interactive swee
 | Topic | Type | Description |
 |-------|------|-------------|
 | `/limit_switch/clock_hit` | `Bool` | Human pressed chess clock |
-| `/perception/board_state` | `BoardState` | Post-move detected FEN |
+| `/perception/changed_squares` | `String` | Comma-separated changed squares from piece_detector_node, matched against legal moves |
 | `/game_manager/clock_event` | `String` | FLAG_WHITE or FLAG_BLACK from chess_clock_node |
 | `/motion/done` | `Bool` | Motion planner move complete |
 

@@ -658,6 +658,9 @@ class HomingNode(Node):
         if msg.data:
             self.get_logger().warn('Emergency stop triggered!')
             self.emergency_stop = True
+        elif self.emergency_stop:
+            self.emergency_stop = False
+            self.get_logger().info('Emergency stop cleared')
 
 
 def main(args=None):

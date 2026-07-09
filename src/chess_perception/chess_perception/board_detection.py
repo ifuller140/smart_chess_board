@@ -10,6 +10,8 @@ Physical Setup:
 - Output: 480x480 orthographic image (60 pixels per square)
 """
 
+from itertools import permutations
+
 import numpy as np
 import cv2
 from typing import Optional, Tuple, List
@@ -69,26 +71,40 @@ class BoardDetector:
             [0, h - 1]    # Bottom-left
         ], dtype=np.float32)
     
-    def detect(self, image: np.ndarray) -> Optional[BoardGeometry]:
+    def detect(
+        self,
+        image: np.ndarray,
+        previous_corners: Optional[np.ndarray] = None,
+    ) -> Optional[BoardGeometry]:
         """
         Detect board in image.
-        
+
         Args:
             image: BGR image
-            
+            previous_corners: previously-labeled TL/TR/BR/BL corners (4x2), same
+                pixel space as `image`, if available. When given, the newly
+                detected corners are relabeled by nearest-neighbor match to
+                these instead of the raw geometric TL/TR/BR/BL heuristic —
+                the physical board doesn't move between frames, so anchoring
+                to the previous labeling prevents a near-symmetric board from
+                silently flipping which corner is which between detections
+                (which would transpose/mirror every downstream diff check).
+                Falls back to the geometric heuristic if the match is
+                implausibly far (board likely moved, or previous was stale).
+
         Returns:
             BoardGeometry or None if detection failed
         """
         # Try line-based detection first
-        corners = self._detect_by_lines(image)
-        
+        corners = self._detect_by_lines(image, previous_corners)
+
         # Fallback to contour detection
         if corners is None:
-            corners = self._detect_by_contour(image)
-        
+            corners = self._detect_by_contour(image, previous_corners)
+
         if corners is None:
             return None
-        
+
         # Compute homography
         H = cv2.getPerspectiveTransform(corners, self.dst_points)
         H_inv = cv2.getPerspectiveTransform(self.dst_points, corners)
@@ -113,7 +129,9 @@ class BoardDetector:
         """
         return cv2.warpPerspective(image, geometry.homography, geometry.output_size)
     
-    def _detect_by_lines(self, image: np.ndarray) -> Optional[np.ndarray]:
+    def _detect_by_lines(
+        self, image: np.ndarray, previous_corners: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
         """
         Detect board corners using Hough line detection.
         
@@ -163,11 +181,13 @@ class BoardDetector:
         
         if len(corners) != 4:
             return None
-        
+
         # Order corners: TL, TR, BR, BL
-        return self._order_corners(np.array(corners, dtype=np.float32))
-    
-    def _detect_by_contour(self, image: np.ndarray) -> Optional[np.ndarray]:
+        return self._order_corners(np.array(corners, dtype=np.float32), previous_corners)
+
+    def _detect_by_contour(
+        self, image: np.ndarray, previous_corners: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
         """
         Detect board using contour detection (fallback method).
         
@@ -203,7 +223,7 @@ class BoardDetector:
             return None
         
         corners = best_contour.reshape(4, 2).astype(np.float32)
-        return self._order_corners(corners)
+        return self._order_corners(corners, previous_corners)
     
     def _line_intersection(self, line1: Tuple[float, float], 
                            line2: Tuple[float, float]) -> Optional[Tuple[float, float]]:
@@ -225,23 +245,65 @@ class BoardDetector:
         except np.linalg.LinAlgError:
             return None
     
-    def _order_corners(self, corners: np.ndarray) -> np.ndarray:
+    # Max average per-corner displacement (relative to image diagonal) still
+    # trusted as "the same board, just jittered" when anchoring to a previous
+    # labeling. Above this, prefer the fresh geometric heuristic instead —
+    # guards against a stale/wrong previous reference locking in forever.
+    _MAX_TRUSTED_DRIFT_FRAC = 0.3
+
+    def _order_corners_geometric(self, corners: np.ndarray) -> np.ndarray:
         """
-        Order corners as: top-left, top-right, bottom-right, bottom-left.
+        Order corners as: top-left, top-right, bottom-right, bottom-left,
+        using pure geometry (sum/diff heuristic). No frame-to-frame memory —
+        a near-symmetric board can flip labels between calls; see
+        _order_corners() for the frame-anchored version used in practice.
         """
         rect = np.zeros((4, 2), dtype=np.float32)
-        
+
         # Sum of coordinates: TL has smallest, BR has largest
         s = corners.sum(axis=1)
         rect[0] = corners[np.argmin(s)]  # TL
         rect[2] = corners[np.argmax(s)]  # BR
-        
+
         # Difference: TR has smallest, BL has largest
         diff = np.diff(corners, axis=1).ravel()
         rect[1] = corners[np.argmin(diff)]  # TR
         rect[3] = corners[np.argmax(diff)]  # BL
-        
+
         return rect
+
+    def _order_corners(
+        self, corners: np.ndarray, previous: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Order corners as: top-left, top-right, bottom-right, bottom-left.
+
+        Anchors to `previous` (if given) via nearest-neighbor permutation
+        matching so labels stay consistent across frames — see detect()'s
+        docstring for why. Falls back to the geometric heuristic when there's
+        no previous reference, or when the best match to it is implausibly
+        far away (board likely moved / previous was stale).
+        """
+        geometric = self._order_corners_geometric(corners)
+        if previous is None:
+            return geometric
+
+        best_perm = None
+        best_cost = None
+        for perm in permutations(range(4)):
+            candidate = corners[list(perm)]
+            cost = float(np.sum(np.linalg.norm(candidate - previous, axis=1)))
+            if best_cost is None or cost < best_cost:
+                best_cost = cost
+                best_perm = perm
+
+        diagonal = float(np.linalg.norm(
+            corners.max(axis=0) - corners.min(axis=0)))
+        avg_corner_drift = best_cost / 4.0 if best_cost is not None else float('inf')
+        if avg_corner_drift <= self._MAX_TRUSTED_DRIFT_FRAC * diagonal:
+            return corners[list(best_perm)].astype(np.float32)
+
+        return geometric
     
     def draw_debug(self, image: np.ndarray, geometry: Optional[BoardGeometry]) -> np.ndarray:
         """

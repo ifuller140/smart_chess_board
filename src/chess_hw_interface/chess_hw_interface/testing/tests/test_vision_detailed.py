@@ -2,12 +2,18 @@
 """
 Granular Vision Pipeline Tests — individual validation of every CV stage.
 
-Five test subcategories (all under vision/):
+Three test subcategories (all under vision/):
   vision/corners   — detect and annotate board corners (colored dots + lines)
   vision/board     — perspective warp + labeled 8×8 grid overlay
-  vision/pieces    — color piece detection overlay (W=green, B=red per square)
   vision/squares   — warp + all 64 square labels + interactive highlight mode
-  vision/fen       — live board display: annotated image + ASCII board view in terminal
+
+(vision/pieces and vision/fen were removed — they tested a color-threshold
+per-square piece classification + full-board FEN reconstruction pipeline
+that piece_detector_node no longer implements. The current architecture is
+frame-diff based: it flags which squares changed between two captures
+rather than classifying piece color/type from vision at all — see
+piece_detector_node.py's module docstring. There is no vision-side FEN to
+test; the authoritative FEN comes from game_manager_node's own board model.)
 
 All tests:
   - Require camera_node, board_detector_node, piece_detector_node to be running
@@ -32,16 +38,14 @@ Remote viewing over SSH:
 import os
 import time
 import threading
-from typing import Optional, List, Tuple
+from typing import Optional
 
-import chess
 import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from chess_interfaces.msg import BoardState
@@ -67,17 +71,10 @@ CORNER_COLORS = [
 ]
 CORNER_LABELS = ['TL', 'TR', 'BR', 'BL']
 
-WHITE_PIECE_COLOR  = (  0, 255,  0)   # Green
-BLACK_PIECE_COLOR  = (  0,  0, 255)   # Red
 GRID_COLOR         = (200, 200, 200)   # Light gray
 HIGHLIGHT_COLOR    = (  0, 215, 255)   # Gold
 EMPTY_SQ_DARK      = ( 90,  60,  30)   # Dark square (BGR)
 EMPTY_SQ_LIGHT     = (230, 200, 160)   # Light square (BGR)
-
-PIECE_LETTERS = {
-    chess.PAWN: 'P', chess.KNIGHT: 'N', chess.BISHOP: 'B',
-    chess.ROOK: 'R', chess.QUEEN: 'Q', chess.KING: 'K',
-}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,32 +125,24 @@ class VisionDetailNode(Node):
         # Latest data
         self.latest_raw:     Optional[np.ndarray] = None
         self.latest_corners: Optional[np.ndarray] = None  # shape (4,2)
-        self.latest_pieces:  Optional[List[int]]  = None  # 64 ints
-        self.latest_fen:     str                  = ''
         self.raw_received    = False
         self.corners_received = False
-        self.board_received   = False
 
         # Subscribers
         self.create_subscription(
             Image, '/camera/image_raw', self._on_raw, 10)
         self.create_subscription(
             BoardState, '/perception/board_geometry', self._on_geometry, 10)
-        self.create_subscription(
-            BoardState, '/perception/board_state', self._on_board_state, 10)
 
         # Debug image publishers (one per test)
         self._pubs = {
             'corners': self.create_publisher(Image, '/chess_vision/corners/debug', 10),
             'board':   self.create_publisher(Image, '/chess_vision/board/debug',   10),
-            'pieces':  self.create_publisher(Image, '/chess_vision/pieces/debug',  10),
             'squares': self.create_publisher(Image, '/chess_vision/squares/debug', 10),
-            'fen':     self.create_publisher(Image, '/chess_vision/fen/debug',     10),
         }
 
         # Service clients
         self._cap_client = self.create_client(Trigger, '/camera/capture')
-        self._ref_client = self.create_client(Trigger, '/perception/capture_reference')
 
     def _on_raw(self, msg: Image):
         with self._lock:
@@ -169,12 +158,6 @@ class VisionDetailNode(Node):
             with self._lock:
                 self.latest_corners = pts
                 self.corners_received = True
-
-    def _on_board_state(self, msg: BoardState):
-        with self._lock:
-            self.latest_fen    = msg.fen
-            self.latest_pieces = list(msg.pieces)
-            self.board_received = True
 
     def publish_debug(self, channel: str, image: np.ndarray):
         msg = Image()
@@ -198,25 +181,12 @@ class VisionDetailNode(Node):
             return bool(future.result().success)
         return False
 
-    def capture_reference(self) -> bool:
-        if not self._ref_client.wait_for_service(timeout_sec=4.0):
-            return False
-        future = self._ref_client.call_async(Trigger.Request())
-        deadline = time.time() + 10.0
-        while not future.done() and time.time() < deadline:
-            time.sleep(0.1)
-        if future.done() and future.result():
-            return bool(future.result().success)
-        return False
-
     def get_snapshot(self):
         """Return a thread-safe snapshot of all latest data."""
         with self._lock:
             return (
                 self.latest_raw.copy()     if self.latest_raw is not None else None,
                 self.latest_corners.copy() if self.latest_corners is not None else None,
-                list(self.latest_pieces)   if self.latest_pieces is not None else None,
-                self.latest_fen,
             )
 
 
@@ -338,12 +308,6 @@ class VisionDetailBase(HardwareTest):
             time.sleep(0.1)
         return self._node.corners_received
 
-    def _wait_for_board(self, timeout=6.0) -> bool:
-        deadline = time.time() + timeout
-        while not self._node.board_received and time.time() < deadline:
-            time.sleep(0.1)
-        return self._node.board_received
-
     def _publish_and_save(self, channel: str, image: np.ndarray) -> str:
         # Display directly on full-screen monitor using OpenCV highgui
         cv2.imshow(f'Vision Debug: {channel}', image)
@@ -395,7 +359,7 @@ class CameraCornerDetectionTest(VisionDetailBase):
             print('  ✗ No board corners detected. Ensure board_detector_node is running and board is visible.')
             return False
 
-        raw, corners, _, _ = self._node.get_snapshot()
+        raw, corners = self._node.get_snapshot()
         if raw is None or corners is None:
             print('  ✗ Missing image data')
             return False
@@ -476,7 +440,7 @@ class BoardDetectionTest(VisionDetailBase):
             print('  ✗ No corners. Run corner test first.')
             return False
 
-        raw, corners, _, _ = self._node.get_snapshot()
+        raw, corners = self._node.get_snapshot()
         if raw is None or corners is None:
             return False
 
@@ -554,135 +518,6 @@ class BoardDetectionTest(VisionDetailBase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TEST 3: Color Piece Detection
-# ═════════════════════════════════════════════════════════════════════════════
-
-class ColorPieceDetectionTest(VisionDetailBase):
-    """
-    Visualize piece detection overlay on warped board.
-
-    Per occupied square:
-      • Green border + "W" label = detected white piece
-      • Red border + "B" label   = detected black piece
-      • Square name shown inside border
-
-    Also prints detection summary table to terminal.
-    """
-
-    @property
-    def name(self) -> str:        return 'Color Piece Detection'
-    @property
-    def description(self) -> str: return 'Overlay detected piece colors (W=green, B=red) on warped board'
-    @property
-    def _test_key(self) -> str:   return 'pieces'
-
-    def get_steps(self):
-        return [
-            TestStep(name='Capture Reference', display_text='REF CAP', action=self._ref,
-                     wait_for_input=True, input_type='clock', timeout_seconds=30.0,
-                     success_message='REF OK', failure_message='REF FAIL'),
-            TestStep(name='Detect Pieces',     display_text='PIECES',  action=self._run,
-                     wait_for_input=True, input_type='clock', timeout_seconds=30.0,
-                     success_message='OK', failure_message='FAIL'),
-        ]
-
-    def _ref(self) -> bool:
-        print('  Remove ALL pieces from the board.')
-        print('  Press clock to capture empty-board reference baseline...')
-        ok = self._node.capture_reference()
-        if ok:
-            print('  ✓ Reference captured')
-        else:
-            print('  ✗ Reference capture failed — piece detection may be inaccurate')
-        return True  # Non-fatal — allow user to continue
-
-    def _run(self) -> bool:
-        _print_remote_viewing_hint('pieces')
-        print('  Place pieces on the board (any setup).')
-        print('  Press clock to capture and overlay piece detection...')
-
-        self._node.board_received = False
-        self._node.capture()
-        if not self._wait_for_board(6.0):
-            print('  ✗ No board_state received. Is piece_detector_node running?')
-            return False
-
-        raw, corners, pieces, fen = self._node.get_snapshot()
-        if raw is None or corners is None or pieces is None:
-            print('  ✗ Missing data')
-            return False
-
-        warped = _warp_perspective(raw, corners)
-        if warped is None:
-            print('  ✗ Warp failed')
-            return False
-
-        annotated = self._annotate_pieces(warped.copy(), pieces)
-        path = self._publish_and_save('pieces', annotated)
-
-        # Terminal table
-        self._print_piece_table(pieces)
-        print(f'  → Image saved: {path}')
-        print(f'  FEN: {fen}')
-        return True
-
-    def _annotate_pieces(self, img: np.ndarray, pieces: List[int]) -> np.ndarray:
-        """Draw colored borders on every occupied square."""
-        # Light/dark tint
-        for row in range(8):
-            for col in range(8):
-                is_light = (row + col) % 2 == 0
-                bg = EMPTY_SQ_LIGHT if is_light else EMPTY_SQ_DARK
-                x1, y1 = col * SQ_PX, row * SQ_PX
-                cv2.rectangle(img, (x1, y1), (x1 + SQ_PX, y1 + SQ_PX), bg, -1)
-
-        _draw_grid(img, GRID_COLOR, 1)
-
-        for arr_idx, piece_val in enumerate(pieces):
-            row = arr_idx // 8
-            col = arr_idx % 8
-            x1, y1 = col * SQ_PX, row * SQ_PX
-            x2, y2 = x1 + SQ_PX, y1 + SQ_PX
-            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-            sq_lbl = _square_name(row, col)
-
-            if piece_val > 0:  # White piece
-                cv2.rectangle(img, (x1 + 3, y1 + 3), (x2 - 3, y2 - 3),
-                              WHITE_PIECE_COLOR, 3)
-                _label(img, 'W', (x1 + 5, y1 + 20), WHITE_PIECE_COLOR, scale=0.7, thickness=2)
-                _label(img, sq_lbl, (x1 + 5, y2 - 5), WHITE_PIECE_COLOR, scale=0.4)
-
-            elif piece_val < 0:  # Black piece
-                cv2.rectangle(img, (x1 + 3, y1 + 3), (x2 - 3, y2 - 3),
-                              BLACK_PIECE_COLOR, 3)
-                _label(img, 'B', (x1 + 5, y1 + 20), BLACK_PIECE_COLOR, scale=0.7, thickness=2)
-                _label(img, sq_lbl, (x1 + 5, y2 - 5), BLACK_PIECE_COLOR, scale=0.4)
-
-        # Legend
-        _label(img, '■ = White', (5, WARP_SIZE - 24), WHITE_PIECE_COLOR, scale=0.45)
-        _label(img, '■ = Black', (5, WARP_SIZE - 8),  BLACK_PIECE_COLOR, scale=0.45)
-        w_cnt = sum(1 for p in pieces if p > 0)
-        b_cnt = sum(1 for p in pieces if p < 0)
-        _label(img, f'W:{w_cnt}  B:{b_cnt}  Total:{w_cnt + b_cnt}',
-               (WARP_SIZE // 2 - 40, WARP_SIZE - 8), (255, 255, 255), scale=0.45)
-
-        return img
-
-    def _print_piece_table(self, pieces: List[int]):
-        print()
-        print('  ┌───────────────────────────────────────────────┐')
-        print('  │ Detected Pieces                               │')
-        print('  ├─────────┬──────────────────────────────────── ┤')
-        whites = [(i, p) for i, p in enumerate(pieces) if p > 0]
-        blacks = [(i, p) for i, p in enumerate(pieces) if p < 0]
-        print(f'  │ White [{len(whites):2d}] │ ' +
-              ' '.join(_square_name(i//8, i%8) for i, _ in whites[:12]))
-        print(f'  │ Black [{len(blacks):2d}] │ ' +
-              ' '.join(_square_name(i//8, i%8) for i, _ in blacks[:12]))
-        print('  └─────────┴──────────────────────────────────────┘')
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # TEST 4: Square Mapping
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -719,7 +554,7 @@ class SquareMappingTest(VisionDetailBase):
             print('  ✗ No corners detected')
             return False
 
-        raw, corners, _, _ = self._node.get_snapshot()
+        raw, corners = self._node.get_snapshot()
         if raw is None or corners is None:
             return False
 
@@ -759,7 +594,7 @@ class SquareMappingTest(VisionDetailBase):
 
             self._node.capture()
             time.sleep(0.5)
-            raw, corners, _, _ = self._node.get_snapshot()
+            raw, corners = self._node.get_snapshot()
 
             if raw is None or corners is None:
                 print('  [WARN] No image/corners')
@@ -819,248 +654,3 @@ class SquareMappingTest(VisionDetailBase):
         return img
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# TEST 5: FEN Board Display
-# ═════════════════════════════════════════════════════════════════════════════
-
-class FENBoardDisplayTest(VisionDetailBase):
-    """
-    Live board display combining annotated camera image + ASCII chess board.
-
-    Left panel  — warped board with piece detection overlays
-    Right panel — rendered chess board image with piece letters
-    Terminal    — ASCII board with Unicode chess symbols + statistics
-
-    Loop: capture → annotate → publish → display. Press Enter to re-capture.
-    Type 'q' to exit.
-    """
-
-    @property
-    def name(self) -> str:        return 'FEN Board Display'
-    @property
-    def description(self) -> str: return 'Live board position display: image + ASCII board + statistics'
-    @property
-    def _test_key(self) -> str:   return 'fen'
-
-    def get_steps(self):
-        return [
-            TestStep(name='Capture Reference', display_text='REF',  action=self._ref,
-                     wait_for_input=True, input_type='clock', timeout_seconds=30.0,
-                     success_message='REF OK', failure_message='REF SKIP'),
-            TestStep(name='Live Board View',   display_text='LIVE', action=self._run_live,
-                     wait_for_input=False,
-                     success_message='DONE', failure_message='DONE'),
-        ]
-
-    def _ref(self) -> bool:
-        print('  Remove ALL pieces. Press clock to capture empty-board reference...')
-        self._node.capture_reference()
-        print('  ✓ Reference captured (or skipped)')
-        return True
-
-    def _run_live(self) -> bool:
-        _print_remote_viewing_hint('fen')
-        print()
-        print('  ═══════════════════════════════════════════════════════')
-        print('  LIVE BOARD DISPLAY  —  Place pieces and press Enter to refresh')
-        print('  Type "q" then Enter to quit')
-        print('  ═══════════════════════════════════════════════════════')
-        print()
-
-        while True:
-            try:
-                cmd = input('  [Enter=refresh / q=quit] > ').strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                break
-            if cmd == 'q':
-                break
-
-            # Capture fresh frame
-            self._node.board_received = False
-            self._node.capture()
-            if not self._wait_for_board(6.0):
-                print('  [WARN] No board state. Showing last known.')
-            if not self._wait_for_corners(2.0):
-                print('  [WARN] No corners received.')
-
-            raw, corners, pieces, fen = self._node.get_snapshot()
-
-            # ── Terminal display ────────────────────────────────────────
-            print()
-            if fen:
-                self._print_ascii_board(fen)
-                self._print_stats(pieces, fen)
-            else:
-                print('  [No FEN received yet]')
-            print()
-
-            # ── Image display ────────────────────────────────────────────
-            if raw is not None and corners is not None:
-                warped = _warp_perspective(raw, corners)
-                if warped is not None:
-                    left_panel  = self._annotate_detection_panel(warped.copy(), pieces)
-                    right_panel = self._render_board_image(fen)
-                    combined    = self._combine_panels(left_panel, right_panel, fen)
-                    path = self._publish_and_save('fen', combined)
-                    print(f'  → Annotated image saved: {path}')
-                    print(f'  → Published to /chess_vision/fen/debug')
-
-        return True
-
-    # ── Panel builders ─────────────────────────────────────────────────────
-
-    def _annotate_detection_panel(
-        self, img: np.ndarray, pieces: Optional[List[int]]
-    ) -> np.ndarray:
-        """Left panel: warped board with piece color overlays."""
-        for row in range(8):
-            for col in range(8):
-                is_light = (row + col) % 2 == 0
-                bg       = EMPTY_SQ_LIGHT if is_light else EMPTY_SQ_DARK
-                cv2.rectangle(img,
-                              (col * SQ_PX, row * SQ_PX),
-                              ((col + 1) * SQ_PX, (row + 1) * SQ_PX),
-                              bg, -1)
-
-        _draw_grid(img, GRID_COLOR, 1)
-
-        if pieces:
-            for idx, pval in enumerate(pieces):
-                r, c = idx // 8, idx % 8
-                if pval != 0:
-                    color = WHITE_PIECE_COLOR if pval > 0 else BLACK_PIECE_COLOR
-                    x1, y1 = c * SQ_PX + 3, r * SQ_PX + 3
-                    x2, y2 = (c + 1) * SQ_PX - 3, (r + 1) * SQ_PX - 3
-                    cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)
-                    _label(img,
-                           'W' if pval > 0 else 'B',
-                           (x1 + 2, y1 + 18), color, scale=0.55, thickness=2)
-
-        _label(img, 'DETECTED', (4, 18), (0, 255, 255), scale=0.55, thickness=2)
-        return img
-
-    def _render_board_image(self, fen: str) -> np.ndarray:
-        """Right panel: rendered chess board with piece letters."""
-        size  = WARP_SIZE
-        sq    = size // 8
-        board_img = np.zeros((size, size, 3), dtype=np.uint8)
-
-        try:
-            board = chess.Board(fen)
-        except Exception:
-            board = chess.Board()
-
-        for row in range(8):
-            for col in range(8):
-                rank_idx = 7 - row   # row 0 = rank 8
-                file_idx = col
-                sq_chess = chess.square(file_idx, rank_idx)
-                piece    = board.piece_at(sq_chess)
-
-                is_light = (row + col) % 2 == 0
-                bg       = EMPTY_SQ_LIGHT if is_light else EMPTY_SQ_DARK
-                x1, y1   = col * sq, row * sq
-                cv2.rectangle(board_img, (x1, y1), (x1 + sq, y1 + sq), bg, -1)
-
-                if piece:
-                    letter = piece.symbol().upper()
-                    is_wp  = piece.color == chess.WHITE
-                    pc_col = (255, 255, 255) if is_wp else (30, 30, 30)
-                    shadow = (80, 80, 80)    if is_wp else (220, 220, 220)
-
-                    cx = x1 + sq // 2 - 8
-                    cy = y1 + sq // 2 + 8
-
-                    # Shadow
-                    cv2.putText(board_img, letter, (cx + 1, cy + 1),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, shadow, 3, cv2.LINE_AA)
-                    # Letter
-                    cv2.putText(board_img, letter, (cx, cy),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, pc_col, 2, cv2.LINE_AA)
-
-        _draw_grid(board_img, (100, 100, 100), 1)
-
-        # File + rank labels
-        for col in range(8):
-            lbl = chr(ord('a') + col)
-            _label(board_img, lbl,
-                   (col * sq + sq // 2 - 5, size - 4),
-                   (255, 215, 0), scale=0.38, bg=False)
-        for row in range(8):
-            _label(board_img, str(8 - row), (2, row * sq + sq // 2 + 5),
-                   (255, 215, 0), scale=0.38, bg=False)
-
-        _label(board_img, 'BOARD VIEW', (4, 18), (0, 215, 255),
-               scale=0.55, thickness=2)
-        return board_img
-
-    def _combine_panels(
-        self, left: np.ndarray, right: np.ndarray, fen: str
-    ) -> np.ndarray:
-        """Combine left + right panels with FEN text banner."""
-        combined = np.hstack([left, right])
-        banner_h = 36
-        banner   = np.zeros((banner_h, combined.shape[1], 3), dtype=np.uint8)
-        _label(banner,
-               f'FEN: {fen[:70]}{"..." if len(fen) > 70 else ""}',
-               (6, banner_h - 8), (200, 200, 200), scale=0.42, bg=False)
-        return np.vstack([banner, combined])
-
-    # ── Terminal helpers ────────────────────────────────────────────────────
-
-    def _print_ascii_board(self, fen: str):
-        """Print a Unicode chess board to the terminal."""
-        try:
-            board = chess.Board(fen)
-        except Exception:
-            print(f'  [Invalid FEN: {fen}]')
-            return
-
-        p_unicode = {
-            'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙',
-            'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟',
-        }
-
-        print('       a    b    c    d    e    f    g    h')
-        print('    ╔════╦════╦════╦════╦════╦════╦════╦════╗')
-        for rank in range(7, -1, -1):
-            row_str = f' {rank + 1}  ║'
-            for file in range(8):
-                sq    = chess.square(file, rank)
-                piece = board.piece_at(sq)
-                sym   = p_unicode.get(piece.symbol(), '·') if piece else '·'
-                row_str += f' {sym}  ║'
-            print(row_str)
-            if rank > 0:
-                print('    ╠════╬════╬════╬════╬════╬════╬════╬════╣')
-        print('    ╚════╩════╩════╩════╩════╩════╩════╩════╝')
-        print('       a    b    c    d    e    f    g    h')
-
-    def _print_stats(self, pieces: Optional[List[int]], fen: str):
-        """Print piece count statistics and comparison."""
-        try:
-            board = chess.Board(fen)
-        except Exception:
-            return
-
-        auth_white = len(board.pieces(chess.PAWN, chess.WHITE)) + \
-                     len(board.pieces(chess.KNIGHT, chess.WHITE)) + \
-                     len(board.pieces(chess.BISHOP, chess.WHITE)) + \
-                     len(board.pieces(chess.ROOK, chess.WHITE)) + \
-                     len(board.pieces(chess.QUEEN, chess.WHITE)) + \
-                     len(board.pieces(chess.KING, chess.WHITE))
-        auth_black = len([sq for sq in chess.SQUARES if board.piece_at(sq)
-                         and board.piece_at(sq).color == chess.BLACK])
-
-        det_white = sum(1 for p in pieces if p > 0) if pieces else '?'
-        det_black = sum(1 for p in pieces if p < 0) if pieces else '?'
-
-        print(f'  ┌────────────────────────────────────────┐')
-        print(f'  │ Piece Counts                           │')
-        print(f'  ├──────────────────┬──────────┬──────────┤')
-        print(f'  │ Color            │ Detected │ Expected │')
-        print(f'  ├──────────────────┼──────────┼──────────┤')
-        print(f'  │ White (♙)       │{det_white:^10}│{auth_white:^10}│')
-        print(f'  │ Black (♟)       │{det_black:^10}│{auth_black:^10}│')
-        print(f'  └──────────────────┴──────────┴──────────┘')
-        print(f'  Turn: {"White ♙" if board.turn == chess.WHITE else "Black ♟"}')

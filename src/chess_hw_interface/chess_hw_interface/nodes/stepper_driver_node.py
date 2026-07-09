@@ -303,6 +303,9 @@ class StepperDriverNode(Node):
             self.emergency_stop = True
             self.get_logger().warn('EMERGENCY STOP triggered')
             self.stop_motors()
+        elif self.emergency_stop:
+            self.emergency_stop = False
+            self.get_logger().info('Emergency stop cleared')
 
     # ------------------------------------------------------------------
     # VELOCITY MODE — joystick control

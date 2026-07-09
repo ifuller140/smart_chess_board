@@ -71,6 +71,9 @@ class ClockServoNode(Node):
             self.emergency_stop = True
             self.get_logger().warn('EMERGENCY STOP: disabling clock servo')
             self.pi.set_servo_pulsewidth(self.servo_pin, 0)  # stop pulses
+        elif self.emergency_stop:
+            self.emergency_stop = False
+            self.get_logger().info('Emergency stop cleared')
 
     def hit_callback(self, request, response):
         if self.emergency_stop:

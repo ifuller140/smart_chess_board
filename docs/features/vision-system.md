@@ -4,7 +4,9 @@
 
 ## Overview
 
-The vision pipeline converts raw camera frames into a FEN string representing the current board state. It runs entirely on the Raspberry Pi and exposes two browser-accessible web interfaces.
+The vision pipeline does **not** reconstruct a full board position from color/piece-type classification. Instead it detects the board's 4 corners, then — on demand — diffs a "pre-move reference" warp against a fresh capture to report *which squares changed* between the two. `game_manager_node` combines that changed-squares list with the set of legal moves from its own `python-chess` board model to figure out which move was actually played, and that model (not vision) is the authoritative source of the game's FEN. This keeps vision's job simple (change detection) and pushes all chess-rules knowledge into `chess_logic`, where it already has to live anyway.
+
+It runs entirely on the Raspberry Pi and exposes two browser-accessible web interfaces (the FEN visualizer, and a raw MJPEG stream).
 
 ```
 ┌─────────────────┐
@@ -20,8 +22,8 @@ The vision pipeline converts raw camera frames into a FEN string representing th
          │
          ▼
 ┌─────────────────┐
-│ Detect Corners  │  ← Find 4 board corners (auto or manual)
-│ (a1, a8, h8, h1)│
+│ Detect Corners  │  ← Find 4 board corners (TL/TR/BR/BL), anchored to the
+│                 │    previous frame's labeling to avoid flip-flopping
 └────────┬────────┘
          │
          ▼
@@ -38,13 +40,15 @@ The vision pipeline converts raw camera frames into a FEN string representing th
          │
          ▼
 ┌─────────────────┐
-│ Piece Detection │  ← Color thresholding per square
+│ Per-square LAB  │  ← Diff current warp against the pre-move reference warp;
+│ diff vs. ref    │    squares above diff_threshold are "changed"
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ FEN Output      │  ← Published on /perception/board_state
-└─────────────────┘
+│ Changed Squares │  ← Published on /perception/changed_squares (e.g. "e2,e4").
+│                 │    game_manager_node matches this against legal moves —
+└─────────────────┘    FEN itself comes from its board model, not vision.
 ```
 
 ---
@@ -55,9 +59,9 @@ The vision pipeline converts raw camera frames into a FEN string representing th
 
 | Node | Topic/Service | Purpose |
 |------|--------------|---------|
-| `camera_node` | pub `/camera/image_raw` | Captures frames (PiCamera2 or V4L2) |
-| `board_detector_node` | pub `/perception/board_debug` | Finds board corners, computes warp |
-| `piece_detector_node` | pub `/perception/board_state` | Color-thresholds squares → FEN string |
+| `camera_node` | pub `/camera/image_raw`, `/camera/image_raw/compressed` | Captures frames. Fallback backend (`use_camera_ros:=False`); the default is the external `camera_ros` package, launched separately — see below. |
+| `board_detector_node` | pub `/perception/board_geometry`, `/perception/board_debug` | Finds board corners, publishes their pixel coordinates |
+| `piece_detector_node` | pub `/perception/changed_squares`, srv `/perception/capture_premove` | Frame-diff change detection against a pre-move reference |
 
 ### Launching the Stack
 
@@ -85,14 +89,19 @@ Wait for: `Camera node ready (backend=picamera2, 1280x720 @ 5.0fps)`
 ```bash
 # Verify stack is publishing
 ros2 topic list | grep perception
-ros2 topic hz /perception/board_state     # should be ~5 Hz
+ros2 topic hz /perception/board_geometry  # should be ~2 Hz (detection_hz)
 ros2 topic hz /camera/image_raw           # should be ~5 Hz
 
-# Echo live FEN
-ros2 topic echo /perception/board_state --field fen
+# Echo detected corners (header.stamp = time of last FRESH detection, not
+# this publish — compare against now() to check staleness)
+ros2 topic echo /perception/board_geometry
 
-# Capture empty-board reference (do BEFORE placing pieces)
-ros2 service call /perception/capture_reference std_srvs/srv/Trigger {}
+# Capture the current board as the pre-move reference (call before a player
+# moves; game_manager_node normally does this automatically each turn)
+ros2 service call /perception/capture_premove std_srvs/srv/Trigger {}
+
+# After a move + a fresh /camera/capture, watch what changed
+ros2 topic echo /perception/changed_squares
 ```
 
 ---
@@ -101,7 +110,7 @@ ros2 service call /perception/capture_reference std_srvs/srv/Trigger {}
 
 ### FEN Visualizer — Port 5000
 
-A Flask web app that subscribes to `/perception/board_state` and renders a live chess board in the browser.
+A Flask web app that subscribes to `/game_manager/board_fen` (the authoritative FEN from `game_manager_node`'s board model) plus `/perception/changed_squares`, `/perception/square_scores`, and `/perception/reference_status` for vision debug context, and renders a live chess board in the browser.
 
 **Start the visualizer (requires perception stack running):**
 
@@ -145,7 +154,7 @@ curl -X POST http://localhost:5000/api/fen \
 | Indicator | Meaning |
 |-----------|---------|
 | Green dot "Live ✓" | FEN received in last 3 seconds |
-| Yellow "Stale (Xs)" | No update 3–10s (board not detected?) |
+| Yellow "Stale (Xs)" | No update 3–10s (no move recently, or game_manager_node down) |
 | Red "No data" | Nothing received in 10+ seconds |
 | `Valid` green pill | FEN parses as a legal position |
 | `Invalid` red pill | FEN string is malformed |
@@ -154,10 +163,10 @@ curl -X POST http://localhost:5000/api/fen \
 
 | What you see | Likely cause |
 |-------------|-------------|
-| Status: "No data" | Perception stack not running or topic name wrong |
-| FEN Invalid (red pill) | `piece_detector_node` producing garbled FEN |
-| Board orientation flipped | Corner ordering wrong in `board_detector` |
-| Pieces on wrong squares | Board warp size mismatch (400 vs 480px) |
+| Status: "No data" | `game_manager_node` not running, or `/game_manager/board_fen` never published |
+| No changed-squares after a move | `piece_detector_node` down, no pre-move reference captured, or `diff_threshold` too high |
+| Board orientation flipped | Corner ordering wrong in `board_detector_node` — check `/perception/board_geometry` |
+| False changed-squares every tick | Camera vibration/lighting drift — tune `global_shift_compensation` |
 
 ---
 
@@ -220,12 +229,7 @@ Outputs `calibration.npz` with the camera matrix and distortion coefficients.
 
 ### Step 3: Board Corner Calibration
 
-The `board_detector_node` handles this automatically at startup. If auto-detection fails, it falls back to manual corner selection (click the 4 corners in the visualizer).
-
-```bash
-# Re-run corner detection after camera adjustment
-ros2 service call /perception/recalibrate_corners std_srvs/srv/Trigger {}
-```
+`board_detector_node` detects corners continuously (`detection_hz`, default 2Hz) — there's no separate manual calibration step or service call. If the camera or board moves, corner detection just picks up the new geometry on its own next successful detection (anchored to the previous detection's labeling — see the Overview diagram — so labels stay stable across the transition). If detection stops finding the board at all (occlusion, bad lighting), check `/perception/board_debug` for what it's seeing.
 
 ### Step 4: Verify
 
@@ -291,16 +295,19 @@ source /opt/ros/humble/setup.bash && source install/setup.bash
 
 python3 -m chess_hw_interface.testing.test_runner --test vision_corners
 python3 -m chess_hw_interface.testing.test_runner --test vision_board
-python3 -m chess_hw_interface.testing.test_runner --test vision_pieces
 python3 -m chess_hw_interface.testing.test_runner --test vision_squares
-python3 -m chess_hw_interface.testing.test_runner --test vision_fen
+python3 -m chess_hw_interface.testing.test_runner --category vision --subtest full
 ```
 
 Or use `run_hw_test.sh` from the project root:
 
 ```bash
-./run_hw_test.sh --test vision_fen
+./run_hw_test.sh --test vision_board
 ```
+
+(`vision_pieces`/`vision_fen` — color piece-classification and full-board FEN
+rendering — were removed along with the pipeline stage they tested; see the
+Overview above for why vision doesn't do that anymore.)
 
 ---
 
@@ -312,9 +319,9 @@ Or use `run_hw_test.sh` from the project root:
 | `picamera2` import error | Library not installed | `sudo apt install python3-picamera2 libcamera-ipa` |
 | Board warp skewed | Wrong corner order | Re-run corner calibration |
 | Uneven lighting / shadows | Ambient light | Add diffuse overhead light source |
-| Grid misaligned | Camera moved | Re-calibrate homography |
+| Grid misaligned | Camera moved | Corner detection re-anchors automatically on its next successful detection |
 | Can't see all 64 squares | Camera too close | Increase height or use wider lens |
-| FEN always starting pos | `piece_detector` fallback | Check `_build_fen` reference logic |
+| No changed-squares ever reported | No pre-move reference captured yet | Call `/perception/capture_premove`, or check `/perception/reference_status` |
 | Port 5000 refused | Flask not installed | `pip3 install flask` |
 | Port 8080 refused | `camera_stream_server.py` not running | Start stream server manually |
 

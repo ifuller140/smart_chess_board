@@ -14,7 +14,11 @@ If picamera2 fails with 'No module named libcamera', install it:
   sudo bash code/install_libcamera_python.sh
 
 Published Topics:
-  /camera/image_raw  (sensor_msgs/Image) — live camera feed at ~5fps
+  /camera/image_raw             (sensor_msgs/Image)           — live camera feed at ~5fps
+  /camera/image_raw/compressed  (sensor_msgs/CompressedImage) — JPEG-encoded, same rate.
+    board_detector_node/piece_detector_node only subscribe to the compressed
+    topic (matching the camera_ros backend's naming) — this fallback backend
+    must publish it too or perception silently receives zero frames.
 
 Services:
   /camera/capture    (std_srvs/Trigger)  — capture and publish a fresh frame
@@ -36,7 +40,7 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from std_srvs.srv import Trigger
 
 try:
@@ -57,6 +61,7 @@ class CameraNode(Node):
         self.declare_parameter('height', 1232)  # full-sensor 2x2-binned height
         self.declare_parameter('fps', 5.0)
         self.declare_parameter('calibration_file', '')
+        self.declare_parameter('jpeg_quality', 80)
 
         self._use_picam = self.get_parameter('use_picamera2').value
         self._camera_id = self.get_parameter('camera_id').value
@@ -64,6 +69,7 @@ class CameraNode(Node):
         self._height    = self.get_parameter('height').value
         self._fps       = float(self.get_parameter('fps').value)
         self._cal_file  = self.get_parameter('calibration_file').value
+        self._jpeg_quality = int(self.get_parameter('jpeg_quality').value)
 
         self._camera_matrix: Optional[np.ndarray] = None
         self._dist_coeffs:   Optional[np.ndarray] = None
@@ -75,6 +81,8 @@ class CameraNode(Node):
         self._init_camera()
 
         self._image_pub = self.create_publisher(Image, '/camera/image_raw', 10)
+        self._compressed_pub = self.create_publisher(
+            CompressedImage, '/camera/image_raw/compressed', 10)
         self.create_service(Trigger, '/camera/capture', self._capture_cb)
 
         period = 1.0 / max(self._fps, 0.5)
@@ -273,8 +281,10 @@ class CameraNode(Node):
 
     def _publish_frame(self, frame: np.ndarray):
         corrected = self._undistort(frame)
+        stamp = self.get_clock().now().to_msg()
+
         msg = Image()
-        msg.header.stamp    = self.get_clock().now().to_msg()
+        msg.header.stamp    = stamp
         msg.header.frame_id = 'camera_frame'
         msg.height          = corrected.shape[0]
         msg.width           = corrected.shape[1]
@@ -283,6 +293,19 @@ class CameraNode(Node):
         msg.step            = corrected.shape[1] * 3
         msg.data            = corrected.tobytes()
         self._image_pub.publish(msg)
+
+        # board_detector_node/piece_detector_node only subscribe to the
+        # compressed topic (matching the camera_ros backend) — publish it
+        # here too so this fallback backend actually feeds perception.
+        ok, buf = cv2.imencode(
+            '.jpg', corrected, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
+        if ok:
+            comp_msg = CompressedImage()
+            comp_msg.header.stamp    = stamp
+            comp_msg.header.frame_id = 'camera_frame'
+            comp_msg.format          = 'jpeg'
+            comp_msg.data            = buf.tobytes()
+            self._compressed_pub.publish(comp_msg)
 
     # ─────────────────────────────────────────────────────────────────────
     # Timer / Service
