@@ -133,5 +133,15 @@ Design adjustment made during implementation: the plan's original "sample curren
 - **Left locked** as the Pi's running state after this verification (recommended default going forward) — matches the toggle's own default-off `_state` value only until the operator/next session re-enables it; the running `camera_node` process itself keeps whatever was last set until restarted (it doesn't reset to the declared default automatically).
 - **Not fixed, out of scope**: `ExposureTime`'s broken parameter range (would require setting `FrameDurationLimits` first and/or patching `camera_ros` itself, an external package) — not needed since disabling auto alone achieves the goal.
 
+#### Phase 8b — Stability-gated post-move capture
+**Status: ✅ DONE, live-verified on the Pi 2026-07-09.** Commit `3e1ea98`.
+
+`game_manager_node._do_capture_board()` no longer accepts whichever `/perception/changed_squares` reading arrives first after the clock press. `piece_detector_node` publishes on every ~0.5s detection tick regardless of game state, so the old code could latch onto a frame taken mid-motion or with a hand still over the board. Now waits for `capture_stability_count` (new param, default 3) consecutive identical readings before trusting the result, with `board_capture_timeout_s` (default raised 5.0→10.0 to give the stability wait room) as a bounded overall timeout; if it never fully stabilizes, falls back to the most-common (mode) reading across the window rather than failing outright — the same timeout-with-fallback pattern already used for homing retries in this node. New `/game_manager/capture_progress` topic (e.g. `"Stabilizing: 2/3 consistent reads"`) surfaced in `chess_ui`'s Perception tab.
+
+Live-verified on the Pi using the real installed `GameManagerNode` class with `/perception/changed_squares`/`/camera/capture` remapped to test-only topics (never touched the production perception graph):
+- **Stability path**: published a realistic noisy-then-settling sequence (`e2` → `d2` → `e2,e4` → `e2,e4` → `e2,e4`). Log: `Stable read after 5 tick(s): ['e2', 'e4']` — correctly ignored the first two noisy/partial readings and only accepted the result once it repeated 3 times in a row, exactly the scenario ("hand still on the board") this phase targets.
+- **Mode-fallback path**: published a sequence that never produces 3-in-a-row (`e2,e4`/`d2,d4`/`e2,e4`/`a1`/`e2,e4`/`b1`/`e2,e4` — majority reading 4/7 but never consecutive), with `board_capture_timeout_s:=4.0` for a fast test. Log: `No stable read within 4.0s — using most-common reading (4/7 ticks agreed): ['e2', 'e4']` — correctly recovered the right answer instead of hanging or failing outright.
+- Both tests' final `node._latest_changed_squares` matched the expected `{e2, e4}` exactly. Cleaned up afterward; production stack (`camera_node`/`board_detector_node`/`piece_detector_node`/`chess_os`/`test_runner_node`) confirmed untouched throughout.
+
 ---
 *Created 2026-07-08 from the full audit. Update the status table and add session notes under each phase as work lands.*
