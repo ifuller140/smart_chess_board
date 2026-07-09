@@ -4,3 +4,4 @@ float32 think_time_s     # How long the engine should think (seconds)
 string best_move_uci     # e.g., "e2e4"
 float32 think_time
 bool success
+bool used_fallback       # True if Stockfish wasn't used — a random legal move was picked instead

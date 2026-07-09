@@ -130,6 +130,14 @@ _state = {
     # (show the Q/R/B/N picker) vs. the computer's (informational only —
     # its UCI move already unambiguously specifies the piece).
     "promotion_is_human":          False,
+    # Transient — set whenever _do_validate_move() can't confidently match a
+    # legal move; chess_ui shows this as a fading banner for move_rejected_at
+    # + a few seconds, then it's just stale text nobody reads.
+    "move_rejected_msg":           "",
+    "move_rejected_at":            0.0,
+    # Persistent (unlike move_rejected) — True until the next engine call
+    # changes it. Stockfish being down is an ongoing integrity concern.
+    "engine_used_fallback":        False,
 }
 
 # Diff detection params — pushed to piece_detector_node via SetParameters

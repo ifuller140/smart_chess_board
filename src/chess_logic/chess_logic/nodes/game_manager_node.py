@@ -269,6 +269,19 @@ class GameManagerNode(Node):
         # *why* a move was inferred, surfaced in chess_ui.
         self._move_candidates_pub = self.create_publisher(
             String, '/game_manager/move_candidates', 10)
+        # Transient — published once whenever _do_validate_move() can't
+        # confidently match a legal move, for a chess_ui banner. Not a
+        # persistent status field (unlike move_candidates): the same
+        # inconclusive board reading is retried on the next capture, so
+        # there's no ongoing "rejected" state to reflect, just a one-off
+        # notice for the operator to see and retry.
+        self._move_rejected_pub = self.create_publisher(
+            String, '/game_manager/move_rejected', 10)
+        # Persistent (unlike move_rejected) — stays True/False until the next
+        # engine call changes it, since "Stockfish is down" is an ongoing
+        # integrity concern the operator should keep seeing, not a one-off event.
+        self._engine_fallback_pub = self.create_publisher(
+            Bool, '/game_manager/engine_used_fallback', 10)
 
         # ── Subscriptions ─────────────────────────────────────────────────
         self.create_subscription(
@@ -538,6 +551,8 @@ class GameManagerNode(Node):
                 if human_move is None:
                     self.get_logger().warn(
                         'Could not determine valid move — please try again')
+                    self._move_rejected_pub.publish(String(
+                        data='Move not recognized — verify the board and press the clock again'))
                     self._transition(GS.WAITING_PLAYER_MOVE)
                     continue
 
@@ -582,6 +597,7 @@ class GameManagerNode(Node):
                 if computer_move_uci is None:
                     self.get_logger().error(
                         'Engine failed — using first legal move as fallback')
+                    self._engine_fallback_pub.publish(Bool(data=True))
                     moves = list(self._board.legal_moves)
                     if moves:
                         computer_move_uci = moves[0].uci()
@@ -934,6 +950,7 @@ class GameManagerNode(Node):
             return None
 
         result = future.result()
+        self._engine_fallback_pub.publish(Bool(data=bool(result.used_fallback)))
         if result.success and result.best_move_uci:
             self.get_logger().info(f'Engine response: {result.best_move_uci}')
             return result.best_move_uci

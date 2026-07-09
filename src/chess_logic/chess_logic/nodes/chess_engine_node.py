@@ -51,16 +51,22 @@ class ChessEngineNode(Node):
             except Exception as e:
                 self.get_logger().error(f"Engine error: {e}")
         
+        used_fallback = False
         if best_move is None:
             # Fallback: Random legal move
+            used_fallback = True
             legal_moves = list(board.legal_moves)
             if legal_moves:
                 best_move = random.choice(legal_moves)
-        
+
+        response.used_fallback = used_fallback
         if best_move:
             response.success = True
             response.best_move_uci = best_move.uci()
-            self.get_logger().info(f"Engine suggests: {best_move.uci()}")
+            if used_fallback:
+                self.get_logger().warn(f"Stockfish unavailable — random fallback move: {best_move.uci()}")
+            else:
+                self.get_logger().info(f"Engine suggests: {best_move.uci()}")
         else:
             response.success = False
         

@@ -24,6 +24,7 @@ EXPECTED_NODES = [
     "clock_display_node",  "camera_node", "board_detector_node",
     "piece_detector_node", "gantry_kinematics_node", "motion_planner_node",
     "homing_node",         "game_manager_node",       "chess_engine_node",
+    "chess_clock_node",    "clock_servo_node",
 ]
 
 
@@ -89,6 +90,9 @@ def register_routes(app):
                 "manual_corners_points":      s["manual_corners_points"],
                 "resume_pending_ack":         s["resume_pending_ack"],
                 "promotion_is_human":         s["promotion_is_human"],
+                "move_rejected_msg":          s["move_rejected_msg"],
+                "move_rejected_at":           s["move_rejected_at"],
+                "engine_used_fallback":       s["engine_used_fallback"],
             })
 
     @app.route("/api/snapshot")

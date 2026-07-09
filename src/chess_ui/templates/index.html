@@ -375,6 +375,10 @@ body.showcase #debug-view{display:none}
     <div class="pill" id="pill-game">
       <div class="pill-dot"></div>GAME
     </div>
+    <div class="pill" id="pill-engine-fallback" style="display:none;border-color:var(--warn);color:var(--warn)"
+         title="Stockfish is unavailable — the engine is picking random legal moves instead of playing real chess">
+      <div class="pill-dot" style="background:var(--warn)"></div>ENGINE: RANDOM FALLBACK
+    </div>
   </div>
   <a href="/api/snapshot" class="hbtn">&#128247; Snap</a>
   <button class="estop-btn" id="estop-btn" onclick="doEstop()">&#9760; E-STOP</button>
@@ -500,6 +504,11 @@ body.showcase #debug-view{display:none}
         </div>
 
         <button class="btn primary" onclick="gameAct('start')">&#10003; OK — Piece placed</button>
+      </div>
+
+      <!-- Move-rejected banner (transient, auto-fades) -->
+      <div class="promo-banner" id="reject-banner" style="border-color:var(--warn)">
+        <div style="font-size:.8em;color:var(--warn)" id="reject-banner-text"></div>
       </div>
 
       <!-- Game-over banner -->
@@ -1215,6 +1224,8 @@ var catalogue  = {};
 var board      = null;
 var scBoard    = null;
 var advBoard   = null;
+var _lastMoveRejectedAt   = 0;
+var _moveRejectedShowUntil = 0;
 
 // Workspace constants — origin at bottom-left, +X=rightward, +Y=backward
 // a1 = (BO_X, BO_Y), h8 = (BO_X+7*SQ, BO_Y+7*SQ)
@@ -2232,6 +2243,8 @@ function pollStatus() {
     setPill('pill-cam',  age < 5);
     setPill('pill-ros',  d.ros_connected);
     setPill('pill-game', gs !== 'OFFLINE' && gs !== 'IDLE');
+    var enginePill = document.getElementById('pill-engine-fallback');
+    if (enginePill) enginePill.style.display = d.engine_used_fallback ? 'flex' : 'none';
     document.getElementById('cam-ts').textContent =
       age < 9999 ? age.toFixed(1)+'s ago' : '—';
     document.getElementById('cam-footer').textContent =
@@ -2354,6 +2367,19 @@ function pollStatus() {
           if (pieceEl) pieceEl.textContent = pieceNames[pieceChar] || 'queen';
         }
       }
+    }
+
+    // ── Move-rejected banner (transient — client-clock-driven fade so it
+    // doesn't depend on the browser's clock matching the Pi's) ────────
+    if (d.move_rejected_at && d.move_rejected_at !== _lastMoveRejectedAt) {
+      _lastMoveRejectedAt = d.move_rejected_at;
+      _moveRejectedShowUntil = Date.now() + 6000;
+      var rbText = document.getElementById('reject-banner-text');
+      if (rbText) rbText.textContent = d.move_rejected_msg || 'Move not recognized — try again';
+    }
+    var rejectBanner = document.getElementById('reject-banner');
+    if (rejectBanner) {
+      rejectBanner.className = 'promo-banner' + (Date.now() < _moveRejectedShowUntil ? ' visible' : '');
     }
 
     // ── Game-over banner ──────────────────────────────────────────

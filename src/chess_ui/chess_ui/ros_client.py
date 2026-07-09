@@ -76,6 +76,8 @@ if HAS_ROS:
             self.create_subscription(String,  "/perception/reference_status",self._on_ref_status,     10)
             self.create_subscription(String,  "/game_manager/capture_progress", self._on_capture_progress, 10)
             self.create_subscription(String,  "/game_manager/move_candidates", self._on_move_candidates, 10)
+            self.create_subscription(String,  "/game_manager/move_rejected",   self._on_move_rejected,  10)
+            self.create_subscription(Bool,    "/game_manager/engine_used_fallback", self._on_engine_fallback, 10)
             self.create_subscription(Bool,    "/game_manager/resume_pending_ack", self._on_resume_pending_ack, 10)
             self.create_subscription(Bool,    "/game_manager/promotion_is_human", self._on_promotion_is_human, 10)
 
@@ -280,6 +282,15 @@ if HAS_ROS:
         def _on_promotion_is_human(self, msg):
             with state._lock:
                 state._state["promotion_is_human"] = bool(msg.data)
+
+        def _on_move_rejected(self, msg):
+            with state._lock:
+                state._state["move_rejected_msg"] = msg.data
+                state._state["move_rejected_at"]  = time.time()
+
+        def _on_engine_fallback(self, msg):
+            with state._lock:
+                state._state["engine_used_fallback"] = bool(msg.data)
 
         def _on_turn(self, msg):
             with state._lock:
