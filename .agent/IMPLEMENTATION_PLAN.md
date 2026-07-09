@@ -14,7 +14,7 @@
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Coordinate/config fix (`board_map.yaml` + `x_max_mm` reconciliation) | ✅ done 2026-07-08 |
-| 2 | `game_manager_node` permanent-death & correctness bugs | 🔄 in progress |
+| 2 | `game_manager_node` permanent-death & correctness bugs | ✅ done 2026-07-08 |
 | 3 | Safety: blocking executors defeat e-stop; action double-terminal bug; test-runner interlock | ⬜ not started |
 | 4 | First live-motor session + remaining `gantry_control` findings (castling snapshot, corner-BFS start, graveyard reset, physical calibration) | ⬜ not started |
 | 5 | `chess_perception` fixes | ⬜ not started |
@@ -42,6 +42,15 @@
 Homing-failure and every game-end path currently `break`/`return` out of the daemon game-loop thread permanently, killing all future `/game/*` service calls silently (services stay registered and lie about success). Plus: `/game/resign` races the loop thread, a failed computer move is pushed to the board model anyway (desync), stale perception/motion completions aren't correlated to the request that caused them, `PROMOTION_WAIT` has no timeout/flag-poll, and clock-hit servo failures are silently discarded.
 
 **Verification:** ROS-graph-level only (service calls + synthetic topic publishes), no hardware required.
+
+**Status: ✅ DONE (2026-07-08).** Commit `0485e3a` pushed to `ros-dev`, pulled and rebuilt on the Pi (`colcon build --symlink-install --packages-select chess_logic`, clean). Verified live using a throwaway stub node (`/tmp/stub_hw_services.py`, deleted after use — not committed) providing fake `/gantry/home`, `/camera/capture`, `/perception/capture_premove`, `/clock/hit`, and `/chess_engine/request_move` services, driven via `ros2 topic pub`/`ros2 service call`:
+- **Homing-retry fix**: with `/gantry/home` genuinely unavailable (stub killed), the node cycled `HOMING → HOMING_FAILED → HOMING` every ~15s for 35+ seconds (3 full cycles) without the process ever dying — this is the exact scenario the audit found killed the game loop permanently.
+- **Full turn cycle**: drove a complete human move (e2e4, validated via synthetic `/perception/changed_squares`) → engine reply (stub returned a real legal move via python-chess) → motion execution (`/motion/done`) → clock hit → back to `WAITING_PLAYER_MOVE`, all correctly sequenced.
+- **The exact audit-reproduced bug**: called `/game/resign` (correctly ended the game, published the result) then `/game/new_game` — confirmed the game genuinely reset to `IDLE` and responded to a fresh clock press, unlike the audit's original finding where `/game/new_game` returned `success=True` but did nothing.
+- **`MOTION_ERROR` path**: simulated a failed move (`/motion/done` with `data:false`) — confirmed the move was *not* pushed to the board model, the node transitioned to `MOTION_ERROR` and paused (didn't push a stale/wrong position), and `/game/new_game` recovered it back to `IDLE`.
+- **Awaiting-gate fix**: repeated/late `/perception/changed_squares` and `/motion/done` publishes outside their intended wait windows were correctly logged as "ignoring — not currently awaiting" and had no effect, confirming stale-event correlation works.
+- One false alarm during testing: `game_manager_node`'s stdout is block-buffered when redirected to a file, making log-only observation initially look like clock-hit wasn't received — resolved by relaunching with `PYTHONUNBUFFERED=1`; not a code bug.
+- All verification processes and the stub script were cleaned up afterward; the 5 pre-existing production nodes were confirmed untouched throughout.
 
 ### Phase 3 — Safety fixes (gate before live motor testing)
 **Files:** `homing_node.py`, `gantry_kinematics_node.py`, `stepper_driver_node.py`, `servo_node.py`, `clock_servo_node.py`, `test_runner_node.py`/`run_hw_test.sh`
