@@ -19,6 +19,12 @@
 | 4 | First live-motor session + remaining `gantry_control` findings (castling snapshot, corner-BFS start, graveyard reset, physical calibration) | ⬜ not started (gantry power currently off) |
 | 5 | `chess_perception` fixes | ✅ done 2026-07-09 |
 | 6 | `chess_ui` fixes (e-stop clear, live param push, SSE queue, jog timeout) | ✅ done 2026-07-09 |
+| 7 | Corner-visibility + manual-override UI (see Phase 8e, folded in together) | ⬜ not started |
+| 8a | Vision robustness: lock camera exposure/white-balance | ⬜ not started |
+| 8b | Vision robustness: stability-gated post-move capture | ⬜ not started |
+| 8c | Vision robustness: perspective-aware ROI + multi-modal (color+structure) scoring | ⬜ not started |
+| 8d | Vision robustness: confidence-scored legal-move matching | ⬜ not started |
+| 8e | Vision robustness: remaining developer tuning UI + corner-visibility tie-in | ⬜ not started |
 
 ## Phase details
 
@@ -99,6 +105,20 @@ E-stop-clear doesn't reset hardware latches, calibration/settings pushes have ze
 - **Jog watchdog**: gantry jogging through the live endpoint was correctly blocked by the permission layer as physical-motion territory (Phase 4 scope, skipped this session per the user). Verified the watchdog logic in isolation instead: a throwaway process that imports the real `chess_ui.state`/`chess_ui.ros_client.jog_loop` but never starts a ROS node (`ros_node` stays `None`, so no `/stepper/velocity` publish ever reaches real hardware) — confirmed `state._jog["active"]` auto-flips to `False` ~0.8s (`JOG_WATCHDOG_TIMEOUT_S`) after the last heartbeat with no further refresh, and stays `True` indefinitely when heartbeats keep arriving every 100ms.
 - **Bare-except logging**: verified by code inspection only (trivial `pass` → `self.get_logger().debug(...)` change in `_on_diff_img`/square-scores callbacks); not separately live-tested.
 - All test-only node instances (`stepper_driver_node`, `motion_planner_node`, `game_manager_node`) were stopped afterward; production stack left exactly as restarted for Phase 5 verification.
+
+### Phase 7 — Corner-visibility + manual-override UI
+Folded into Phase 8e below (same `/perception/board_debug` plumbing, built together). `board_detector_node` already publishes an annotated corner-overlay debug image that `chess_ui` never displays; the original manual drag-corners feature (removed 2026-07-08 during the Chess OS consolidation on the premise that automatic detection made it redundant — a premise broken by the camera-framing bug, see Phase 5's follow-up entry) needs a proper home back in `chess_ui` as a correction path, not primary input, now that automatic detection genuinely works.
+
+### Phase 8 — Vision robustness overhaul (piece-move detection)
+Full context, root-cause analysis, and phase-by-phase design in `/Users/ianfuller/.claude/plans/transient-hopping-grove.md` (the approved plan for this initiative). Summary of the four root causes found: (1) continuous auto-exposure/AWB causes board-wide brightness/color drift between reference and post-move captures, easily mistaken for "the camera keeps moving the image"; (2) `game_manager_node`'s post-move capture calls `/camera/capture`, which `camera_ros` (the production backend) doesn't implement, so it's actually just grabbing whatever `piece_detector_node`'s independent 2Hz timer publishes next — no "wait until settled" concept exists; (3) perspective bleed on far ranks because pieces (objects with height) don't sit flush with the homography's board plane, and today's per-square ROI is a uniform centered crop that doesn't exploit which part of a piece's silhouette actually projects correctly; (4) `_match_legal_move` works off a boolean thresholded set with only "drop exactly one square" noise tolerance, not the continuous scores it already has access to.
+
+- **Phase 8a** — Lock camera exposure/white-balance (`AeEnable`/`AwbEnable` sample-then-lock via `camera_ros`'s existing ROS parameters) + chess_ui readout/lock/relock controls. Cheapest, likely highest-impact fix for "the image keeps moving."
+- **Phase 8b** — Stability-gated post-move capture in `game_manager_node`: wait for K consecutive identical `changed_squares` reads (bounded timeout + mode fallback) instead of accepting whatever the next tick reports, extending the same idea `premove_avg_count` already does on the reference side.
+- **Phase 8c** — Perspective-aware per-square ROI (biased toward the near-camera edge, rank-dependent) + a second edge/structure-diff channel alongside today's LAB color diff, both scoped per-square (not whole-board) to avoid the "full board is a mess of edges" problem.
+- **Phase 8d** — Confidence-scored legal-move matching in `game_manager_node`: score every legal move by its footprint's diff scores instead of exact-match-then-drop-one-square; surface top-3 candidates + a manual override in the UI.
+- **Phase 8e** — Remaining developer tuning UI (ties in Phase 7's corner overlay/manual-override + a turn-by-turn tuning log).
+
+**Status: ⬜ not started as of 2026-07-09.** Plan approved by the user same session as the camera-framing fix (Phase 5 follow-up) that unblocked automatic corner detection in the first place.
 
 ---
 *Created 2026-07-08 from the full audit. Update the status table and add session notes under each phase as work lands.*
