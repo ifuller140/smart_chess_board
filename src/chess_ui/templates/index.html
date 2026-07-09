@@ -478,10 +478,27 @@ body.showcase #debug-view{display:none}
       <!-- Promotion banner -->
       <div class="promo-banner" id="promo-banner">
         <div class="promo-title">&#9837; Pawn Promotion</div>
-        <div style="font-size:.8em;color:#c9d1d9;margin-bottom:10px">
-          The computer promoted a pawn! Place a <b>queen</b> on the indicated square,
-          then click <b>OK</b> or press the physical clock button.
+
+        <!-- Computer promoted: informational only, piece is already fixed -->
+        <div id="promo-computer-text" style="font-size:.8em;color:#c9d1d9;margin-bottom:10px">
+          The computer promoted a pawn! Place a <b id="promo-computer-piece">queen</b> on the
+          indicated square, then click <b>OK</b> or press the physical clock button.
         </div>
+
+        <!-- Human promoted: let them correct the assumed default (queen) -->
+        <div id="promo-human-controls" style="display:none">
+          <div style="font-size:.8em;color:#c9d1d9;margin-bottom:8px">
+            Pawn promotion detected — vision can't tell which piece you placed
+            (it defaults to queen). Confirm what you actually placed:
+          </div>
+          <div style="display:flex;gap:6px;justify-content:center;margin-bottom:10px">
+            <button class="btn" onclick="setPromotion('q')">Queen</button>
+            <button class="btn" onclick="setPromotion('r')">Rook</button>
+            <button class="btn" onclick="setPromotion('b')">Bishop</button>
+            <button class="btn" onclick="setPromotion('n')">Knight</button>
+          </div>
+        </div>
+
         <button class="btn primary" onclick="gameAct('start')">&#10003; OK — Piece placed</button>
       </div>
 
@@ -1307,6 +1324,15 @@ function gameAct(action) {
     .then(function(d){
       if (!d.ok) { alert('Game action failed: '+(d.msg||d.message||'unknown')); }
     }).catch(function(){ alert('ROS not connected'); });
+}
+
+function setPromotion(piece) {
+  fetch('/api/game/set_promotion', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({piece: piece}),
+  }).then(function(r){return r.json();}).then(function(d){
+    if (!d.ok) { alert('Set promotion failed: '+(d.msg||'unknown')); }
+  }).catch(function(){ alert('ROS not connected'); });
 }
 
 function ackResume() {
@@ -2311,7 +2337,23 @@ function pollStatus() {
     // ── Promotion banner ──────────────────────────────────────────
     var promoBanner  = document.getElementById('promo-banner');
     if (promoBanner) {
-      promoBanner.className = 'promo-banner' + (gs === 'PROMOTION_WAIT' ? ' visible' : '');
+      var showPromo = (gs === 'PROMOTION_WAIT');
+      promoBanner.className = 'promo-banner' + (showPromo ? ' visible' : '');
+      if (showPromo) {
+        var isHuman   = !!d.promotion_is_human;
+        var humanDiv  = document.getElementById('promo-human-controls');
+        var compDiv   = document.getElementById('promo-computer-text');
+        if (humanDiv) humanDiv.style.display = isHuman ? 'block' : 'none';
+        if (compDiv)  compDiv.style.display  = isHuman ? 'none'  : 'block';
+        if (!isHuman) {
+          var hist = d.move_history_uci || [];
+          var last = hist.length ? hist[hist.length - 1] : '';
+          var pieceChar = (last.length === 5) ? last[4].toLowerCase() : 'q';
+          var pieceNames = {q:'queen', r:'rook', b:'bishop', n:'knight'};
+          var pieceEl = document.getElementById('promo-computer-piece');
+          if (pieceEl) pieceEl.textContent = pieceNames[pieceChar] || 'queen';
+        }
+      }
     }
 
     // ── Game-over banner ──────────────────────────────────────────

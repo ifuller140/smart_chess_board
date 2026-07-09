@@ -87,7 +87,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 
-from chess_interfaces.srv import ManualEdit, RequestMove, SetClockTimes
+from chess_interfaces.srv import ManualEdit, RequestMove, SetClockTimes, SetPromotion
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +199,15 @@ class GameManagerNode(Node):
         self._manual_edit_event     = threading.Event()
         self._pending_manual_fen    = None
 
+        # Human promotion-piece correction (see _svc_set_promotion()) —
+        # _do_validate_move() always resolves promotion ambiguity to queen
+        # (all 4 promotion move-types share an identical vision footprint),
+        # so this lets the human correct it before confirming via the clock.
+        self._set_promotion_event    = threading.Event()
+        self._pending_promotion_piece = None   # chess.QUEEN/ROOK/BISHOP/KNIGHT
+        self._pending_promotion_move  = None   # the move currently on the board
+        self._pending_promotion_is_human = False
+
         # Set by _load_persisted_state() when a saved game is resumed; blocks
         # the next clock press until the operator confirms (via /game/ack_resume)
         # that the physical board actually matches the resumed position —
@@ -292,11 +301,17 @@ class GameManagerNode(Node):
         self.create_service(Trigger, '/game/resign',      self._svc_resign)
         self.create_service(Trigger, '/game/ack_resume',  self._svc_ack_resume)
         self.create_service(ManualEdit, '/game/manual_edit', self._svc_manual_edit)
+        self.create_service(SetPromotion, '/game/set_promotion', self._svc_set_promotion)
 
         # Tells chess_ui whether a resumed game is waiting on operator
         # confirmation (see _resumed_pending_ack above).
         self._resume_ack_pub = self.create_publisher(
             Bool, '/game_manager/resume_pending_ack', 10)
+        # Lets chess_ui distinguish a human promotion-choice wait (show Q/R/
+        # B/N picker) from a computer one (just informational — the engine's
+        # UCI move already unambiguously specifies the piece).
+        self._promo_is_human_pub = self.create_publisher(
+            Bool, '/game_manager/promotion_is_human', 10)
 
         # Publish initial FEN so piece_detector starts with correct state
         self._publish_board_fen()
@@ -540,9 +555,15 @@ class GameManagerNode(Node):
                 if human_move.promotion is not None:
                     self.get_logger().info(
                         'Human pawn promotion — waiting for player to place promoted piece and press clock...')
+                    self._pending_promotion_move = human_move
+                    self._pending_promotion_piece = None
+                    self._pending_promotion_is_human = True
+                    self._promo_is_human_pub.publish(Bool(data=True))
                     self._transition(GS.PROMOTION_WAIT)
                     if not self._wait_promotion_confirm():
                         continue  # flag fell or resign happened during promotion wait
+                    self._pending_promotion_is_human = False
+                    self._promo_is_human_pub.publish(Bool(data=False))
                     self._state_pub.publish(String(data=GS.PROMOTION_DONE))
 
                 # Check game end after human move
@@ -604,8 +625,11 @@ class GameManagerNode(Node):
 
                 # If computer promoted (black pawn to rank 1), wait for user
                 if needs_promotion_wait:
+                    self._pending_promotion_is_human = False
+                    self._promo_is_human_pub.publish(Bool(data=False))
                     self.get_logger().info(
-                        'Computer promoted! Waiting for user to place queen on board...')
+                        f'Computer promoted! Waiting for user to place a '
+                        f'{chess.piece_name(computer_move.promotion)} on board...')
                     self._transition(GS.PROMOTION_WAIT)
                     if not self._wait_promotion_confirm():
                         continue  # flag fell or resign happened during promotion wait
@@ -957,9 +981,35 @@ class GameManagerNode(Node):
             # so a resign isn't misread as a normal promotion confirmation.
             if self._flag_event.is_set() or self._resign_event.is_set():
                 return False
+            if self._set_promotion_event.is_set():
+                self._set_promotion_event.clear()
+                self._apply_promotion_choice()
             if got_clock_hit:
                 return True
         return False
+
+    def _apply_promotion_choice(self):
+        """Swap the pending human promotion's piece (see _svc_set_promotion())
+        — _do_validate_move() always resolves promotion ambiguity to queen
+        since all four promotion move-types share an identical vision
+        footprint; this lets the human correct that default before
+        confirming via the clock."""
+        piece = self._pending_promotion_piece
+        move = self._pending_promotion_move
+        if piece is None or move is None or piece == move.promotion:
+            return  # nothing to do — already the requested piece
+        self._board.pop()
+        if self._move_history:
+            self._move_history.pop()
+        new_move = chess.Move(move.from_square, move.to_square, promotion=piece)
+        self._board.push(new_move)
+        self._move_history.append(new_move.uci())
+        self._pending_promotion_move = new_move
+        self._pub_move_history()
+        self._publish_board_fen()
+        self._persist_state()
+        self.get_logger().info(
+            f'Promotion choice updated to {chess.piece_name(piece)}: {new_move.uci()}')
 
     def _do_hit_clock(self) -> bool:
         """Call the clock servo to press the chess clock button."""
@@ -1187,6 +1237,26 @@ class GameManagerNode(Node):
         self._clock_hit_event.set()  # unblock any wait currently in progress
         response.success = True
         response.message = "Manual edit accepted"
+        return response
+
+    def _svc_set_promotion(self, request, response):
+        """Correct a human promotion's piece choice (see SetPromotion.srv) —
+        only valid while PROMOTION_WAIT is active for a human promotion.
+        Applied in _wait_promotion_confirm()'s loop, not here directly."""
+        if self._state != GS.PROMOTION_WAIT or not self._pending_promotion_is_human:
+            response.success = False
+            response.message = "Not currently waiting on a human promotion choice"
+            return response
+        piece_map = {'q': chess.QUEEN, 'r': chess.ROOK, 'b': chess.BISHOP, 'n': chess.KNIGHT}
+        piece = piece_map.get(request.piece.strip().lower())
+        if piece is None:
+            response.success = False
+            response.message = "piece must be one of q/r/b/n"
+            return response
+        self._pending_promotion_piece = piece
+        self._set_promotion_event.set()
+        response.success = True
+        response.message = f"Promotion set to {request.piece.upper()}"
         return response
 
     def _svc_ack_resume(self, request, response):

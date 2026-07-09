@@ -126,6 +126,10 @@ _state = {
     # recovery) until the operator confirms the physical board matches via
     # /game/ack_resume — see game_manager_node.py's _load_persisted_state().
     "resume_pending_ack":          False,
+    # True during PROMOTION_WAIT if it's a human's promotion choice pending
+    # (show the Q/R/B/N picker) vs. the computer's (informational only —
+    # its UCI move already unambiguously specifies the piece).
+    "promotion_is_human":          False,
 }
 
 # Diff detection params — pushed to piece_detector_node via SetParameters

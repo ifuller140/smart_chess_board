@@ -37,6 +37,12 @@ try:
 except ImportError:
     HAS_MANUAL_EDIT = False
 
+try:
+    from chess_interfaces.srv import SetPromotion
+    HAS_SET_PROMOTION = True
+except ImportError:
+    HAS_SET_PROMOTION = False
+
 # Set by app.main() once ROS is (or isn't) initialized; read by routes.py.
 ros_node = None
 
@@ -71,6 +77,7 @@ if HAS_ROS:
             self.create_subscription(String,  "/game_manager/capture_progress", self._on_capture_progress, 10)
             self.create_subscription(String,  "/game_manager/move_candidates", self._on_move_candidates, 10)
             self.create_subscription(Bool,    "/game_manager/resume_pending_ack", self._on_resume_pending_ack, 10)
+            self.create_subscription(Bool,    "/game_manager/promotion_is_human", self._on_promotion_is_human, 10)
 
             # ── Publishers ─────────────────────────────────────────────
             self.vel_pub       = self.create_publisher(Twist,    "/stepper/velocity",       10)
@@ -99,6 +106,8 @@ if HAS_ROS:
             self._svc_ack_resume    = self.create_client(Trigger, "/game/ack_resume")
             self._svc_manual_edit   = (self.create_client(ManualEdit, "/game/manual_edit")
                                         if HAS_MANUAL_EDIT else None)
+            self._svc_set_promotion = (self.create_client(SetPromotion, "/game/set_promotion")
+                                        if HAS_SET_PROMOTION else None)
             self._svc_cap_reference = self.create_client(Trigger, "/perception/capture_premove")
             # Detector parameter client (optional — requires rcl_interfaces)
             self._svc_detector_params = None
@@ -267,6 +276,10 @@ if HAS_ROS:
         def _on_resume_pending_ack(self, msg):
             with state._lock:
                 state._state["resume_pending_ack"] = bool(msg.data)
+
+        def _on_promotion_is_human(self, msg):
+            with state._lock:
+                state._state["promotion_is_human"] = bool(msg.data)
 
         def _on_turn(self, msg):
             with state._lock:
@@ -553,6 +566,24 @@ if HAS_ROS:
             req = ManualEdit.Request()
             req.fen = fen
             future = self._svc_manual_edit.call_async(req)
+            deadline = time.monotonic() + timeout
+            while not future.done():
+                if time.monotonic() > deadline:
+                    return False, "Timeout"
+                time.sleep(0.05)
+            r = future.result()
+            return r.success, r.message
+
+        def call_set_promotion(self, piece: str, timeout: float = 2.0):
+            """Like call_svc() but for SetPromotion.srv, which needs a
+            `piece` field on the request."""
+            if self._svc_set_promotion is None:
+                return False, "chess_interfaces SetPromotion.srv not available"
+            if not self._svc_set_promotion.wait_for_service(timeout_sec=0.5):
+                return False, "Service not available"
+            req = SetPromotion.Request()
+            req.piece = piece
+            future = self._svc_set_promotion.call_async(req)
             deadline = time.monotonic() + timeout
             while not future.done():
                 if time.monotonic() > deadline:

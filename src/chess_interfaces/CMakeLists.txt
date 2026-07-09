@@ -12,6 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/RequestMove.srv"
   "srv/SetClockTimes.srv"
   "srv/ManualEdit.srv"
+  "srv/SetPromotion.srv"
   "action/MoveGantry.action"
   "action/RunHardwareTest.action"
   DEPENDENCIES std_msgs geometry_msgs action_msgs

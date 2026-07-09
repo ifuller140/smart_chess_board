@@ -88,6 +88,7 @@ def register_routes(app):
                 "manual_corners_active":      s["manual_corners_active"],
                 "manual_corners_points":      s["manual_corners_points"],
                 "resume_pending_ack":         s["resume_pending_ack"],
+                "promotion_is_human":         s["promotion_is_human"],
             })
 
     @app.route("/api/snapshot")
@@ -397,6 +398,20 @@ def register_routes(app):
     def api_game_resign():
         """Resign the current game."""
         return _call_svc("_svc_game_resign")
+
+    @app.route("/api/game/set_promotion", methods=["POST"])
+    def api_game_set_promotion():
+        """Correct a human promotion's piece choice (Q/R/B/N) while
+        PROMOTION_WAIT is active — see SetPromotion.srv."""
+        data  = request.get_json(silent=True) or {}
+        piece = data.get("piece", "").strip()
+        if not piece:
+            return jsonify({"ok": False, "msg": "piece is required"}), 400
+        node = ros_client.ros_node
+        if node is None:
+            return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+        ok, msg = node.call_set_promotion(piece)
+        return jsonify({"ok": ok, "msg": msg})
 
     @app.route("/api/game/ack_resume", methods=["POST"])
     def api_game_ack_resume():

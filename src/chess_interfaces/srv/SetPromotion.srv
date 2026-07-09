@@ -1,0 +1,11 @@
+# Correct a human pawn promotion's piece choice while PROMOTION_WAIT is
+# active. _do_validate_move() always resolves promotion ambiguity to queen
+# (all four promotion move-types share an identical vision footprint, so
+# there's no way to tell them apart from the board diff alone) — this lets
+# the human tell the system what they actually placed before confirming via
+# the clock. Only valid while GS.PROMOTION_WAIT is active for a human
+# promotion (not the computer's).
+string piece  # 'q', 'r', 'b', or 'n' (case-insensitive)
+---
+bool success
+string message
