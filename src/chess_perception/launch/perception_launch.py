@@ -17,8 +17,10 @@ Usage:
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, TimerAction
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo,
+                             RegisterEventHandler, TimerAction)
 from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -53,6 +55,18 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'fps', default_value='5.0',
             description='Camera frame rate'),
+        # Auto-restart camera/board/piece nodes individually if one exits
+        # (e.g. the documented camera_ros stale-subscriber-after-2h bug).
+        # Deliberately scoped to this perception+UI layer only — NOT applied
+        # to hardware/gantry nodes elsewhere, since respawning those alone
+        # without a full re-home risks operating on stale position
+        # assumptions after a crash mid-motion. Off by default for
+        # interactive/manual launches (Ctrl+C during dev would otherwise
+        # try to relaunch a node mid-shutdown); the production systemd unit
+        # (setup/smart-chess.service) is expected to pass respawn:=True.
+        DeclareLaunchArgument(
+            'respawn', default_value='False',
+            description='Auto-restart camera/board/piece nodes individually on exit'),
     ]
 
     use_camera_ros = LaunchConfiguration('use_camera_ros')
@@ -61,15 +75,12 @@ def generate_launch_description():
     width          = LaunchConfiguration('width')
     height         = LaunchConfiguration('height')
     fps            = LaunchConfiguration('fps')
+    respawn        = LaunchConfiguration('respawn')
 
-    return LaunchDescription(args + [
-
-        LogInfo(msg='Starting perception stack...'),
-
-        # ── Camera backend: ros-humble-camera-ros (preferred on Ubuntu 22.04) ──
-        # camera_ros publishes to /camera_node/image_raw — remap to /camera/image_raw
-        # using fully-qualified path since camera_ros doesn't honour relative remaps.
-        Node(
+    # ── Camera backend: ros-humble-camera-ros (preferred on Ubuntu 22.04) ──
+    # camera_ros publishes to /camera_node/image_raw — remap to /camera/image_raw
+    # using fully-qualified path since camera_ros doesn't honour relative remaps.
+    camera_ros_node = Node(
             package='camera_ros',
             executable='camera_node',
             name='camera_node',
@@ -102,38 +113,59 @@ def generate_launch_description():
             ],
             condition=IfCondition(use_camera_ros),
             output='screen',
-        ),
+        )
 
-        # ── Camera backend: chess_perception camera_node (fallback) ──
-        # Used when use_camera_ros:=False.  Requires python3-libcamera for Pi CSI.
-        Node(
-            package='chess_perception',
-            executable='camera_node',
-            name='chess_camera_node',
-            parameters=[{
-                'use_picamera2':    use_picam,
-                'width':            width,
-                'height':           height,
-                'fps':              fps,
-                'calibration_file': cal_file,
-            }],
-            condition=UnlessCondition(use_camera_ros),
-            output='screen',
-        ),
+    # ── Camera backend: chess_perception camera_node (fallback) ──
+    # Used when use_camera_ros:=False.  Requires python3-libcamera for Pi CSI.
+    camera_fallback_node = Node(
+        package='chess_perception',
+        executable='camera_node',
+        name='chess_camera_node',
+        parameters=[{
+            'use_picamera2':    use_picam,
+            'width':            width,
+            'height':           height,
+            'fps':              fps,
+            'calibration_file': cal_file,
+        }],
+        condition=UnlessCondition(use_camera_ros),
+        output='screen',
+    )
 
-        Node(
-            package='chess_perception',
-            executable='board_detector_node',
-            name='board_detector_node',
-            output='screen',
-        ),
+    board_detector_node = Node(
+        package='chess_perception',
+        executable='board_detector_node',
+        name='board_detector_node',
+        output='screen',
+    )
 
-        Node(
-            package='chess_perception',
-            executable='piece_detector_node',
-            name='piece_detector_node',
-            output='screen',
-        ),
+    piece_detector_node = Node(
+        package='chess_perception',
+        executable='piece_detector_node',
+        name='piece_detector_node',
+        output='screen',
+    )
+
+    # Each of these RegisterEventHandlers only ever fires for a node that
+    # actually launched a process (e.g. camera_fallback_node's handler is a
+    # no-op whenever use_camera_ros=True, since that Node action's own
+    # condition never lets it start in the first place).
+    respawn_handlers = [
+        RegisterEventHandler(OnProcessExit(target_action=n, on_exit=[n]),
+                              condition=IfCondition(respawn))
+        for n in (camera_ros_node, camera_fallback_node,
+                  board_detector_node, piece_detector_node)
+    ]
+
+    return LaunchDescription(args + [
+
+        LogInfo(msg='Starting perception stack...'),
+
+        camera_ros_node,
+        camera_fallback_node,
+        board_detector_node,
+        piece_detector_node,
+        *respawn_handlers,
 
         LogInfo(msg='Perception stack ready.'),
 

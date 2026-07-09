@@ -22,7 +22,9 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription,
-                             LogInfo)
+                             LogInfo, RegisterEventHandler)
+from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -62,6 +64,11 @@ def generate_launch_description():
                               description='(only when use_camera_ros=False) True=picamera2, False=OpenCV V4L2'),
         DeclareLaunchArgument('calibration_file', default_value='',
                               description='Path to camera_calibration.yaml (only used by chess_perception camera_node)'),
+        # See perception_launch.py's own 'respawn' arg docstring — scoped to
+        # the perception+chess_ui layer only (never hardware/gantry). Default
+        # off for interactive use; setup/smart-chess.service passes True.
+        DeclareLaunchArgument('respawn', default_value='False',
+                              description='Auto-restart perception nodes + chess_ui individually on exit'),
     ]
 
     engine_path     = LaunchConfiguration('engine_path')
@@ -70,6 +77,15 @@ def generate_launch_description():
     use_camera_ros  = LaunchConfiguration('use_camera_ros')
     use_picam       = LaunchConfiguration('use_picamera2')
     cal_file        = LaunchConfiguration('calibration_file')
+    respawn         = LaunchConfiguration('respawn')
+
+    # Uses ExecuteProcess rather than the Node action: chess_ui's argparse
+    # entrypoint isn't itself the rclpy node (it spins one on a background
+    # thread), so it doesn't expect the --ros-args launch_ros.Node injects.
+    chess_ui_process = ExecuteProcess(
+        cmd=['ros2', 'run', 'chess_ui', 'chess_ui'],
+        output='screen',
+    )
 
     return LaunchDescription(args + [
 
@@ -128,6 +144,7 @@ def generate_launch_description():
                 'use_camera_ros':    use_camera_ros,
                 'use_picamera2':     use_picam,
                 'calibration_file':  cal_file,
+                'respawn':           respawn,
             }.items(),
         ),
 
@@ -155,6 +172,11 @@ def generate_launch_description():
                  'board_capture_timeout_s': 5.0,
                  'motion_timeout_s':        120.0,
                  'homing_timeout_s':        90.0,
+                 # Mirrors chess_clock_node's own time_per_player_s so
+                 # game_manager_node's resume-after-crash clock-freshness
+                 # check (see _load_persisted_state()) compares against the
+                 # actual configured clock time, not always the 600s default.
+                 'time_per_player_s':       time_per_player,
              }],
              output='screen'),
 
@@ -165,10 +187,10 @@ def generate_launch_description():
         # entrypoint isn't itself the rclpy node (it spins one on a background
         # thread), so it doesn't expect the --ros-args launch_ros.Node injects.
 
-        ExecuteProcess(
-            cmd=['ros2', 'run', 'chess_ui', 'chess_ui'],
-            output='screen',
-        ),
+        chess_ui_process,
+        RegisterEventHandler(
+            OnProcessExit(target_action=chess_ui_process, on_exit=[chess_ui_process]),
+            condition=IfCondition(respawn)),
 
         LogInfo(msg='All nodes launched — waiting for system to initialize...'),
     ])

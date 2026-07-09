@@ -255,28 +255,35 @@ source install/setup.bash
 
 ## Auto-Start on Boot (Optional)
 
-```bash
-sudo nano /etc/systemd/system/smart-chess.service
-```
-
-```ini
-[Unit]
-Description=Smart Chess Board
-After=network.target pigpiod.service
-Requires=pigpiod.service
-
-[Service]
-Type=simple
-User=ian
-WorkingDirectory=/home/ian/dev/smart_chess_board
-ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch src/launch/full_system_launch.py"
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
+A ready-to-install unit file is tracked at `setup/smart-chess.service` (same
+convention as `setup/smart-chess-hw-tests.sudoers` — a git-tracked template,
+never installed automatically):
 
 ```bash
+sudo cp setup/smart-chess.service /etc/systemd/system/smart-chess.service
+sudo systemctl daemon-reload
 sudo systemctl enable smart-chess.service
 sudo systemctl start smart-chess.service
 ```
+
+Check status/logs:
+
+```bash
+systemctl status smart-chess.service
+journalctl -u smart-chess.service -f
+```
+
+If it doesn't come up after a boot, check for `start-limit-hit` in
+`systemctl status` — the unit caps automatic restarts (5 within 60s) rather
+than crash-looping forever if something is persistently broken (e.g.
+`pigpiod` never coming up).
+
+For finer-grained recovery of just the perception+UI layer (camera_node,
+board_detector_node, piece_detector_node, chess_ui) without restarting the
+whole stack — e.g. to mitigate the documented `camera_ros` stale-subscriber-
+after-~2h bug — pass `respawn:=True` to `full_system_launch.py` (off by
+default for interactive/manual launches). This is deliberately **not**
+applied to hardware/gantry nodes: respawning those individually without a
+full re-home risks operating on stale position assumptions after a crash
+mid-motion, so a hardware-layer crash is only ever recovered by the whole-
+unit systemd restart above (which correctly re-homes on every restart).

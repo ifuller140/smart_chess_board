@@ -1,0 +1,38 @@
+# /etc/systemd/system/smart-chess.service
+#
+# Auto-starts the full chess-board stack (full_system_launch.py) on boot.
+# NOT installed automatically — this is a git-tracked template, same
+# convention as setup/smart-chess-hw-tests.sudoers. To install:
+#
+#   sudo cp setup/smart-chess.service /etc/systemd/system/smart-chess.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable smart-chess.service
+#   sudo systemctl start smart-chess.service
+#
+# To check status / logs:
+#   systemctl status smart-chess.service
+#   journalctl -u smart-chess.service -f
+#
+# StartLimitIntervalSec/StartLimitBurst cap the restart loop: if the unit
+# fails 5 times within 60s (e.g. pigpiod genuinely never comes up, or a
+# real code error), systemd stops trying rather than crash-looping forever
+# — check `systemctl status` for "start-limit-hit" if the board doesn't
+# come up after a boot.
+
+[Unit]
+Description=Smart Chess Board — full system
+After=network.target pigpiod.service
+Requires=pigpiod.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ian
+WorkingDirectory=/home/ian/dev/smart_chess_board
+ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && source install/setup.bash && ros2 launch src/launch/full_system_launch.py"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
