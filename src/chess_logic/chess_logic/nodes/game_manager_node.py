@@ -45,10 +45,14 @@ Published Topics:
   /motion/command     (String) — "UCI FEN" e.g. "e2e4 rnbq..." (read by motion_planner_node)
   /game_manager/capture_progress (String) — live status during _do_capture_board()'s
     stability wait, e.g. "Stabilizing: 2/3 consistent reads" — for chess_ui display
+  /game_manager/move_candidates  (String) — JSON list of the top-3 scored legal moves
+    from the last _do_validate_move() call, e.g. [{"uci":"e2e4","score":142.3}, ...]
 
 Subscribed Topics:
   /limit_switch/clock_hit      (Bool)   — human pressed chess clock
   /perception/changed_squares  (String) — comma-separated changed square names from piece_detector
+  /perception/square_scores    (String) — JSON per-square diff scores from piece_detector,
+    used for _do_validate_move()'s confidence-scored move matching
   /game_manager/clock_event    (String) — "FLAG_WHITE" or "FLAG_BLACK" from chess_clock_node
   /motion/done                 (Bool)   — motion planner completed move
 
@@ -60,6 +64,7 @@ Service Clients:
   /chess_engine/request_move    (RequestMove) — get best engine move
 """
 
+import json
 import threading
 import time
 from collections import Counter
@@ -118,12 +123,27 @@ class GameManagerNode(Node):
         self.declare_parameter('capture_stability_count', 3)
         self.declare_parameter('motion_timeout_s', 120.0)
         self.declare_parameter('homing_timeout_s', 90.0)
+        # Score-based move matching (see _do_validate_move()/_move_match_score()):
+        # per-square scores at/below this are treated as background noise and
+        # don't count against a candidate move that doesn't explain them —
+        # without this, a move with a small footprint (2 squares) would be
+        # penalized just for having a larger complement set than a 4-square
+        # castling move, purely from summing near-zero background noise over
+        # more squares, not from any real evidence against it.
+        self.declare_parameter('match_noise_floor', 8.0)
+        # Minimum match score to accept the best-scoring legal move at all —
+        # guards against confidently picking an arbitrary "least-bad" legal
+        # move when nothing actually explains the observed scores (e.g. a
+        # spurious clock press with no real move made).
+        self.declare_parameter('min_confident_match_score', 15.0)
 
-        self._think_time      = self.get_parameter('engine_think_time_s').value
-        self._cap_timeout     = self.get_parameter('board_capture_timeout_s').value
-        self._stability_count = int(self.get_parameter('capture_stability_count').value)
-        self._move_timeout    = self.get_parameter('motion_timeout_s').value
-        self._home_timeout    = self.get_parameter('homing_timeout_s').value
+        self._think_time        = self.get_parameter('engine_think_time_s').value
+        self._cap_timeout       = self.get_parameter('board_capture_timeout_s').value
+        self._stability_count   = int(self.get_parameter('capture_stability_count').value)
+        self._move_timeout      = self.get_parameter('motion_timeout_s').value
+        self._home_timeout      = self.get_parameter('homing_timeout_s').value
+        self._match_noise_floor = float(self.get_parameter('match_noise_floor').value)
+        self._min_match_score   = float(self.get_parameter('min_confident_match_score').value)
 
         # Live-reconfigure: without this, engine_think_time_s pushed via
         # SetParameters (Chess OS's game-settings UI) only updated ROS's
@@ -160,6 +180,12 @@ class GameManagerNode(Node):
         # of accepting whatever the very first tick reports (which may catch a
         # hand still over the board, mid-motion blur, or a camera-settling frame).
         self._board_state_history: list = []
+        # Latest /perception/square_scores reading (chess.Square -> float),
+        # continuously updated. _do_capture_board() snapshots this into
+        # _captured_square_scores once it accepts a stable (or mode-fallback)
+        # result, for _do_validate_move()'s score-based move matching.
+        self._latest_square_scores: dict = {}
+        self._captured_square_scores: dict = {}
         self._motion_success = True
 
         # Gates so a late/stale callback from a previous timed-out request
@@ -184,12 +210,19 @@ class GameManagerNode(Node):
         # like it's stuck.
         self._capture_progress_pub = self.create_publisher(
             String, '/game_manager/capture_progress', 10)
+        # Top-scoring candidate legal moves from the last _do_validate_move()
+        # call, e.g. [{"uci":"e2e4","score":142.3}, ...] — transparency into
+        # *why* a move was inferred, surfaced in chess_ui.
+        self._move_candidates_pub = self.create_publisher(
+            String, '/game_manager/move_candidates', 10)
 
         # ── Subscriptions ─────────────────────────────────────────────────
         self.create_subscription(
             Bool, '/limit_switch/clock_hit', self._on_clock_hit, 10)
         self.create_subscription(
             String, '/perception/changed_squares', self._on_changed_squares, 10)
+        self.create_subscription(
+            String, '/perception/square_scores', self._on_square_scores, 10)
         self.create_subscription(
             String, '/game_manager/clock_event', self._on_clock_event, 10)
         self.create_subscription(
@@ -255,6 +288,21 @@ class GameManagerNode(Node):
                         self.get_logger().warn(f'Invalid square name from perception: {name!r}')
         self._board_state_history.append(frozenset(sqs))
         self._board_state_event.set()
+
+    def _on_square_scores(self, msg: String):
+        """Continuously-updated cache of piece_detector_node's per-square diff
+        scores — not gated on _awaiting_board_state like _on_changed_squares,
+        since this is just a live cache; _do_capture_board() snapshots it into
+        _captured_square_scores at the moment it accepts a result, for
+        _do_validate_move()'s score-based move matching."""
+        try:
+            raw = json.loads(msg.data)
+            self._latest_square_scores = {
+                chess.parse_square(name): float(score)
+                for name, score in raw.items()
+            }
+        except Exception as e:
+            self.get_logger().debug(f'square_scores decode failed: {e}')
 
     def _on_motion_done(self, msg: Bool):
         """Motion planner signalled move completion."""
@@ -572,6 +620,10 @@ class GameManagerNode(Node):
                 break
 
         self._awaiting_board_state = False
+        # Snapshot whatever piece_detector_node's scores were at this moment —
+        # used by _do_validate_move()'s score-based matching instead of the
+        # thresholded changed_squares set alone.
+        self._captured_square_scores = dict(self._latest_square_scores)
 
         if stable is not None:
             self._latest_changed_squares = set(stable)
@@ -626,89 +678,87 @@ class GameManagerNode(Node):
 
     def _do_validate_move(self) -> 'chess.Move | None':
         """
-        Infer the human's move from the set of changed squares reported by
-        piece_detector_node (frame diff of pre-move vs post-move board image).
+        Infer the human's move from piece_detector_node's continuous per-
+        square diff scores (_captured_square_scores — snapshotted by
+        _do_capture_board() at the moment it accepted a stable result), not
+        just the boolean thresholded changed-squares set.
 
-        For each legal move, computes the exact set of squares that would change
-        on the board and matches it against what perception detected:
-          - Normal move:  2 squares (from, to)
-          - Capture:      2 squares (from=empty, to=piece-changed)
-          - En passant:   3 squares (from, to, captured-pawn)
-          - Castling:     4 squares (king from/to + rook from/to)
-          - Promotion:    2 squares (same footprint as normal; prefer queen)
-
-        Noise tolerance: if no exact match, tries removing the lowest-diff square
-        to account for minor false positives from lighting or camera noise.
+        For every legal move, _move_match_score() scores how well its exact
+        board footprint (see _get_move_changed_squares() — normal move:
+        {from,to}; capture: same; en passant: +captured-pawn square;
+        castling: +rook from/to) explains the observed scores, and the
+        highest-scoring legal move overall wins. This replaces the previous
+        exact-match-then-drop-exactly-one-square approach: that could handle
+        either a missed detection OR a false positive, but not both at once,
+        and didn't use the continuous confidence it already had access to.
         """
         pre_board = chess.Board(self._pre_move_fen)
-        changed   = self._latest_changed_squares
+        scores = self._captured_square_scores
 
-        if len(changed) == 0:
-            self.get_logger().warn('No squares changed — cannot infer move')
+        if not scores:
+            self.get_logger().warn('No per-square scores available — cannot infer move')
             return None
 
-        sq_names = sorted(chess.square_name(s) for s in changed)
-        self.get_logger().info(f'Validating against changed squares: {sq_names}')
-
-        # Exact match first
-        move = self._match_legal_move(pre_board, changed)
-        if move:
-            return move
-
-        # Noise tolerance: try dropping one square at a time
-        if len(changed) > 2:
-            for sq in list(changed):
-                subset = changed - {sq}
-                if len(subset) >= 2:
-                    move = self._match_legal_move(pre_board, subset)
-                    if move:
-                        self.get_logger().warn(
-                            f'Noise tolerance applied: ignored square '
-                            f'{chess.square_name(sq)} — matched {move.uci()}')
-                        return move
-
-        self.get_logger().warn(
-            f'No legal move matches changed squares: {sq_names}  '
-            f'Pre-FEN: {self._pre_move_fen}'
-        )
-        return None
-
-    def _match_legal_move(
-        self, board: chess.Board, changed: set
-    ) -> 'chess.Move | None':
-        """Find a legal move whose board footprint exactly equals changed."""
-        candidates = []
-        for move in board.legal_moves:
-            if self._get_move_changed_squares(board, move) == changed:
-                candidates.append(move)
-
-        if not candidates:
+        ranked = [
+            (move, self._move_match_score(self._get_move_changed_squares(pre_board, move), scores))
+            for move in pre_board.legal_moves
+        ]
+        if not ranked:
+            self.get_logger().warn('No legal moves available to match against')
             return None
 
-        if len(candidates) == 1:
-            move  = candidates[0]
-            piece = board.piece_at(move.from_square)
-            pname = chess.piece_name(piece.piece_type) if piece else '?'
-            self.get_logger().info(
-                f'Inferred move: {move.uci()} '
-                f'({pname} {chess.square_name(move.from_square)}'
-                f'→{chess.square_name(move.to_square)})'
-            )
-            return move
-
-        # Multiple candidates occur only with pawn promotion (same squares, different piece)
-        queen_promos = [m for m in candidates if m.promotion == chess.QUEEN]
-        if queen_promos:
-            self.get_logger().info(
-                f'Promotion ambiguity resolved to queen: {queen_promos[0].uci()}')
-            return queen_promos[0]
-
-        chosen = candidates[0]
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        top = ranked[:3]
         self.get_logger().info(
-            f'Multiple candidates, chose: {chosen.uci()} '
-            f'(all: {[m.uci() for m in candidates]})'
+            'Top candidate moves: ' + ', '.join(f'{m.uci()}={s:.1f}' for m, s in top))
+        self._move_candidates_pub.publish(String(data=json.dumps(
+            [{"uci": m.uci(), "score": round(s, 1)} for m, s in top])))
+
+        best_move, best_score = ranked[0]
+        if best_score < self._min_match_score:
+            self.get_logger().warn(
+                f'No confident move match (best={best_move.uci()} '
+                f'score={best_score:.1f} < min={self._min_match_score}) '
+                f'Pre-FEN: {self._pre_move_fen}')
+            return None
+
+        # Promotion ambiguity: several legal moves share the exact same
+        # footprint (only the promotion piece type differs) and therefore
+        # the same score — prefer queen, matching the old exact-match logic.
+        tied = [m for m, s in ranked if abs(s - best_score) < 1e-6]
+        if len(tied) > 1:
+            queen_promos = [m for m in tied if m.promotion == chess.QUEEN]
+            if queen_promos:
+                self.get_logger().info(
+                    f'Promotion ambiguity resolved to queen: {queen_promos[0].uci()}')
+                return queen_promos[0]
+
+        piece = pre_board.piece_at(best_move.from_square)
+        pname = chess.piece_name(piece.piece_type) if piece else '?'
+        self.get_logger().info(
+            f'Inferred move: {best_move.uci()} (score={best_score:.1f}) '
+            f'({pname} {chess.square_name(best_move.from_square)}'
+            f'→{chess.square_name(best_move.to_square)})'
         )
-        return chosen
+        return best_move
+
+    def _move_match_score(self, footprint: set, scores: dict) -> float:
+        """Score how well `footprint` (a legal move's changed-square set,
+        from _get_move_changed_squares()) explains the observed per-square
+        diff scores: sum of scores on the footprint squares, minus every
+        OTHER square that's still elevated above match_noise_floor and left
+        unexplained by this move. Squares near the background noise floor
+        contribute ~0 either way, so a small-footprint move (2 squares) isn't
+        penalized just for having a larger complement set than a 4-square
+        castling move would — only genuinely elevated, unexplained squares
+        count against a candidate."""
+        explained = sum(scores.get(sq, 0.0) for sq in footprint)
+        unexplained = sum(
+            max(0.0, score - self._match_noise_floor)
+            for sq, score in scores.items()
+            if sq not in footprint
+        )
+        return explained - unexplained
 
     def _get_move_changed_squares(self, board: chess.Board, move: chess.Move) -> set:
         """
@@ -946,6 +996,12 @@ class GameManagerNode(Node):
             elif p.name == 'capture_stability_count':
                 self._stability_count = int(p.value)
                 self.get_logger().info(f'capture_stability_count updated to {self._stability_count}')
+            elif p.name == 'match_noise_floor':
+                self._match_noise_floor = float(p.value)
+                self.get_logger().info(f'match_noise_floor updated to {self._match_noise_floor}')
+            elif p.name == 'min_confident_match_score':
+                self._min_match_score = float(p.value)
+                self.get_logger().info(f'min_confident_match_score updated to {self._min_match_score}')
         return SetParametersResult(successful=True)
 
     def _verify_starting_position(self):

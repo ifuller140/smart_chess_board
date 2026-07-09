@@ -62,6 +62,7 @@ if HAS_ROS:
             self.create_subscription(Image,   "/perception/piece_debug",     self._on_diff_img,       10)
             self.create_subscription(String,  "/perception/reference_status",self._on_ref_status,     10)
             self.create_subscription(String,  "/game_manager/capture_progress", self._on_capture_progress, 10)
+            self.create_subscription(String,  "/game_manager/move_candidates", self._on_move_candidates, 10)
 
             # ── Publishers ─────────────────────────────────────────────
             self.vel_pub       = self.create_publisher(Twist,    "/stepper/velocity",       10)
@@ -328,6 +329,13 @@ if HAS_ROS:
         def _on_capture_progress(self, msg):
             with state._lock:
                 state._state["capture_progress"] = msg.data
+
+        def _on_move_candidates(self, msg):
+            try:
+                with state._lock:
+                    state._state["move_candidates"] = json.loads(msg.data)
+            except Exception as e:
+                self.get_logger().debug(f'move_candidates decode failed: {e}')
 
         def request_detector_params(self, threshold, compensation,
                                     clump_enable=False, clump_keep=1,

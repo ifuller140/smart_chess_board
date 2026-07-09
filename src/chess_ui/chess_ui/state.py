@@ -98,6 +98,9 @@ _state = {
     # Live status during game_manager_node's post-move stability wait, e.g.
     # "Stabilizing: 2/3 consistent reads" — see /game_manager/capture_progress.
     "capture_progress":           "",
+    # Top-3 scored candidate legal moves from the last inference, e.g.
+    # [{"uci":"e2e4","score":142.3}, ...] — see /game_manager/move_candidates.
+    "move_candidates":            [],
 }
 
 # Diff detection params — pushed to piece_detector_node via SetParameters

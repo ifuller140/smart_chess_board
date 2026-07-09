@@ -662,6 +662,10 @@ body.showcase #debug-view{display:none}
               <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Capture Progress</span>
               <span class="stat-val" id="capture-progress-inline" style="font-size:.7em;color:#58a6ff">–</span>
             </div>
+            <div style="font-size:.63em;color:var(--dim);margin-top:8px" title="Top-3 legal moves ranked by how well their board footprint explains the observed per-square diff scores. Transparency into why a move was inferred (or why none was confident enough).">
+              Top candidate moves:
+              <div id="move-candidates-inline" style="font-family:monospace;color:#3fb950;margin-top:3px">–</div>
+            </div>
             <div class="tog-row" style="margin-top:8px">
               <input type="checkbox" id="t_exposure_lock" onchange="toggleExposureLock(this.checked)">
               <label for="t_exposure_lock" title="Freezes camera_ros's auto-exposure/auto-white-balance at whatever it's currently converged to. Continuous AE/AWB otherwise re-adjusts brightness/color between the pre-move reference and post-move captures with nothing physically moved — the most common cause of board-wide phantom diff. Lock before capturing a reference for best results.">
@@ -2084,6 +2088,15 @@ function pollStatus() {
     // ── Capture-progress status (stability-gated post-move capture) ──────
     var capProg = document.getElementById('capture-progress-inline');
     if (capProg) capProg.textContent = d.capture_progress || '–';
+
+    // ── Top candidate moves (confidence-scored legal-move matching) ──────
+    var candEl = document.getElementById('move-candidates-inline');
+    if (candEl) {
+      var cands = d.move_candidates || [];
+      candEl.textContent = cands.length
+        ? cands.map(function(c){ return c.uci + '=' + c.score; }).join('  ')
+        : '–';
+    }
 
     // ── Settings: populate on first load ─────────────────────────
     var ts = document.getElementById('think-slider');
