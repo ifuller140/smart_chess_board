@@ -22,9 +22,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription,
-                             LogInfo, RegisterEventHandler)
-from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
+                             LogInfo)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -84,6 +82,8 @@ def generate_launch_description():
     # thread), so it doesn't expect the --ros-args launch_ros.Node injects.
     chess_ui_process = ExecuteProcess(
         cmd=['ros2', 'run', 'chess_ui', 'chess_ui'],
+        respawn=respawn,
+        respawn_delay=2.0,
         output='screen',
     )
 
@@ -188,9 +188,6 @@ def generate_launch_description():
         # thread), so it doesn't expect the --ros-args launch_ros.Node injects.
 
         chess_ui_process,
-        RegisterEventHandler(
-            OnProcessExit(target_action=chess_ui_process, on_exit=[chess_ui_process]),
-            condition=IfCondition(respawn)),
 
         LogInfo(msg='All nodes launched — waiting for system to initialize...'),
     ])

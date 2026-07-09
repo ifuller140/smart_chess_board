@@ -17,10 +17,8 @@ Usage:
 """
 
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo,
-                             RegisterEventHandler, TimerAction)
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
-from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -112,6 +110,8 @@ def generate_launch_description():
                 ('/camera_node/camera_info',          '/camera/camera_info'),
             ],
             condition=IfCondition(use_camera_ros),
+            respawn=respawn,
+            respawn_delay=2.0,
             output='screen',
         )
 
@@ -129,6 +129,8 @@ def generate_launch_description():
             'calibration_file': cal_file,
         }],
         condition=UnlessCondition(use_camera_ros),
+        respawn=respawn,
+        respawn_delay=2.0,
         output='screen',
     )
 
@@ -136,6 +138,8 @@ def generate_launch_description():
         package='chess_perception',
         executable='board_detector_node',
         name='board_detector_node',
+        respawn=respawn,
+        respawn_delay=2.0,
         output='screen',
     )
 
@@ -143,19 +147,10 @@ def generate_launch_description():
         package='chess_perception',
         executable='piece_detector_node',
         name='piece_detector_node',
+        respawn=respawn,
+        respawn_delay=2.0,
         output='screen',
     )
-
-    # Each of these RegisterEventHandlers only ever fires for a node that
-    # actually launched a process (e.g. camera_fallback_node's handler is a
-    # no-op whenever use_camera_ros=True, since that Node action's own
-    # condition never lets it start in the first place).
-    respawn_handlers = [
-        RegisterEventHandler(OnProcessExit(target_action=n, on_exit=[n]),
-                              condition=IfCondition(respawn))
-        for n in (camera_ros_node, camera_fallback_node,
-                  board_detector_node, piece_detector_node)
-    ]
 
     return LaunchDescription(args + [
 
@@ -165,7 +160,6 @@ def generate_launch_description():
         camera_fallback_node,
         board_detector_node,
         piece_detector_node,
-        *respawn_handlers,
 
         LogInfo(msg='Perception stack ready.'),
 
