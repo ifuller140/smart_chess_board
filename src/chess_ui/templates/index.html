@@ -683,6 +683,43 @@ body.showcase #debug-view{display:none}
           </div>
       </div>
 
+      <!-- Board corners: visibility + manual drag override -->
+      <div class="card" style="margin-bottom:8px">
+        <div class="card-hdr">Board Corners</div>
+        <div class="card-body">
+          <div class="diff-grid">
+            <div>
+              <div style="font-size:.63em;color:var(--dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:.08em">
+                Detected Corners (live from /perception/board_debug)
+              </div>
+              <img id="corner-heatmap" src="/api/corner_frame" alt="corner overlay">
+              <div style="margin-top:8px;font-size:.63em;color:var(--dim)">
+                TL/TR/BR/BL markers + board outline, whether from automatic detection or the manual override below.
+              </div>
+            </div>
+            <div>
+              <div style="font-size:.63em;color:var(--dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:.08em">
+                Manual Override — drag corners over the raw camera view
+              </div>
+              <div style="position:relative;display:inline-block">
+                <img id="corner-drag-bg" src="/api/snapshot" style="display:block;max-width:100%">
+                <canvas id="corner-drag-canvas" style="position:absolute;top:0;left:0;cursor:crosshair"></canvas>
+              </div>
+              <div style="font-size:.62em;color:var(--dim);margin-top:6px">
+                Drag a handle to correct a corner. Order: TL(red) TR(green) BR(blue) BL(yellow).
+                Only needed when automatic detection is wrong — it already works when the whole
+                board is in frame with reasonable lighting.
+              </div>
+              <div class="btn-row" style="margin-top:8px">
+                <button class="btn primary" onclick="applyManualCorners()">&#10003; Apply Manual Corners</button>
+                <button class="btn" onclick="clearManualCorners()">&#8635; Clear (use automatic)</button>
+              </div>
+              <div style="font-size:.7em;margin-top:6px" id="manual-corners-status">Automatic detection active</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Diff analysis section -->
       <div class="card">
         <div class="card-hdr">Diff Analysis — Threshold Tuning</div>
@@ -1326,14 +1363,111 @@ function applyToDetector() {
     .then(function(d){ if (!d.ok) alert('Apply failed: '+(d.msg||'')); });
 }
 
+// ── Manual corner-drag override ───────────────────────────────────────
+// Corners are always tracked in NATIVE image pixel coordinates (matching
+// the raw camera frame board_detector_node actually operates on); the
+// canvas is CSS-scaled to fit the displayed background image, and mouse
+// coordinates are converted back to native space before dragging/applying.
+var _cornerPts = null;       // [[x,y],[x,y],[x,y],[x,y]] TL/TR/BR/BL, native px
+var _cornerNaturalSize = null;
+var _cornerDragIdx = -1;
+var _cornerColors = ['#ff4444', '#3fb950', '#58a6ff', '#e3b341'];
+
+function _cornerCanvasSetup() {
+  var bg = document.getElementById('corner-drag-bg');
+  var canvas = document.getElementById('corner-drag-canvas');
+  if (!bg || !canvas || !bg.naturalWidth) return;
+  _cornerNaturalSize = {w: bg.naturalWidth, h: bg.naturalHeight};
+  canvas.width = bg.clientWidth;
+  canvas.height = bg.clientHeight;
+  canvas.style.width = bg.clientWidth + 'px';
+  canvas.style.height = bg.clientHeight + 'px';
+  if (!_cornerPts) {
+    // Default: inset rectangle, roughly where a well-framed board would be.
+    var w = _cornerNaturalSize.w, h = _cornerNaturalSize.h;
+    _cornerPts = [[w*0.1,h*0.1], [w*0.9,h*0.1], [w*0.9,h*0.9], [w*0.1,h*0.9]];
+  }
+  _cornerCanvasRedraw();
+}
+
+function _cornerCanvasRedraw() {
+  var canvas = document.getElementById('corner-drag-canvas');
+  if (!canvas || !_cornerPts || !_cornerNaturalSize) return;
+  var ctx = canvas.getContext('2d');
+  var sx = canvas.width / _cornerNaturalSize.w, sy = canvas.height / _cornerNaturalSize.h;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#ffffff88'; ctx.lineWidth = 1.5; ctx.beginPath();
+  _cornerPts.forEach(function(p, i) {
+    var x = p[0]*sx, y = p[1]*sy;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.closePath(); ctx.stroke();
+  _cornerPts.forEach(function(p, i) {
+    var x = p[0]*sx, y = p[1]*sy;
+    ctx.beginPath(); ctx.arc(x, y, 8, 0, 2*Math.PI);
+    ctx.fillStyle = _cornerColors[i]; ctx.fill();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+  });
+}
+
+function _cornerCanvasToNative(canvas, clientX, clientY) {
+  var rect = canvas.getBoundingClientRect();
+  var sx = _cornerNaturalSize.w / canvas.width, sy = _cornerNaturalSize.h / canvas.height;
+  return [(clientX - rect.left) * sx, (clientY - rect.top) * sy];
+}
+
+(function() {
+  var canvas = document.getElementById('corner-drag-canvas');
+  var bg = document.getElementById('corner-drag-bg');
+  if (!canvas || !bg) return;
+  bg.addEventListener('load', _cornerCanvasSetup);
+  if (bg.complete && bg.naturalWidth) _cornerCanvasSetup();
+
+  canvas.addEventListener('mousedown', function(e) {
+    if (!_cornerPts) return;
+    var pt = _cornerCanvasToNative(canvas, e.clientX, e.clientY);
+    var best = -1, bestDist = 25 * (_cornerNaturalSize.w / canvas.width); // ~25px hit radius on screen
+    _cornerPts.forEach(function(p, i) {
+      var d = Math.hypot(p[0]-pt[0], p[1]-pt[1]);
+      if (d < bestDist) { bestDist = d; best = i; }
+    });
+    _cornerDragIdx = best;
+  });
+  canvas.addEventListener('mousemove', function(e) {
+    if (_cornerDragIdx < 0) return;
+    _cornerPts[_cornerDragIdx] = _cornerCanvasToNative(canvas, e.clientX, e.clientY);
+    _cornerCanvasRedraw();
+  });
+  window.addEventListener('mouseup', function() { _cornerDragIdx = -1; });
+})();
+
+function applyManualCorners() {
+  if (!_cornerPts) return;
+  fetch('/api/perception/manual_corners', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({points: _cornerPts})
+  }).then(function(r){return r.json();}).then(function(d){
+    if (!d.ok) alert('Apply failed: ' + (d.msg || ''));
+  });
+}
+
+function clearManualCorners() {
+  fetch('/api/perception/manual_corners/clear', {method:'POST'})
+    .then(function(r){return r.json();}).then(function(d){
+      if (!d.ok) alert('Clear failed: ' + (d.msg || ''));
+    });
+}
+
 // Refresh diff heatmap image (top strip + Perception tab) always; score
 // data only while the Perception tab is actually visible.
 setInterval(function() {
   var t = Date.now();
   var topImg  = document.getElementById('top-diff-img');
   var percImg = document.getElementById('diff-heatmap');
+  var cornImg = document.getElementById('corner-heatmap');
   if (topImg)  topImg.src  = '/api/diff_frame?t=' + t;
   if (percImg) percImg.src = '/api/diff_frame?t=' + t;
+  if (cornImg) cornImg.src = '/api/corner_frame?t=' + t;
   if (activeTab !== 'perception') return;
   fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
     _squareScores = d.scores || {};
@@ -1342,6 +1476,8 @@ setInterval(function() {
     if (d.shift_compensation !== undefined) _diffParams.shift_compensation = d.shift_compensation;
     if (d.clump_enable !== undefined) _diffParams.clump_enable = d.clump_enable;
     if (d.clump_keep_per_group !== undefined) _diffParams.clump_keep_per_group = d.clump_keep_per_group;
+    if (d.roi_bias !== undefined) _diffParams.roi_bias = d.roi_bias;
+    if (d.edge_weight !== undefined) _diffParams.edge_weight = d.edge_weight;
   });
 }, 1500);
 
@@ -2096,6 +2232,18 @@ function pollStatus() {
       candEl.textContent = cands.length
         ? cands.map(function(c){ return c.uci + '=' + c.score; }).join('  ')
         : '–';
+    }
+
+    // ── Manual corner override status ─────────────────────────────────
+    var mcStatus = document.getElementById('manual-corners-status');
+    if (mcStatus) {
+      if (d.manual_corners_active) {
+        mcStatus.textContent = 'Manual override active';
+        mcStatus.style.color = 'var(--warn)';
+      } else {
+        mcStatus.textContent = 'Automatic detection active';
+        mcStatus.style.color = 'var(--ok)';
+      }
     }
 
     // ── Settings: populate on first load ─────────────────────────

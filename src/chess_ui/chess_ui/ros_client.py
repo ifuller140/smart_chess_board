@@ -18,7 +18,7 @@ try:
     from rclpy.node import Node
     from std_msgs.msg import String, Bool, Float32
     from sensor_msgs.msg import Image, CompressedImage
-    from geometry_msgs.msg import Point as RosPoint, Twist
+    from geometry_msgs.msg import Point as RosPoint, Point32, Polygon, Twist
     from std_srvs.srv import Trigger
     HAS_ROS = True
 except ImportError:
@@ -60,6 +60,7 @@ if HAS_ROS:
             self.create_subscription(String,  "/game_manager/result",        self._on_result,         10)
             self.create_subscription(String,  "/perception/square_scores",   self._on_square_scores,  10)
             self.create_subscription(Image,   "/perception/piece_debug",     self._on_diff_img,       10)
+            self.create_subscription(Image,   "/perception/board_debug",     self._on_corner_img,     10)
             self.create_subscription(String,  "/perception/reference_status",self._on_ref_status,     10)
             self.create_subscription(String,  "/game_manager/capture_progress", self._on_capture_progress, 10)
             self.create_subscription(String,  "/game_manager/move_candidates", self._on_move_candidates, 10)
@@ -70,6 +71,11 @@ if HAS_ROS:
             self.estop_pub     = self.create_publisher(Bool,     "/emergency_stop",         10)
             self.reset_pos_pub = self.create_publisher(Bool,     "/stepper/reset_position", 10)
             self.set_time_pub  = self.create_publisher(Float32,  "/clock/set_time",         10)
+            # Manual corner-drag override — a correction path for when
+            # board_detector_node's automatic detection is wrong, not the
+            # primary input. Empty Polygon (0 points) clears it.
+            self.manual_corners_pub = self.create_publisher(
+                Polygon, "/perception/manual_corners_override", 10)
 
             # ── Service clients ────────────────────────────────────────
             self._svc_engage       = self.create_client(Trigger, "/servo/engage")
@@ -321,6 +327,32 @@ if HAS_ROS:
                         state._state["diff_frame"] = bytes(buf)
             except Exception as e:
                 self.get_logger().debug(f'diff_img decode failed: {e}')
+
+        def _on_corner_img(self, msg):
+            """/perception/board_debug — annotated corner-detection overlay
+            (TL/TR/BR/BL markers + board outline), previously never displayed
+            anywhere in chess_ui despite board_detector_node always
+            publishing it."""
+            try:
+                h, w = msg.height, msg.width
+                data = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+                img  = data.reshape((h, w, 3))
+                ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    with state._lock:
+                        state._state["corner_frame"] = bytes(buf)
+            except Exception as e:
+                self.get_logger().debug(f'corner_img decode failed: {e}')
+
+        def set_manual_corners(self, points):
+            """points: list of 4 (x, y) tuples, full-resolution pixel
+            coordinates matching the raw camera frame, in TL/TR/BR/BL order."""
+            poly = Polygon()
+            poly.points = [Point32(x=float(x), y=float(y), z=0.0) for x, y in points]
+            self.manual_corners_pub.publish(poly)
+
+        def clear_manual_corners(self):
+            self.manual_corners_pub.publish(Polygon())  # empty = clear override
 
         def _on_ref_status(self, msg):
             with state._lock:

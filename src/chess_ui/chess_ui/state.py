@@ -101,6 +101,13 @@ _state = {
     # Top-3 scored candidate legal moves from the last inference, e.g.
     # [{"uci":"e2e4","score":142.3}, ...] — see /game_manager/move_candidates.
     "move_candidates":            [],
+    # Annotated corner-detection overlay from board_detector_node
+    # (/perception/board_debug) — previously never displayed anywhere.
+    "corner_frame":                None,
+    # True once the manual corner-drag override has been applied (cleared
+    # locally when "Clear" is pressed — board_detector_node is the actual
+    # source of truth for whether an override is active).
+    "manual_corners_active":       False,
 }
 
 # Diff detection params — pushed to piece_detector_node via SetParameters

@@ -18,6 +18,14 @@ Published Topics:
     corner staleness themselves (now - stamp) instead of every publish
     looking equally fresh.
   /perception/board_debug     (sensor_msgs/Image)           — annotated frame
+
+Subscribed Topics:
+  /perception/manual_corners_override (geometry_msgs/Polygon) — 4 points
+    (TL/TR/BR/BL, full-resolution pixel coordinates matching the raw camera
+    frame) to use INSTEAD of automatic detection, e.g. from chess_ui's
+    manual corner-drag UI — a correction path for when automatic detection
+    is wrong, not the primary input. An empty Polygon (0 points) clears the
+    override and resumes automatic detection.
 """
 
 import time
@@ -27,10 +35,10 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CompressedImage
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, Polygon
 
 from chess_interfaces.msg import BoardState
-from chess_perception.board_detection import BoardDetector
+from chess_perception.board_detection import BoardDetector, BoardGeometry
 
 
 class BoardDetectorNode(Node):
@@ -53,6 +61,12 @@ class BoardDetectorNode(Node):
         # downstream consumers can tell "just detected" from "detected a
         # while ago and republished because this tick's detection failed."
         self._last_fresh_stamp = None
+        # When set (via /perception/manual_corners_override), used INSTEAD of
+        # automatic detection every tick — a human correction path for when
+        # automatic detection is wrong, not the primary input. Full-resolution
+        # pixel coordinates (matching the decoded camera frame), same as
+        # self._last_corners — no detection_scale involved.
+        self._manual_corners = None
 
         # Store latest compressed message — JPEG is ~30x smaller than raw,
         # avoiding 11MB/s DDS deserialization overhead per subscriber.
@@ -61,6 +75,9 @@ class BoardDetectorNode(Node):
         self.image_sub = self.create_subscription(
             CompressedImage, '/camera/image_raw/compressed',
             self._on_image, 10)
+        self.create_subscription(
+            Polygon, '/perception/manual_corners_override',
+            self._on_manual_corners, 10)
 
         self.debug_pub = self.create_publisher(
             Image, '/perception/board_debug', 10)
@@ -82,6 +99,17 @@ class BoardDetectorNode(Node):
     def _on_image(self, msg: Image):
         self._latest_msg = msg  # Just store reference; timer decodes
 
+    def _on_manual_corners(self, msg: Polygon):
+        if len(msg.points) == 4:
+            self._manual_corners = np.array(
+                [[p.x, p.y] for p in msg.points], dtype=np.float32)
+            self.get_logger().info(
+                f'Manual corner override set: {self._manual_corners.tolist()}')
+        else:
+            self._manual_corners = None
+            self.get_logger().info(
+                'Manual corner override cleared — resuming automatic detection')
+
     # ─────────────────────────────────────────────────────────────────────
     # Timer callback — decode + detect at controlled rate
     # ─────────────────────────────────────────────────────────────────────
@@ -102,26 +130,37 @@ class BoardDetectorNode(Node):
             self.get_logger().error(f'Image decode error: {e}')
             return
 
-        # Detect at reduced resolution. Pass the previous detection's corners
-        # (scaled into this tick's detection-resolution space) so the
-        # detector can anchor TL/TR/BR/BL labeling to them instead of
-        # re-deriving pure-geometric labels every tick — see
-        # BoardDetector.detect()'s docstring for why that flips labels on a
-        # near-symmetric board.
-        if self._det_scale < 1.0:
-            small = cv2.resize(cv_image, None,
-                                fx=self._det_scale, fy=self._det_scale)
-            prev_scaled = (self._last_corners * self._det_scale
-                           if self._last_corners is not None else None)
-            geometry = self._detector.detect(small, previous_corners=prev_scaled)
-            if geometry is not None:
-                geometry.corners = geometry.corners / self._det_scale
-        else:
-            geometry = self._detector.detect(cv_image, previous_corners=self._last_corners)
-
-        if geometry is not None:
-            self._last_corners = geometry.corners.copy()
+        if self._manual_corners is not None:
+            # Manual override — always "fresh" (a human just set it), skip
+            # automatic detection entirely this tick.
+            H     = cv2.getPerspectiveTransform(self._manual_corners, self._detector.dst_points)
+            H_inv = cv2.getPerspectiveTransform(self._detector.dst_points, self._manual_corners)
+            geometry = BoardGeometry(
+                corners=self._manual_corners, homography=H,
+                inverse_homography=H_inv, output_size=self._detector.output_size)
+            self._last_corners = self._manual_corners.copy()
             self._last_fresh_stamp = msg.header.stamp
+        else:
+            # Detect at reduced resolution. Pass the previous detection's corners
+            # (scaled into this tick's detection-resolution space) so the
+            # detector can anchor TL/TR/BR/BL labeling to them instead of
+            # re-deriving pure-geometric labels every tick — see
+            # BoardDetector.detect()'s docstring for why that flips labels on a
+            # near-symmetric board.
+            if self._det_scale < 1.0:
+                small = cv2.resize(cv_image, None,
+                                    fx=self._det_scale, fy=self._det_scale)
+                prev_scaled = (self._last_corners * self._det_scale
+                               if self._last_corners is not None else None)
+                geometry = self._detector.detect(small, previous_corners=prev_scaled)
+                if geometry is not None:
+                    geometry.corners = geometry.corners / self._det_scale
+            else:
+                geometry = self._detector.detect(cv_image, previous_corners=self._last_corners)
+
+            if geometry is not None:
+                self._last_corners = geometry.corners.copy()
+                self._last_fresh_stamp = msg.header.stamp
 
         # Publish geometry (current or cached)
         corners = geometry.corners if geometry is not None else self._last_corners

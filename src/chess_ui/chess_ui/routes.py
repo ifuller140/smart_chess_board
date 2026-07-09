@@ -85,6 +85,7 @@ def register_routes(app):
                 "exposure_locked":            s["exposure_locked"],
                 "capture_progress":           s["capture_progress"],
                 "move_candidates":            s["move_candidates"],
+                "manual_corners_active":      s["manual_corners_active"],
             })
 
     @app.route("/api/snapshot")
@@ -262,6 +263,50 @@ def register_routes(app):
             data = camera_mod.blank_jpeg(400, 400, "Waiting for piece_detector...")
         return Response(data, mimetype="image/jpeg",
                         headers={"Cache-Control": "no-store"})
+
+    @app.route("/api/corner_frame")
+    def api_corner_frame():
+        """Board corner-detection overlay (from /perception/board_debug) —
+        TL/TR/BR/BL markers + board outline, whether from automatic detection
+        or a manual override."""
+        with state._lock:
+            data = state._state.get("corner_frame")
+        if not data:
+            data = camera_mod.blank_jpeg(400, 400, "Waiting for board_detector...")
+        return Response(data, mimetype="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.route("/api/perception/manual_corners", methods=["POST"])
+    def api_manual_corners_set():
+        """Push a manual 4-corner override to board_detector_node — a
+        correction path for when automatic detection is wrong, not the
+        primary input. Expects {"points": [[x,y],[x,y],[x,y],[x,y]]} in
+        TL/TR/BR/BL order, full-resolution pixel coordinates matching the
+        raw camera frame."""
+        data = request.get_json(silent=True) or {}
+        points = data.get("points")
+        if not isinstance(points, list) or len(points) != 4:
+            return jsonify({"ok": False, "msg": "Need exactly 4 [x,y] points"}), 400
+        try:
+            points = [(float(p[0]), float(p[1])) for p in points]
+        except (TypeError, ValueError, IndexError):
+            return jsonify({"ok": False, "msg": "Malformed points"}), 400
+        node = ros_client.ros_node
+        if node is None:
+            return jsonify({"ok": False, "msg": "ROS not connected"}), 503
+        node.set_manual_corners(points)
+        with state._lock:
+            state._state["manual_corners_active"] = True
+        return jsonify({"ok": True})
+
+    @app.route("/api/perception/manual_corners/clear", methods=["POST"])
+    def api_manual_corners_clear():
+        node = ros_client.ros_node
+        if node is not None:
+            node.clear_manual_corners()
+        with state._lock:
+            state._state["manual_corners_active"] = False
+        return jsonify({"ok": True})
 
     @app.route("/api/square_scores")
     def api_square_scores():
