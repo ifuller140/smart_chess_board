@@ -82,6 +82,7 @@ def register_routes(app):
                 "think_time_s":               s.get("think_time_s", 2.0),
                 "session_reference_captured": s["session_reference_captured"],
                 "ref_status":                 s["ref_status"],
+                "exposure_locked":            s["exposure_locked"],
             })
 
     @app.route("/api/snapshot")
@@ -227,6 +228,28 @@ def register_routes(app):
                 state._state["session_reference_captured"] = True
                 state._state["ref_status"] = "Reference captured ✓"
         return jsonify({"ok": ok, "msg": msg})
+
+    @app.route("/api/perception/exposure/lock", methods=["POST"])
+    def api_exposure_lock():
+        """Lock/unlock camera_node's auto-exposure/auto-white-balance.
+
+        Continuous AE/AWB otherwise re-adjusts brightness/color between the
+        pre-move reference and post-move captures even with nothing
+        physically moved, showing up as board-wide phantom diff. Locking
+        freezes the sensor at whatever it had converged to.
+        """
+        data   = request.get_json(silent=True) or {}
+        locked = bool(data.get("locked", True))
+        with state._lock:
+            state._state["exposure_locked"] = locked
+        node = ros_client.ros_node
+        if node is not None and ros_client.HAS_RCL_PARAMS:
+            node.request_exposure_lock(locked)
+            return jsonify({"ok": True, "locked": locked})
+        elif node is not None:
+            return jsonify({"ok": False,
+                            "msg": "rcl_interfaces not available — cannot push to camera_node"}), 503
+        return jsonify({"ok": False, "msg": "ROS not connected"}), 503
 
     @app.route("/api/diff_frame")
     def api_diff_frame():

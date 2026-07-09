@@ -86,6 +86,15 @@ _state = {
     "square_scores":              {},
     "diff_frame":                 None,
     "ref_status":                 "No reference captured. Click 'Capture Reference' first.",
+    # Exposure/white-balance lock — camera_ros's continuous auto-exposure/AWB
+    # otherwise re-adjusts brightness/color between the pre-move reference and
+    # post-move captures even with nothing physically moved, showing up as
+    # board-wide "phantom" diff. Locking freezes it at whatever it had
+    # converged to. Tracked here (not read back from ROS) because camera_ros's
+    # ExposureTime/AnalogueGain/ColourGains parameters only report a real
+    # value after being explicitly set at least once — AeEnable/AwbEnable
+    # themselves are readable, but this avoids depending on that at all.
+    "exposure_locked":            False,
 }
 
 # Diff detection params — pushed to piece_detector_node via SetParameters

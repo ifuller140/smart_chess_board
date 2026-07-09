@@ -658,6 +658,12 @@ body.showcase #debug-view{display:none}
               <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Reference Status</span>
               <span class="stat-val" id="ref-status-inline" style="font-size:.7em;color:var(--warn)">–</span>
             </div>
+            <div class="tog-row" style="margin-top:8px">
+              <input type="checkbox" id="t_exposure_lock" onchange="toggleExposureLock(this.checked)">
+              <label for="t_exposure_lock" title="Freezes camera_ros's auto-exposure/auto-white-balance at whatever it's currently converged to. Continuous AE/AWB otherwise re-adjusts brightness/color between the pre-move reference and post-move captures with nothing physically moved — the most common cause of board-wide phantom diff. Lock before capturing a reference for best results.">
+                Lock exposure / white-balance (reduce lighting-drift false positives)
+              </label>
+            </div>
             <div style="font-size:.63em;color:var(--dim);margin-top:8px;line-height:1.6;background:#040408;padding:8px;border-radius:4px">
               <b style="color:var(--text)">How it works:</b>
               game_manager enters <b>WAITING_PLAYER_MOVE</b> → calls /perception/capture_premove.
@@ -1211,6 +1217,19 @@ function onDiffSlider(key, val) {
 function onDiffTog(key, val) {
   _diffParams[key] = val ? 1 : 0;
   renderScoreCanvas();
+}
+
+function toggleExposureLock(locked) {
+  fetch('/api/perception/exposure/lock', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({locked: locked})
+  }).then(function(r){return r.json();}).then(function(d){
+    if (!d.ok) {
+      var t = document.getElementById('t_exposure_lock');
+      if (t) t.checked = !locked;  // revert on failure (e.g. ROS not connected)
+      alert('Exposure lock failed: ' + (d.msg || 'unknown error'));
+    }
+  });
 }
 
 function renderScoreCanvas() {
@@ -2033,6 +2052,14 @@ function pollStatus() {
     if (refInl) {
       refInl.textContent = d.ref_status || '–';
       refInl.style.color = refOk ? 'var(--ok)' : 'var(--warn)';
+    }
+
+    // ── Exposure lock toggle (sync on first load only — user's own click
+    // already updated server state synchronously, no need to fight it) ──
+    var expTog = document.getElementById('t_exposure_lock');
+    if (expTog && !expTog._synced && d.exposure_locked !== undefined) {
+      expTog.checked = d.exposure_locked;
+      expTog._synced = true;
     }
 
     // ── Settings: populate on first load ─────────────────────────

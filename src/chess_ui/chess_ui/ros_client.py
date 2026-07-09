@@ -86,6 +86,7 @@ if HAS_ROS:
             self._svc_detector_params = None
             self._svc_game_manager_params = None
             self._svc_motion_planner_params = None
+            self._svc_camera_params = None
             if HAS_RCL_PARAMS:
                 self._svc_detector_params = self.create_client(
                     SetParameters, "/piece_detector_node/set_parameters")
@@ -93,11 +94,14 @@ if HAS_ROS:
                     SetParameters, "/game_manager_node/set_parameters")
                 self._svc_motion_planner_params = self.create_client(
                     SetParameters, "/motion_planner_node/set_parameters")
+                self._svc_camera_params = self.create_client(
+                    SetParameters, "/camera_node/set_parameters")
 
             # Pending param updates (set by Flask thread, applied by ROS timer)
             self._pending_detector_params = None
             self._pending_game_manager_params = None
             self._pending_motion_planner_params = None
+            self._pending_camera_params = None
             self.create_timer(0.2, self._check_pending)
 
             # ── Action client for point-to-point gantry moves ─────────
@@ -336,6 +340,25 @@ if HAS_ROS:
                     "engine_think_time_s": think_time_s,
                 }
 
+        def request_exposure_lock(self, locked: bool):
+            """Lock (or unlock) camera_node's auto-exposure/auto-white-balance.
+
+            Disabling AeEnable/AwbEnable freezes the sensor at whatever
+            exposure/gain/white-balance it had converged to — killing the
+            board-wide brightness/color drift between the pre-move reference
+            and post-move captures that otherwise looks like phantom piece
+            movement on every square. camera_ros's ExposureTime/AnalogueGain/
+            ColourGains parameters can't be reliably read back (they report
+            "not set" until explicitly written at least once, with no way to
+            query the AE-computed live value), so this only toggles Ae/AwbEnable
+            rather than trying to sample-then-pin specific values.
+            """
+            if HAS_RCL_PARAMS:
+                self._pending_camera_params = {
+                    "AeEnable":  not locked,
+                    "AwbEnable": not locked,
+                }
+
         def request_motion_planner_params(self, origin_x_mm, origin_y_mm, sq_size_mm):
             """Push calibrated board geometry to motion_planner_node — the node
             that actually drives the gantry during real games. Without this,
@@ -391,6 +414,17 @@ if HAS_ROS:
                 },
             ):
                 self._pending_motion_planner_params = None
+
+            if self._apply_pending_params(
+                self._pending_camera_params,
+                self._svc_camera_params,
+                "camera_node",
+                {
+                    "AeEnable":  ParameterType.PARAMETER_BOOL,
+                    "AwbEnable": ParameterType.PARAMETER_BOOL,
+                },
+            ):
+                self._pending_camera_params = None
 
         def _apply_pending_params(self, params, client, target_name, type_map) -> bool:
             """Returns True once the update has been sent (or there was
