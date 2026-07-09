@@ -21,7 +21,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription,
+                             LogInfo)
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -32,6 +34,8 @@ def generate_launch_description():
         get_package_share_directory('chess_hw_interface'), 'config')
     gantry_config_dir = os.path.join(
         get_package_share_directory('gantry_control'), 'config')
+    perception_launch_file = os.path.join(
+        get_package_share_directory('chess_perception'), 'launch', 'perception_launch.py')
 
     pins_yaml      = os.path.join(hw_config_dir, 'pins.yaml')
     board_map_yaml = os.path.join(gantry_config_dir, 'board_map.yaml')
@@ -44,15 +48,26 @@ def generate_launch_description():
                               description='Engine think time in seconds'),
         DeclareLaunchArgument('time_per_player_s', default_value='600.0',
                               description='Clock time per player (seconds)'),
-        DeclareLaunchArgument('use_picamera2', default_value='False',
-                              description='True = Pi Camera v2 (CSI), False = OpenCV V4L2 (default: V4L2 due to libcamera 0.2.0 IPA bug)'),
+        # Layer 3 (camera/board_detector/piece_detector) is delegated entirely
+        # to chess_perception's own perception_launch.py below — these args
+        # are just forwarded to it, so this file can never again silently
+        # diverge from the camera config that's actually been live-verified
+        # (see perception_launch.py's own docstring for the camera-framing
+        # bug this centralization fixes).
+        DeclareLaunchArgument('use_camera_ros', default_value='True',
+                              description='True = ros-humble-camera-ros/libcamera (recommended, '
+                                          'live-verified), False = chess_perception\'s own '
+                                          'Python camera_node fallback (less-tested path)'),
+        DeclareLaunchArgument('use_picamera2', default_value='True',
+                              description='(only when use_camera_ros=False) True=picamera2, False=OpenCV V4L2'),
         DeclareLaunchArgument('calibration_file', default_value='',
-                              description='Path to camera_calibration.yaml'),
+                              description='Path to camera_calibration.yaml (only used by chess_perception camera_node)'),
     ]
 
     engine_path     = LaunchConfiguration('engine_path')
     think_time      = LaunchConfiguration('think_time')
     time_per_player = LaunchConfiguration('time_per_player_s')
+    use_camera_ros  = LaunchConfiguration('use_camera_ros')
     use_picam       = LaunchConfiguration('use_picamera2')
     cal_file        = LaunchConfiguration('calibration_file')
 
@@ -102,30 +117,19 @@ def generate_launch_description():
              parameters=[board_map_yaml], output='screen'),
 
         # ═══════════════════════════════════════════════════════
-        # LAYER 3 — Perception
+        # LAYER 3 — Perception (delegated to perception_launch.py — see
+        # its docstring; this used to hand-roll a divergent camera config
+        # here that never got the camera-framing fix applied to it)
         # ═══════════════════════════════════════════════════════
 
-        Node(package='chess_perception', executable='camera_node',
-             name='camera_node',
-             parameters=[{
-                 'use_picamera2':    use_picam,
-                 'width':            1280,
-                 'height':           720,
-                 'fps':              5.0,
-                 'calibration_file': cal_file,
-             }],
-             output='screen'),
-
-        Node(package='chess_perception', executable='board_detector_node',
-             name='board_detector_node', output='screen'),
-
-        Node(package='chess_perception', executable='piece_detector_node',
-             name='piece_detector_node',
-             parameters=[{
-                 'occupancy_diff_threshold': 25,
-                 'white_piece_brightness':   0.65,
-             }],
-             output='screen'),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(perception_launch_file),
+            launch_arguments={
+                'use_camera_ros':    use_camera_ros,
+                'use_picamera2':     use_picam,
+                'calibration_file':  cal_file,
+            }.items(),
+        ),
 
         # ═══════════════════════════════════════════════════════
         # LAYER 4 — Chess Logic
