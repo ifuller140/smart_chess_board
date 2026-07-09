@@ -118,7 +118,20 @@ Full context, root-cause analysis, and phase-by-phase design in `/Users/ianfulle
 - **Phase 8d** — Confidence-scored legal-move matching in `game_manager_node`: score every legal move by its footprint's diff scores instead of exact-match-then-drop-one-square; surface top-3 candidates + a manual override in the UI.
 - **Phase 8e** — Remaining developer tuning UI (ties in Phase 7's corner overlay/manual-override + a turn-by-turn tuning log).
 
-**Status: ⬜ not started as of 2026-07-09.** Plan approved by the user same session as the camera-framing fix (Phase 5 follow-up) that unblocked automatic corner detection in the first place.
+**Status: 🔄 IN PROGRESS as of 2026-07-09.** Plan approved by the user same session as the camera-framing fix (Phase 5 follow-up) that unblocked automatic corner detection in the first place.
+
+#### Phase 8a — Lock camera exposure/white-balance
+**Status: ✅ DONE, live-verified on the Pi 2026-07-09.** Commit `bdd5988`.
+
+Design adjustment made during implementation: the plan's original "sample current AE-converged values, then pin them explicitly" isn't achievable as written — `camera_ros`'s `ExposureTime`/`AnalogueGain`/`ColourGains` parameters report `Parameter not set` until explicitly written at least once, with no mechanism to read back the AE algorithm's live-computed value (confirmed via repeated `ros2 param get` over several seconds while AE was actively converging — always `not set`; also no per-frame metadata topic exists). Separately, `ExposureTime`'s declared parameter range is broken (`{75}..{0}}`, an inverted/degenerate range, likely because `FrameDurationLimits` was never set) so it can't even be explicitly written to a chosen value right now. Given this, implemented the simpler and equally effective mechanism: just toggle `AeEnable`/`AwbEnable` off — this freezes the sensor at whatever exposure/gain/white-balance it had converged to at the moment of disabling (confirmed empirically, see below), without needing to read back or explicitly set specific values at all.
+
+- Added `chess_ui` Perception-tab toggle ("Lock exposure / white-balance"), wired through the existing `SetParameters`-push pattern (`_pending_camera_params`/`_check_pending`, same retry-until-ready mechanism Phase 6 added for `motion_planner_node`/`game_manager_node`) to a new `/camera_node/set_parameters` client.
+- **Live before/after verification on the Pi**, same untouched physical board state, via `/perception/square_scores`:
+  - **Unlocked** (`AeEnable`/`AwbEnable` = true, continuous auto): min=2.8, **max=121.1**, mean=**27.7** — already above the 18.0 default `diff_threshold` on average, with **33 of 64 squares** scoring above threshold despite nothing being touched. This alone would falsely flag roughly half the board as "changed" on any given tick.
+  - **Locked** (`AeEnable`/`AwbEnable` = false via the new toggle): min=2.6, max=8.3, mean=4.85, **0 of 64 squares** above threshold.
+  - Confirmed via `ros2 param get /camera_node AeEnable`/`AwbEnable` that the toggle genuinely changes the real hardware-facing parameter (not just local UI state), and via `/api/status`'s `exposure_locked` field that it's correctly reflected back.
+- **Left locked** as the Pi's running state after this verification (recommended default going forward) — matches the toggle's own default-off `_state` value only until the operator/next session re-enables it; the running `camera_node` process itself keeps whatever was last set until restarted (it doesn't reset to the declared default automatically).
+- **Not fixed, out of scope**: `ExposureTime`'s broken parameter range (would require setting `FrameDurationLimits` first and/or patching `camera_ros` itself, an external package) — not needed since disabling auto alone achieves the goal.
 
 ---
 *Created 2026-07-08 from the full audit. Update the status table and add session notes under each phase as work lands.*
