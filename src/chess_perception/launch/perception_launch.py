@@ -77,6 +77,23 @@ def generate_launch_description():
                 'width':  width,
                 'height': height,
                 'format': 'BGR888',
+                # Without this, libcamera's own mode-selection heuristic picks
+                # a raw sensor mode independently of width/height above — for
+                # this sensor+role+size combination it silently chose a
+                # dead-centered ~39%x39% crop of the full array (confirmed via
+                # `ros2 param get /camera_node ScalerCrop` defaulting to
+                # {(1000,752)/1280x960} out of the full 3280x2464 array), i.e.
+                # the whole board was never in frame, only the center ~4
+                # squares. Pinning sensor_mode to the sensor's native 2x2-
+                # binned full-FOV raw mode (1640x1232) forces the ISP to crop
+                # the FULL array before scaling down to width x height, so the
+                # entire board is back in frame regardless of the final
+                # (lower-res, CPU-friendly) stream size. Confirmed live:
+                # ScalerCrop becomes {(0,0)/3280x2460} (whole array) with this
+                # set. This mirrors the identical fix already applied to our
+                # own Python fallback camera_node.py's picamera2 backend
+                # (see its `sensor={'output_size': (1640, 1232)}` config).
+                'sensor_mode': '1640:1232',
             }],
             remappings=[
                 ('/camera_node/image_raw',            '/camera/image_raw'),
