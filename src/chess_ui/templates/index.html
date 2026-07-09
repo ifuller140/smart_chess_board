@@ -1203,7 +1203,13 @@ document.querySelectorAll('.tab-btn').forEach(function(btn) {
 $(function() {
   var cfg = {
     showNotation: true,
-    pieceTheme: 'https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/img/chesspieces/wikipedia/{piece}.png'
+    // unpkg's published @chrisoakman/chessboardjs@1.0.0 tarball ships only
+    // dist/{js,css} — no img/ directory at all, so every piece image 404'd
+    // (visible as flickering broken-image icons on every ~500ms poll
+    // re-render). chessboardjs.com is the library's own canonical asset host
+    // (confirmed reachable both locally and from the Pi) and is what the
+    // library's own docs/examples reference.
+    pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
   };
   board   = Chessboard('board',    $.extend({}, cfg, {position:'start'}));
   scBoard = Chessboard('sc-board', $.extend({}, cfg, {position:'start'}));
