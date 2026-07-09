@@ -43,6 +43,8 @@ Published Topics:
   /game_manager/state (String) — current state name (read by clock_display_node, chess_clock_node)
   /game_manager/turn  (String) — "WHITE" or "BLACK" (read by chess_clock_node)
   /motion/command     (String) — "UCI FEN" e.g. "e2e4 rnbq..." (read by motion_planner_node)
+  /game_manager/capture_progress (String) — live status during _do_capture_board()'s
+    stability wait, e.g. "Stabilizing: 2/3 consistent reads" — for chess_ui display
 
 Subscribed Topics:
   /limit_switch/clock_hit      (Bool)   — human pressed chess clock
@@ -60,6 +62,7 @@ Service Clients:
 
 import threading
 import time
+from collections import Counter
 
 import chess
 import rclpy
@@ -103,14 +106,24 @@ class GameManagerNode(Node):
 
         # ── Parameters ────────────────────────────────────────────────────
         self.declare_parameter('engine_think_time_s', 2.0)
-        self.declare_parameter('board_capture_timeout_s', 5.0)
+        # Was 5.0 — now covers waiting for a *stable* read (capture_stability_count
+        # consecutive identical changed-squares reports), not just the first
+        # message to arrive, so it needs more headroom than a single detection
+        # tick's worth of time.
+        self.declare_parameter('board_capture_timeout_s', 10.0)
+        # Consecutive identical /perception/changed_squares reads required
+        # before trusting the result as the actual post-move board state —
+        # see _do_capture_board()'s docstring for why a single reading isn't
+        # reliable (hand still over the board, camera settling, etc).
+        self.declare_parameter('capture_stability_count', 3)
         self.declare_parameter('motion_timeout_s', 120.0)
         self.declare_parameter('homing_timeout_s', 90.0)
 
-        self._think_time   = self.get_parameter('engine_think_time_s').value
-        self._cap_timeout  = self.get_parameter('board_capture_timeout_s').value
-        self._move_timeout = self.get_parameter('motion_timeout_s').value
-        self._home_timeout = self.get_parameter('homing_timeout_s').value
+        self._think_time      = self.get_parameter('engine_think_time_s').value
+        self._cap_timeout     = self.get_parameter('board_capture_timeout_s').value
+        self._stability_count = int(self.get_parameter('capture_stability_count').value)
+        self._move_timeout    = self.get_parameter('motion_timeout_s').value
+        self._home_timeout    = self.get_parameter('homing_timeout_s').value
 
         # Live-reconfigure: without this, engine_think_time_s pushed via
         # SetParameters (Chess OS's game-settings UI) only updated ROS's
@@ -140,6 +153,13 @@ class GameManagerNode(Node):
 
         # Latest values from subscriptions
         self._latest_changed_squares: set = set()   # chess.Square indices from perception
+        # Every /perception/changed_squares reading received during the current
+        # capture window (piece_detector_node publishes on every ~0.5s detection
+        # tick, not just once) — _do_capture_board() waits for capture_stability_count
+        # consecutive identical readings here before trusting the result, instead
+        # of accepting whatever the very first tick reports (which may catch a
+        # hand still over the board, mid-motion blur, or a camera-settling frame).
+        self._board_state_history: list = []
         self._motion_success = True
 
         # Gates so a late/stale callback from a previous timed-out request
@@ -158,6 +178,12 @@ class GameManagerNode(Node):
         # Game control publishers (read by Chess OS)
         self._move_history_pub = self.create_publisher(String, '/game_manager/move_history', 10)
         self._result_pub       = self.create_publisher(String, '/game_manager/result', 10)
+        # Live progress during _do_capture_board()'s stability wait, e.g.
+        # "stabilizing: 2/3 consistent reads" — surfaced in chess_ui so an
+        # operator can see it waiting out hand movement instead of looking
+        # like it's stuck.
+        self._capture_progress_pub = self.create_publisher(
+            String, '/game_manager/capture_progress', 10)
 
         # ── Subscriptions ─────────────────────────────────────────────────
         self.create_subscription(
@@ -207,7 +233,12 @@ class GameManagerNode(Node):
                 self._clock_hit_event.set()
 
     def _on_changed_squares(self, msg: String):
-        """Receive changed squares list from piece_detector_node."""
+        """Receive a changed-squares reading from piece_detector_node.
+
+        Appends to _board_state_history rather than just overwriting a single
+        "latest" value — piece_detector_node publishes on every detection tick
+        (~0.5s), not once per capture, so _do_capture_board() can wait for
+        several consecutive identical readings before trusting the result."""
         if not self._awaiting_board_state:
             # Stale message from a previous, already-timed-out capture request.
             self.get_logger().warn('Ignoring changed-squares — not currently awaiting a capture')
@@ -222,7 +253,7 @@ class GameManagerNode(Node):
                         sqs.add(chess.parse_square(name))
                     except ValueError:
                         self.get_logger().warn(f'Invalid square name from perception: {name!r}')
-        self._latest_changed_squares = sqs
+        self._board_state_history.append(frozenset(sqs))
         self._board_state_event.set()
 
     def _on_motion_done(self, msg: Bool):
@@ -490,11 +521,28 @@ class GameManagerNode(Node):
         return result.success
 
     def _do_capture_board(self) -> bool:
-        """Trigger camera capture and wait for changed-squares detection."""
-        self.get_logger().info('Capturing post-move board image...')
+        """Trigger camera capture and wait for a *stable* changed-squares reading.
+
+        piece_detector_node publishes a changed-squares reading on every
+        detection tick (~0.5s) regardless of game state, not just once per
+        capture — so instead of trusting whatever the very first tick reports
+        after the clock press (which may catch a hand still over the board,
+        mid-motion blur, or a camera-settling frame), this waits for
+        capture_stability_count consecutive identical readings before
+        accepting the result. Falls back to the most-common (mode) reading
+        seen if board_capture_timeout_s elapses without one fully stabilizing,
+        rather than failing outright — same timeout-with-fallback pattern
+        already used for homing retries elsewhere in this node.
+        """
+        self.get_logger().info(
+            f'Capturing post-move board image (waiting for '
+            f'{self._stability_count} consecutive stable reads)...')
 
         self._board_state_event.clear()
+        self._board_state_history = []
         self._awaiting_board_state = True
+        self._capture_progress_pub.publish(String(
+            data=f'Waiting for {self._stability_count} consecutive stable reads...'))
 
         if self._capture_client.wait_for_service(timeout_sec=3.0):
             self._capture_client.call_async(Trigger.Request())
@@ -502,16 +550,56 @@ class GameManagerNode(Node):
             self.get_logger().warn(
                 '/camera/capture not available — waiting for changed-squares anyway')
 
-        got = self._board_state_event.wait(timeout=self._cap_timeout)
-        self._awaiting_board_state = False
-        if not got:
-            self.get_logger().warn('Changed-squares message not received within timeout')
-            return False
+        deadline = time.monotonic() + self._cap_timeout
+        stable: 'frozenset | None' = None
+        while time.monotonic() < deadline:
+            got = self._board_state_event.wait(timeout=0.5)
+            self._board_state_event.clear()
+            if not got:
+                continue
+            recent = self._board_state_history[-self._stability_count:]
+            streak = 1
+            for i in range(len(self._board_state_history) - 1, 0, -1):
+                if self._board_state_history[i] != self._board_state_history[i - 1]:
+                    break
+                streak += 1
+            self._capture_progress_pub.publish(String(
+                data=f'Stabilizing: {min(streak, self._stability_count)}/'
+                     f'{self._stability_count} consistent reads '
+                     f'(tick {len(self._board_state_history)})'))
+            if len(recent) >= self._stability_count and len(set(recent)) == 1:
+                stable = recent[-1]
+                break
 
-        self._board_state_event.clear()
-        sq_names = sorted(chess.square_name(s) for s in self._latest_changed_squares)
-        self.get_logger().info(f'Changed squares detected: {sq_names}')
-        return True
+        self._awaiting_board_state = False
+
+        if stable is not None:
+            self._latest_changed_squares = set(stable)
+            sq_names = sorted(chess.square_name(s) for s in stable)
+            self.get_logger().info(
+                f'Stable read after {len(self._board_state_history)} tick(s): {sq_names}')
+            self._capture_progress_pub.publish(String(
+                data=f'Stable after {len(self._board_state_history)} tick(s): '
+                     f'{",".join(sq_names) or "(no change)"}'))
+            return True
+
+        if self._board_state_history:
+            counts = Counter(self._board_state_history)
+            mode_result, mode_count = counts.most_common(1)[0]
+            self._latest_changed_squares = set(mode_result)
+            sq_names = sorted(chess.square_name(s) for s in mode_result)
+            self.get_logger().warn(
+                f'No stable read within {self._cap_timeout}s — using most-common '
+                f'reading ({mode_count}/{len(self._board_state_history)} ticks agreed): {sq_names}')
+            self._capture_progress_pub.publish(String(
+                data=f'No stable read — used most-common of '
+                     f'{len(self._board_state_history)} ticks ({mode_count} agreed): '
+                     f'{",".join(sq_names) or "(no change)"}'))
+            return True
+
+        self.get_logger().warn('Changed-squares message not received within timeout')
+        self._capture_progress_pub.publish(String(data='No changed-squares reading received'))
+        return False
 
     def _do_capture_premove(self) -> bool:
         """
@@ -852,6 +940,12 @@ class GameManagerNode(Node):
             if p.name == 'engine_think_time_s':
                 self._think_time = float(p.value)
                 self.get_logger().info(f'engine_think_time_s updated to {self._think_time}s')
+            elif p.name == 'board_capture_timeout_s':
+                self._cap_timeout = float(p.value)
+                self.get_logger().info(f'board_capture_timeout_s updated to {self._cap_timeout}s')
+            elif p.name == 'capture_stability_count':
+                self._stability_count = int(p.value)
+                self.get_logger().info(f'capture_stability_count updated to {self._stability_count}')
         return SetParametersResult(successful=True)
 
     def _verify_starting_position(self):

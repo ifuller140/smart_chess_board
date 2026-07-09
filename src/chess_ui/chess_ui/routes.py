@@ -83,6 +83,7 @@ def register_routes(app):
                 "session_reference_captured": s["session_reference_captured"],
                 "ref_status":                 s["ref_status"],
                 "exposure_locked":            s["exposure_locked"],
+                "capture_progress":           s["capture_progress"],
             })
 
     @app.route("/api/snapshot")

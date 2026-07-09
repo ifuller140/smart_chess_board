@@ -95,6 +95,9 @@ _state = {
     # value after being explicitly set at least once — AeEnable/AwbEnable
     # themselves are readable, but this avoids depending on that at all.
     "exposure_locked":            False,
+    # Live status during game_manager_node's post-move stability wait, e.g.
+    # "Stabilizing: 2/3 consistent reads" — see /game_manager/capture_progress.
+    "capture_progress":           "",
 }
 
 # Diff detection params — pushed to piece_detector_node via SetParameters

@@ -658,6 +658,10 @@ body.showcase #debug-view{display:none}
               <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Reference Status</span>
               <span class="stat-val" id="ref-status-inline" style="font-size:.7em;color:var(--warn)">–</span>
             </div>
+            <div class="stat-row">
+              <span class="stat-lbl" style="color:var(--dim);font-size:.72em">Capture Progress</span>
+              <span class="stat-val" id="capture-progress-inline" style="font-size:.7em;color:#58a6ff">–</span>
+            </div>
             <div class="tog-row" style="margin-top:8px">
               <input type="checkbox" id="t_exposure_lock" onchange="toggleExposureLock(this.checked)">
               <label for="t_exposure_lock" title="Freezes camera_ros's auto-exposure/auto-white-balance at whatever it's currently converged to. Continuous AE/AWB otherwise re-adjusts brightness/color between the pre-move reference and post-move captures with nothing physically moved — the most common cause of board-wide phantom diff. Lock before capturing a reference for best results.">
@@ -2061,6 +2065,10 @@ function pollStatus() {
       expTog.checked = d.exposure_locked;
       expTog._synced = true;
     }
+
+    // ── Capture-progress status (stability-gated post-move capture) ──────
+    var capProg = document.getElementById('capture-progress-inline');
+    if (capProg) capProg.textContent = d.capture_progress || '–';
 
     // ── Settings: populate on first load ─────────────────────────
     var ts = document.getElementById('think-slider');

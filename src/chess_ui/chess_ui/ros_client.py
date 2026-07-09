@@ -61,6 +61,7 @@ if HAS_ROS:
             self.create_subscription(String,  "/perception/square_scores",   self._on_square_scores,  10)
             self.create_subscription(Image,   "/perception/piece_debug",     self._on_diff_img,       10)
             self.create_subscription(String,  "/perception/reference_status",self._on_ref_status,     10)
+            self.create_subscription(String,  "/game_manager/capture_progress", self._on_capture_progress, 10)
 
             # ── Publishers ─────────────────────────────────────────────
             self.vel_pub       = self.create_publisher(Twist,    "/stepper/velocity",       10)
@@ -323,6 +324,10 @@ if HAS_ROS:
         def _on_ref_status(self, msg):
             with state._lock:
                 state._state["ref_status"] = msg.data
+
+        def _on_capture_progress(self, msg):
+            with state._lock:
+                state._state["capture_progress"] = msg.data
 
         def request_detector_params(self, threshold, compensation,
                                     clump_enable=False, clump_keep=1):
