@@ -280,8 +280,8 @@ def _print_remote_viewing_hint(test_name: str):
 class VisionDetailBase(HardwareTest):
     """Shared setup/teardown for vision detail tests."""
 
-    def __init__(self, gpio_interface=None, display_interface=None):
-        super().__init__(gpio_interface, display_interface)
+    def __init__(self, gpio_interface=None, display_interface=None, cancel_check=None):
+        super().__init__(gpio_interface, display_interface, cancel_check)
         self._node:   Optional[VisionDetailNode] = None
         self._thread: Optional[threading.Thread] = None
         self._saver:  Optional[ImageSaver]       = None

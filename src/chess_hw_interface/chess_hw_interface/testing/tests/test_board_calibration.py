@@ -150,8 +150,8 @@ class BoardCalibrationTest(HardwareTest):
     def description(self) -> str:
         return 'Load board_calibration.json, print all squares, optional physical verify'
 
-    def __init__(self, gpio_interface=None, display_interface=None):
-        super().__init__(gpio_interface, display_interface)
+    def __init__(self, gpio_interface=None, display_interface=None, cancel_check=None):
+        super().__init__(gpio_interface, display_interface, cancel_check)
         self._node: Optional[CalibNavNode] = None
         self._spin_thread: Optional[threading.Thread] = None
         self._calib: Optional[dict] = None

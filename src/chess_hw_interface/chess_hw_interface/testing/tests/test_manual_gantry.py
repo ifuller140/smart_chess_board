@@ -189,8 +189,8 @@ class ManualGantryTest(HardwareTest):
     def description(self) -> str:
         return 'Hold-key continuous velocity control with smooth accel/decel + clock controls'
 
-    def __init__(self, gpio_interface=None, display_interface=None):
-        super().__init__(gpio_interface, display_interface)
+    def __init__(self, gpio_interface=None, display_interface=None, cancel_check=None):
+        super().__init__(gpio_interface, display_interface, cancel_check)
         self._ros_node: Optional[ManualGantryTestNode] = None
         self._spin_thread: Optional[threading.Thread] = None
         self._max_speed = 400.0       # steps/sec target velocity

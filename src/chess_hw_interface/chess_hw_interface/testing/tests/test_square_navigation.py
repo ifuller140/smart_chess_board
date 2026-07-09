@@ -227,8 +227,8 @@ class GantrySquareNavigationTest(HardwareTest):
     def description(self) -> str:
         return 'Home gantry, navigate to chess squares, test servo at each'
 
-    def __init__(self, gpio_interface=None, display_interface=None):
-        super().__init__(gpio_interface, display_interface)
+    def __init__(self, gpio_interface=None, display_interface=None, cancel_check=None):
+        super().__init__(gpio_interface, display_interface, cancel_check)
         self._node: Optional[SquareNavNode] = None
         self._spin_thread: Optional[threading.Thread] = None
         self._origin_x, self._origin_y, self._sq_x, self._sq_y = _load_geometry()

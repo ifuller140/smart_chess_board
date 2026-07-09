@@ -85,8 +85,8 @@ class MagnetTest(HardwareTest):
     def description(self) -> str:
         return 'Test servo engage (magnet down) and release (magnet up) via ROS'
 
-    def __init__(self, gpio_interface=None, display_interface=None):
-        super().__init__(gpio_interface, display_interface)
+    def __init__(self, gpio_interface=None, display_interface=None, cancel_check=None):
+        super().__init__(gpio_interface, display_interface, cancel_check)
         self._node: Optional[MagnetServoNode] = None
         self._spin_thread: Optional[threading.Thread] = None
 

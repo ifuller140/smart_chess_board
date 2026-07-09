@@ -135,8 +135,8 @@ class GantryTestBase(HardwareTest):
     publish commands and read state.
     """
 
-    def __init__(self, gpio_interface=None, display_interface=None):
-        super().__init__(gpio_interface, display_interface)
+    def __init__(self, gpio_interface=None, display_interface=None, cancel_check=None):
+        super().__init__(gpio_interface, display_interface, cancel_check)
         self._node: Optional[GantryTestNode] = None
         self._spin_thread: Optional[threading.Thread] = None
         self._pos_x_steps = 0

@@ -113,8 +113,8 @@ class VisionPipelineTest(HardwareTest):
     def description(self) -> str:
         return 'End-to-end perception pipeline: camera → board detect → piece detect'
 
-    def __init__(self, gpio_interface=None, display_interface=None):
-        super().__init__(gpio_interface, display_interface)
+    def __init__(self, gpio_interface=None, display_interface=None, cancel_check=None):
+        super().__init__(gpio_interface, display_interface, cancel_check)
         self._node: Optional[VisionTestNode] = None
         self._spin_thread: Optional[threading.Thread] = None
 
