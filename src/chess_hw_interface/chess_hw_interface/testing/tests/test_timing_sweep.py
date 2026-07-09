@@ -19,6 +19,7 @@ from typing import List
 
 from ..base_test import HardwareTest, TestStep
 from ..pigpio_stepper import PigpioStepper
+from ...gpio_lock import GantryPinLock
 
 
 class TimingSweepTest(HardwareTest):
@@ -42,6 +43,15 @@ class TimingSweepTest(HardwareTest):
         return "Sweep motor speeds to find working range and resonance"
 
     def setup(self) -> bool:
+        # See test_raw_motor.py's setup() — same direct pigpio access to
+        # the shared motor pins, same exclusive-lock guard against racing
+        # a live stepper_driver_node/homing_node.
+        self._pin_lock = GantryPinLock()
+        if not self._pin_lock.acquire_exclusive():
+            print("  Setup failed: gantry GPIO pins are in use by a running "
+                  "production node (stepper_driver_node/homing_node). "
+                  "Stop the live ROS stack before running this test.")
+            return False
         try:
             self.stepper = PigpioStepper()
             self.stepper.motor_enable()
@@ -53,12 +63,14 @@ class TimingSweepTest(HardwareTest):
             return True
         except Exception as e:
             print(f"  Setup failed: {e}")
+            self._pin_lock.release()
             return False
 
     def teardown(self):
         if hasattr(self, 'stepper'):
             self.stepper.stop()
             self.stepper.cleanup()
+        self._pin_lock.release()
 
         # Print summary table
         if hasattr(self, '_results') and self._results:

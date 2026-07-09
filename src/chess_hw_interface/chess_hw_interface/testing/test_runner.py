@@ -11,8 +11,9 @@ Examples:
 """
 
 import argparse
+import os
 import sys
-from typing import Dict, Optional, Type
+from typing import Callable, Dict, Optional, Type
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
@@ -245,15 +246,33 @@ def _build_display(display_type: str, mock: bool) -> DisplayInterface:
         return NullDisplay()
 
 
+def _make_cancel_check() -> Optional[Callable[[], bool]]:
+    """
+    Build a cancel-poll callable backed by a killswitch file.
+
+    This process is normally launched as root (via sudo, see run_hw_test.sh)
+    while the ROS node that owns the goal (test_runner_node, unprivileged)
+    cannot signal it directly — an unprivileged SIGTERM to a root-owned
+    process is rejected by the kernel regardless of process groups. Instead
+    test_runner_node creates this file to request cancellation and we poll
+    for it between test steps.
+    """
+    cancel_file = os.environ.get('CHESS_HW_TEST_CANCEL_FILE')
+    if not cancel_file:
+        return None
+    return lambda: os.path.exists(cancel_file)
+
+
 def run_test(
     category: str,
     subtest: str,
     gpio,
     display: DisplayInterface,
     verbose: bool = True,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> TestResult:
     test_cls = CATEGORY_REGISTRY[category][subtest]
-    test = test_cls(gpio_interface=gpio, display_interface=display)
+    test = test_cls(gpio_interface=gpio, display_interface=display, cancel_check=cancel_check)
     return test.run(verbose=verbose)
 
 
@@ -291,7 +310,12 @@ def list_tests():
     print()
 
 
-def run_all(gpio, display: DisplayInterface, verbose: bool = True) -> Dict[str, TestResult]:
+def run_all(
+    gpio,
+    display: DisplayInterface,
+    verbose: bool = True,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Dict[str, TestResult]:
     results: Dict[str, TestResult] = {}
     print('\n' + '=' * 70)
     print('  SMART CHESS BOARD - HARDWARE TEST SUITE')
@@ -299,9 +323,12 @@ def run_all(gpio, display: DisplayInterface, verbose: bool = True) -> Dict[str, 
 
     for category, subtests in CATEGORY_REGISTRY.items():
         for subtest in subtests:
+            if cancel_check is not None and cancel_check():
+                print('\n[CANCELLED] Test suite cancelled')
+                return results
             key = f'{category}/{subtest}'
             print(f'\n>>> Running {key} ...')
-            results[key] = run_test(category, subtest, gpio, display, verbose)
+            results[key] = run_test(category, subtest, gpio, display, verbose, cancel_check)
 
     print('\n' + '=' * 70)
     print('  TEST SUMMARY')
@@ -408,10 +435,13 @@ def main() -> int:
     # display = _build_display(args.display, args.mock) # Old logic removed
     
     verbose = not args.quiet
+    cancel_check = _make_cancel_check()
 
     try:
         if args.all:
-            results = run_all(gpio, display, verbose)
+            results = run_all(gpio, display, verbose, cancel_check)
+            if cancel_check is not None and cancel_check():
+                return 1
             return 0 if all(r == TestResult.PASSED for r in results.values()) else 1
 
         results: Dict[str, TestResult] = {}
@@ -419,6 +449,9 @@ def main() -> int:
         # Legacy aliases
         if args.test:
             for alias in args.test:
+                if cancel_check is not None and cancel_check():
+                    print('\n[CANCELLED] Test run cancelled')
+                    break
                 if alias not in LEGACY_TEST_ALIASES:
                     print(f'[ERROR] Unknown legacy test alias: {alias}')
                     print(f"Available aliases: {', '.join(sorted(LEGACY_TEST_ALIASES.keys()))}")
@@ -426,7 +459,7 @@ def main() -> int:
                 category, subtest = LEGACY_TEST_ALIASES[alias]
                 key = f'{category}/{subtest}'
                 print(f'\n>>> Running {key} (alias: {alias}) ...')
-                results[key] = run_test(category, subtest, gpio, display, verbose)
+                results[key] = run_test(category, subtest, gpio, display, verbose, cancel_check)
 
         # Category/subtests
         if args.category:
@@ -438,14 +471,19 @@ def main() -> int:
                 selected = ['full'] if 'full' in available else list(available.keys())
 
             for subtest in selected:
+                if cancel_check is not None and cancel_check():
+                    print('\n[CANCELLED] Test run cancelled')
+                    break
                 if subtest not in available:
                     print(f'[ERROR] Unknown subtest for {category}: {subtest}')
                     print(f"Available: {', '.join(sorted(available.keys()))}")
                     return 1
                 key = f'{category}/{subtest}'
                 print(f'\n>>> Running {key} ...')
-                results[key] = run_test(category, subtest, gpio, display, verbose)
+                results[key] = run_test(category, subtest, gpio, display, verbose, cancel_check)
 
+        if cancel_check is not None and cancel_check():
+            return 1
         return 0 if all(r == TestResult.PASSED for r in results.values()) else 1
     finally:
         gpio.cleanup()

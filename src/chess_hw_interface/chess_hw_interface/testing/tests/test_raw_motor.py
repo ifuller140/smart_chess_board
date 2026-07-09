@@ -20,6 +20,7 @@ from typing import List
 
 from ..base_test import HardwareTest, TestStep
 from ..pigpio_stepper import PigpioStepper
+from ...gpio_lock import GantryPinLock
 
 
 class RawMotorTest(HardwareTest):
@@ -40,6 +41,17 @@ class RawMotorTest(HardwareTest):
         return "Test individual motors directly (no CoreXY kinematics)"
 
     def setup(self) -> bool:
+        # This test opens its own pigpio connection straight to the same
+        # BCM pins stepper_driver_node/homing_node use — refuse to start if
+        # either of those production nodes is currently live, since two
+        # independent pigpio clients racing step pulses on the same pins
+        # can corrupt motion or damage hardware.
+        self._pin_lock = GantryPinLock()
+        if not self._pin_lock.acquire_exclusive():
+            print("  Setup failed: gantry GPIO pins are in use by a running "
+                  "production node (stepper_driver_node/homing_node). "
+                  "Stop the live ROS stack before running this test.")
+            return False
         try:
             self.stepper = PigpioStepper()
             self.stepper.motor_enable()
@@ -53,12 +65,14 @@ class RawMotorTest(HardwareTest):
             return True
         except Exception as e:
             print(f"  Setup failed: {e}")
+            self._pin_lock.release()
             return False
 
     def teardown(self):
         if hasattr(self, 'stepper'):
             self.stepper.stop()
             self.stepper.cleanup()
+        self._pin_lock.release()
 
     def get_steps(self) -> List[TestStep]:
         return [

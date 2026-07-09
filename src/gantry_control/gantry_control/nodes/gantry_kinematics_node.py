@@ -23,7 +23,8 @@ import time
 import rclpy
 from geometry_msgs.msg import Point, Twist
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
@@ -58,10 +59,20 @@ class GantryKinematicsNode(Node):
         # Publishers
         self.vel_pub = self.create_publisher(Twist, '/stepper/velocity', 10)
 
+        # Callback groups: pose/limit subscriptions must keep processing
+        # while execute_callback blocks in its polling loop for the
+        # duration of a move — otherwise current_x/current_y (and cancel
+        # requests) can never update and the goal can never complete.
+        self._fast_cb_group = ReentrantCallbackGroup()
+        self._action_cb_group = MutuallyExclusiveCallbackGroup()
+
         # Subscribers
-        self.create_subscription(Point, '/gantry/pose', self._pose_cb, 10)
-        self.create_subscription(Bool, '/limit_switch/x_min', self._x_limit_cb, 10)
-        self.create_subscription(Bool, '/limit_switch/y_min', self._y_limit_cb, 10)
+        self.create_subscription(Point, '/gantry/pose', self._pose_cb, 10,
+                                  callback_group=self._fast_cb_group)
+        self.create_subscription(Bool, '/limit_switch/x_min', self._x_limit_cb, 10,
+                                  callback_group=self._fast_cb_group)
+        self.create_subscription(Bool, '/limit_switch/y_min', self._y_limit_cb, 10,
+                                  callback_group=self._fast_cb_group)
 
         self._x_limit = False
         self._y_limit = False
@@ -74,6 +85,7 @@ class GantryKinematicsNode(Node):
             execute_callback=self.execute_callback,
             goal_callback=self._goal_cb,
             cancel_callback=self._cancel_cb,
+            callback_group=self._action_cb_group,
         )
 
         self.get_logger().info(
@@ -142,19 +154,31 @@ class GantryKinematicsNode(Node):
 
         result = MoveGantry.Result()
         try:
-            self._execute_trapezoidal_move(goal_handle, target_x, target_y, cruise_speed)
+            status = self._execute_trapezoidal_move(goal_handle, target_x, target_y, cruise_speed)
+        except Exception as e:
+            self._stop()
+            if goal_handle.is_active:
+                goal_handle.abort()
+            result.success = False
+            result.message = str(e)
+            return result
+
+        # _execute_trapezoidal_move never touches goal_handle terminal state
+        # itself — this is the single place that calls succeed()/canceled(),
+        # avoiding a double-terminal-state call (and its uncaught second
+        # exception) if the goal was already canceled mid-move.
+        if status == 'canceled':
+            goal_handle.canceled()
+            result.success = False
+            result.message = f'Canceled at ({self.current_x:.1f}, {self.current_y:.1f})'
+        else:
             goal_handle.succeed()
             result.success = True
             result.message = f'Arrived at ({self.current_x:.1f}, {self.current_y:.1f})'
-        except Exception as e:
-            self._stop()
-            goal_handle.abort()
-            result.success = False
-            result.message = str(e)
 
         return result
 
-    def _execute_trapezoidal_move(self, goal_handle, target_x, target_y, cruise_speed_mm_s):
+    def _execute_trapezoidal_move(self, goal_handle, target_x, target_y, cruise_speed_mm_s) -> str:
         """
         Drive gantry to target using a trapezoidal velocity profile.
 
@@ -162,6 +186,11 @@ class GantryKinematicsNode(Node):
         velocity tick handles all acceleration ramping internally.
         Here we manage the high-level profile: ramp up while far from target,
         slow down as we approach.
+
+        Returns 'completed' or 'canceled'. Does NOT call any goal_handle
+        terminal-state method (succeed/abort/canceled) — that's the sole
+        responsibility of execute_callback, so a goal is never terminated
+        twice.
         """
         POLL_RATE_S = 0.05   # 20Hz position check loop
 
@@ -170,7 +199,7 @@ class GantryKinematicsNode(Node):
         dy0 = target_y - self.current_y
         total_dist = math.sqrt(dx0 * dx0 + dy0 * dy0)
         if total_dist < self.pos_tol:
-            return  # Already there
+            return 'completed'  # Already there
 
         # Minimum ramp distance to reach full cruise speed from accel:
         # v² = 2 * a * d  →  d = v² / (2a)
@@ -180,8 +209,7 @@ class GantryKinematicsNode(Node):
             # Check for cancellation
             if goal_handle.is_cancel_requested:
                 self._stop()
-                goal_handle.canceled()
-                return
+                return 'canceled'
 
             dx = target_x - self.current_x
             dy = target_y - self.current_y
@@ -227,6 +255,7 @@ class GantryKinematicsNode(Node):
             f'Arrived at ({self.current_x:.1f}, {self.current_y:.1f}), '
             f'target was ({target_x:.1f}, {target_y:.1f})'
         )
+        return 'completed'
 
     def _publish_velocity(self, vx: float, vy: float):
         msg = Twist()
@@ -241,8 +270,10 @@ class GantryKinematicsNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GantryKinematicsNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

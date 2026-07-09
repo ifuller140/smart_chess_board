@@ -12,6 +12,8 @@ Subscribes:
   /emergency_stop (Bool) — disable servo on emergency
 """
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool
@@ -50,12 +52,19 @@ class ClockServoNode(Node):
             f'Clock Servo initialized on pin {self.servo_pin} '
             f'(rest={self.rest_pw}µs, hit={self.hit_pw}µs)')
 
+        # Callback groups: /emergency_stop must be able to preempt a
+        # blocking hit_callback, so it lives in its own group.
+        self._estop_cb_group = ReentrantCallbackGroup()
+        self._clock_cb_group = MutuallyExclusiveCallbackGroup()
+
         # Services
-        self.create_service(Trigger, '/clock/hit', self.hit_callback)
+        self.create_service(Trigger, '/clock/hit', self.hit_callback,
+                             callback_group=self._clock_cb_group)
 
         # Subscribers
         self.create_subscription(
-            Bool, '/emergency_stop', self.stop_callback, 10)
+            Bool, '/emergency_stop', self.stop_callback, 10,
+            callback_group=self._estop_cb_group)
 
     def stop_callback(self, msg):
         if msg.data:
@@ -96,8 +105,10 @@ class ClockServoNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = ClockServoNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

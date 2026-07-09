@@ -17,6 +17,7 @@ import os
 import queue
 import signal
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -73,11 +74,22 @@ class TestRunnerNode(Node):
                    '--category', category, '--subtest', subtest]
             cwd = None
 
+        # The test subprocess normally runs as root (via sudo in
+        # run_hw_test.sh, see setup/smart-chess-hw-tests.sudoers), so
+        # os.killpg() below is a best-effort SIGTERM that the kernel will
+        # silently reject once it reaches the root-owned process (regular
+        # users cannot signal a more-privileged process regardless of
+        # process group). The killswitch file is the reliable cancel path:
+        # test_runner.py polls for it between test steps and exits itself.
+        cancel_file = tempfile.mktemp(prefix='chess_hw_test_cancel_')
+        env = os.environ.copy()
+        env['CHESS_HW_TEST_CANCEL_FILE'] = cancel_file
+
         with self._busy:
             self.get_logger().info(f'Starting test: {category}/{subtest}')
             try:
                 proc = subprocess.Popen(
-                    cmd, cwd=cwd,
+                    cmd, cwd=cwd, env=env,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1, preexec_fn=os.setsid)
             except Exception as e:
@@ -106,6 +118,10 @@ class TestRunnerNode(Node):
                         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                     except Exception:
                         pass
+                    try:
+                        Path(cancel_file).touch()
+                    except Exception:
+                        pass
                 try:
                     line = line_q.get(timeout=0.2)
                 except queue.Empty:
@@ -119,9 +135,23 @@ class TestRunnerNode(Node):
                 goal_handle.publish_feedback(fb)
 
             try:
-                proc.wait(timeout=5)
+                # Longer grace period than a plain SIGTERM would need — the
+                # subprocess only checks the killswitch file between test
+                # steps, and a step waiting on operator input can itself
+                # take up to that step's own timeout to unblock.
+                proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                # proc is normally root-owned (see cancel_file comment
+                # above) — kill() would raise PermissionError in that case,
+                # which we can't do anything about from here.
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                Path(cancel_file).unlink(missing_ok=True)
+            except Exception:
+                pass
             rc = proc.returncode
 
             if cancelled:

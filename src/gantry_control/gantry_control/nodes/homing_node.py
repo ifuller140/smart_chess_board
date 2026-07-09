@@ -36,9 +36,13 @@ import signal
 
 import pigpio
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, String
+
+from chess_hw_interface.gpio_lock import GantryPinLock
 
 # SG90 pulse-width range, matches chess_hw_interface.nodes.servo_node
 # and code/test_z_servo.py's calibration sweep
@@ -146,9 +150,27 @@ class HomingNode(Node):
 
         self._setup_gpio()
 
+        # ── Gantry pin mutex ──────────────────────────────────────────────
+        # Shared lock: compatible with stepper_driver_node's own shared lock.
+        # Fails only if a bare-metal hardware test is holding the pins
+        # exclusively — in that rare case we still start, but warn.
+        self._pin_lock = GantryPinLock()
+        if not self._pin_lock.acquire_shared():
+            self.get_logger().error(
+                'Could not acquire gantry GPIO pin lock — a raw hardware test '
+                '(raw_motor/timing_sweep) may currently be driving these pins '
+                'directly. Homing may race with it.')
+
+        # ── Callback groups ──────────────────────────────────────────────
+        # /emergency_stop must be able to preempt a blocking home_callback,
+        # so it lives in its own group.
+        self._estop_cb_group = ReentrantCallbackGroup()
+        self._homing_cb_group = MutuallyExclusiveCallbackGroup()
+
         # ── ROS interfaces ─────────────────────────────────────────────────
         self.home_service = self.create_service(
-            Trigger, '/gantry/home', self.home_callback)
+            Trigger, '/gantry/home', self.home_callback,
+            callback_group=self._homing_cb_group)
 
         self.status_pub = self.create_publisher(String, '/gantry/status', 10)
 
@@ -157,7 +179,8 @@ class HomingNode(Node):
             Bool, '/stepper/reset_position', 10)
 
         self.estop_sub = self.create_subscription(
-            Bool, '/emergency_stop', self.estop_callback, 10)
+            Bool, '/emergency_stop', self.estop_callback, 10,
+            callback_group=self._estop_cb_group)
 
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -222,6 +245,8 @@ class HomingNode(Node):
                 self.pi.stop()
         except Exception as e:
             self.get_logger().debug(f'Ignored exception during cleanup: {e}')
+        if getattr(self, '_pin_lock', None) is not None:
+            self._pin_lock.release()
 
     # ──────────────────────────────────────────────────────────────────────
     # Servo (magnet safety)
@@ -638,8 +663,10 @@ class HomingNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = HomingNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info('Keyboard interrupt, shutting down')
     finally:

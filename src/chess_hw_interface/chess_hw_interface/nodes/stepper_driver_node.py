@@ -22,8 +22,12 @@ import time
 import pigpio
 import rclpy
 from geometry_msgs.msg import Point, Twist
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
+
+from chess_hw_interface.gpio_lock import GantryPinLock
 
 
 # Pin defaults (BCM) — overridden by pins.yaml ROS parameters
@@ -117,6 +121,26 @@ class StepperDriverNode(Node):
             )
             raise RuntimeError("pigpiod not running")
 
+        # ---- Gantry pin mutex ----
+        # Shared lock: compatible with homing_node's own shared lock (both are
+        # trusted production nodes that coordinate via ROS). Fails only if a
+        # bare-metal hardware test (raw_motor/timing_sweep) is holding the
+        # pins exclusively — in that rare case we still start, but warn.
+        self._pin_lock = GantryPinLock()
+        if not self._pin_lock.acquire_shared():
+            self.get_logger().error(
+                'Could not acquire gantry GPIO pin lock — a raw hardware test '
+                '(raw_motor/timing_sweep) may currently be driving these pins '
+                'directly. Motion commands may race with it.')
+
+        # ---- Callback groups ----
+        # /emergency_stop must be able to preempt a blocking point-to-point
+        # move, so it lives in its own group. Everything else touches shared
+        # motor/position state and stays serialized in one group (same
+        # semantics as the old single-threaded executor for non-estop work).
+        self._estop_cb_group = ReentrantCallbackGroup()
+        self._motion_cb_group = MutuallyExclusiveCallbackGroup()
+
         for pin in [self.motorA_dir, self.motorA_step,
                     self.motorB_dir, self.motorB_step, self.motor_enable_pin]:
             self.pi.set_mode(pin, pigpio.OUTPUT)
@@ -163,15 +187,18 @@ class StepperDriverNode(Node):
 
         # Point-to-point mode
         self.command_sub = self.create_subscription(
-            Point, '/stepper/command', self.command_callback, 10)
+            Point, '/stepper/command', self.command_callback, 10,
+            callback_group=self._motion_cb_group)
 
         # Velocity (joystick) mode
         self.velocity_sub = self.create_subscription(
-            Twist, '/stepper/velocity', self.velocity_callback, 10)
+            Twist, '/stepper/velocity', self.velocity_callback, 10,
+            callback_group=self._motion_cb_group)
 
-        # Emergency stop
+        # Emergency stop — own group so it can preempt a blocking p2p move
         self.stop_sub = self.create_subscription(
-            Bool, '/emergency_stop', self.stop_callback, 10)
+            Bool, '/emergency_stop', self.stop_callback, 10,
+            callback_group=self._estop_cb_group)
 
         # Status publisher
         self.status_pub = self.create_publisher(String, '/stepper/status', 10)
@@ -181,17 +208,21 @@ class StepperDriverNode(Node):
 
         # Speed/accel parameter update subscribers
         self.speed_sub = self.create_subscription(
-            Float32, '/stepper/set_max_velocity', self._set_max_velocity_cb, 10)
+            Float32, '/stepper/set_max_velocity', self._set_max_velocity_cb, 10,
+            callback_group=self._motion_cb_group)
         self.accel_sub = self.create_subscription(
-            Float32, '/stepper/set_acceleration', self._set_acceleration_cb, 10)
+            Float32, '/stepper/set_acceleration', self._set_acceleration_cb, 10,
+            callback_group=self._motion_cb_group)
 
         # Reset-position service subscriber
         self.reset_pos_sub = self.create_subscription(
-            Bool, '/stepper/reset_position', self._reset_position_cb, 10)
+            Bool, '/stepper/reset_position', self._reset_position_cb, 10,
+            callback_group=self._motion_cb_group)
 
         # Velocity control timer
         self._vel_timer = self.create_timer(
-            self.velocity_tick_ms / 1000.0, self._velocity_tick)
+            self.velocity_tick_ms / 1000.0, self._velocity_tick,
+            callback_group=self._motion_cb_group)
 
         self.get_logger().info(
             f"Stepper driver ready. max_vel={self.max_velocity}, accel={self.acceleration}, "
@@ -699,14 +730,17 @@ class StepperDriverNode(Node):
             pass
         if self.pi.connected:
             self.pi.stop()
+        self._pin_lock.release()
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = StepperDriverNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

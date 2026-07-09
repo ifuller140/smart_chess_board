@@ -70,20 +70,24 @@ class HardwareTest(ABC):
         - get_steps(): Returns list of TestStep objects
     """
     
-    def __init__(self, gpio_interface=None, display_interface=None):
+    def __init__(self, gpio_interface=None, display_interface=None,
+                 cancel_check: Optional[Callable[[], bool]] = None):
         """
         Initialize the hardware test.
-        
+
         Args:
             gpio_interface: GPIO control interface (or mock for testing)
             display_interface: Clock display interface (or mock for testing)
+            cancel_check: Optional callable polled between steps; if it
+                returns True, the test stops early and is marked FAILED.
         """
         self.gpio = gpio_interface
         self.display = display_interface
+        self.cancel_check = cancel_check
         self.steps: List[TestStep] = []
         self.current_step_index = 0
         self.overall_result = TestResult.PENDING
-        
+
         # Input state
         self._clock_pressed = False
         self._x_limit_pressed = False
@@ -211,9 +215,16 @@ class HardwareTest(ABC):
         # Run each step
         try:
             for i, step in enumerate(self.steps):
+                if self.cancel_check is not None and self.cancel_check():
+                    self.overall_result = TestResult.FAILED
+                    self.show_display("CANCEL")
+                    if verbose:
+                        print("\n[CANCELLED] Test run cancelled")
+                    break
+
                 self.current_step_index = i
                 step.result = TestResult.RUNNING
-                
+
                 if verbose:
                     print(f"\nStep {i+1}/{len(self.steps)}: {step.name}")
                 

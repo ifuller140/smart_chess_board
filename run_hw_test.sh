@@ -41,9 +41,12 @@ fi
 echo "Running hardware tests with sudo (preserving environment)..."
 echo ""
 
-# Pass both PYTHONPATH and LD_LIBRARY_PATH explicitly.
+# Pass PYTHONPATH, LD_LIBRARY_PATH, and the cancel-file killswitch path
+# (set by test_runner_node.py so a cancel request can reach this
+# root-owned subprocess despite sudo blocking a direct SIGTERM) explicitly.
 run_with_sudo \
     PYTHONPATH="$PYTHONPATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+    CHESS_HW_TEST_CANCEL_FILE="${CHESS_HW_TEST_CANCEL_FILE:-}" \
     python3 -m chess_hw_interface.testing.test_runner "$@"
 
 exit_code=$?

@@ -20,6 +20,8 @@ import time
 
 import pigpio
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 from std_msgs.msg import String, Bool
@@ -68,15 +70,23 @@ class ServoNode(Node):
             f"(engage={self.get_parameter('engage_angle_deg').value}deg/{self.engage_pw}us, "
             f"release={self.get_parameter('release_angle_deg').value}deg/{self.release_pw}us)")
 
+        # Callback groups: /emergency_stop must be able to preempt a
+        # blocking engage/release call, so it lives in its own group.
+        self._estop_cb_group = ReentrantCallbackGroup()
+        self._servo_cb_group = MutuallyExclusiveCallbackGroup()
+
         # Services
         self.engage_srv = self.create_service(
-            Trigger, '/servo/engage', self.engage_callback)
+            Trigger, '/servo/engage', self.engage_callback,
+            callback_group=self._servo_cb_group)
         self.release_srv = self.create_service(
-            Trigger, '/servo/release', self.release_callback)
+            Trigger, '/servo/release', self.release_callback,
+            callback_group=self._servo_cb_group)
 
         # Subscribers
         self.stop_sub = self.create_subscription(
-            Bool, '/emergency_stop', self.stop_callback, 10)
+            Bool, '/emergency_stop', self.stop_callback, 10,
+            callback_group=self._estop_cb_group)
 
         # Publishers
         self.state_pub = self.create_publisher(String, '/servo/state', 10)
@@ -138,8 +148,10 @@ class ServoNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = ServoNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
