@@ -83,6 +83,7 @@ def main():
     app = create_app()
 
     state.load_calibration()
+    state.load_manual_corners()
 
     # Static image
     if args.image:

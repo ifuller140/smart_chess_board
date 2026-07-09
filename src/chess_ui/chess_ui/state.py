@@ -9,8 +9,17 @@ from pathlib import Path
 from typing import Dict, List
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_ROOT       = Path(__file__).resolve().parents[3]
-_CALIB_FILE = _ROOT / "board_calibration.json"
+_ROOT         = Path(__file__).resolve().parents[3]
+_CALIB_FILE   = _ROOT / "board_calibration.json"
+# Shared with board_detector_node, which loads this same file at its own
+# startup so a manual override survives a node restart even without chess_ui
+# running — see board_detector_node.py's _load_manual_corners_file().
+# NOT named manual_corners.json: two stale tracked files with that name
+# already exist (repo root and src/chess_perception/scripts/), leftover from
+# an old, removed manual-corner feature, and store normalized 0-1
+# coordinates rather than the full-resolution pixel coordinates this override
+# actually needs — reusing that name would silently load garbage corners.
+_CORNERS_FILE = _ROOT / "manual_corners.json"
 
 # ── Test catalogue ────────────────────────────────────────────────────────────
 TEST_CATALOGUE: Dict[str, List[str]] = {
@@ -108,6 +117,11 @@ _state = {
     # locally when "Clear" is pressed — board_detector_node is the actual
     # source of truth for whether an override is active).
     "manual_corners_active":       False,
+    # The applied override's 4 [x,y] points (TL/TR/BR/BL, native camera-frame
+    # pixels), persisted to manual_corners.json — lets the UI re-populate the
+    # drag handles at the last-applied position on page load instead of
+    # always resetting to the default inset rectangle.
+    "manual_corners_points":       None,
 }
 
 # Diff detection params — pushed to piece_detector_node via SetParameters
@@ -176,6 +190,45 @@ def load_calibration():
               f" sq=({sq_x:.1f}×{sq_y:.1f}mm)")
     except Exception as e:
         print(f"  ⚠  Calibration load failed: {e}")
+
+
+def load_manual_corners():
+    """Load manual_corners.json into _state at startup, if a manual override
+    was previously applied and saved. Does NOT push it to board_detector_node
+    over ROS — that node loads the same file independently at its own
+    startup so the override applies whether or not chess_ui is running."""
+    if not _CORNERS_FILE.exists():
+        return None
+    try:
+        pts = json.loads(_CORNERS_FILE.read_text())
+        if isinstance(pts, list) and len(pts) == 4:
+            with _lock:
+                _state["manual_corners_points"] = pts
+                _state["manual_corners_active"] = True
+            print(f"  ✓ Manual corners loaded from {_CORNERS_FILE}")
+            return pts
+    except Exception as e:
+        print(f"  ⚠  Manual corners load failed: {e}")
+    return None
+
+
+def save_manual_corners(points):
+    """Persist an applied manual-corner override so it survives restarts."""
+    try:
+        _CORNERS_FILE.write_text(json.dumps(points, indent=2))
+    except Exception as e:
+        print(f"  ⚠  Could not save manual corners: {e}")
+
+
+def clear_manual_corners_file():
+    """Remove the persisted override — the next restart resumes automatic
+    detection instead of re-applying a corner set the user explicitly
+    cleared."""
+    try:
+        if _CORNERS_FILE.exists():
+            _CORNERS_FILE.unlink()
+    except Exception as e:
+        print(f"  ⚠  Could not clear manual corners file: {e}")
 
 
 def best_fen() -> str:

@@ -26,9 +26,16 @@ Subscribed Topics:
     manual corner-drag UI — a correction path for when automatic detection
     is wrong, not the primary input. An empty Polygon (0 points) clears the
     override and resumes automatic detection.
+
+Persistence: an applied override is also loaded from manual_corners.json (repo
+root, written by chess_ui) at startup, so once a correction has been applied
+it becomes the default on every subsequent restart — not just for the
+lifetime of the topic subscription — until explicitly cleared from the UI.
 """
 
+import json
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -39,6 +46,13 @@ from geometry_msgs.msg import Point, Polygon
 
 from chess_interfaces.msg import BoardState
 from chess_perception.board_detection import BoardDetector, BoardGeometry
+
+# Shared with chess_ui's state.py, which is the only writer (the human drags
+# corners in the web UI) — loaded here too so a manual override survives a
+# board_detector_node restart even when chess_ui isn't running, making
+# manual override the default once a correction has ever been applied
+# instead of silently reverting to automatic detection every restart.
+_CORNERS_FILE = Path(__file__).resolve().parents[4] / "manual_corners.json"
 
 
 class BoardDetectorNode(Node):
@@ -66,7 +80,7 @@ class BoardDetectorNode(Node):
         # automatic detection is wrong, not the primary input. Full-resolution
         # pixel coordinates (matching the decoded camera frame), same as
         # self._last_corners — no detection_scale involved.
-        self._manual_corners = None
+        self._manual_corners = self._load_manual_corners_file()
 
         # Store latest compressed message — JPEG is ~30x smaller than raw,
         # avoiding 11MB/s DDS deserialization overhead per subscriber.
@@ -98,6 +112,23 @@ class BoardDetectorNode(Node):
 
     def _on_image(self, msg: Image):
         self._latest_msg = msg  # Just store reference; timer decodes
+
+    def _load_manual_corners_file(self):
+        """Load a previously-applied manual override from manual_corners.json,
+        if one exists, so it's used from startup — see _CORNERS_FILE above."""
+        if not _CORNERS_FILE.exists():
+            return None
+        try:
+            pts = json.loads(_CORNERS_FILE.read_text())
+            if isinstance(pts, list) and len(pts) == 4:
+                corners = np.array(pts, dtype=np.float32)
+                self.get_logger().info(
+                    f'Manual corner override loaded from {_CORNERS_FILE}: '
+                    f'{corners.tolist()}')
+                return corners
+        except Exception as e:
+            self.get_logger().warn(f'Could not load {_CORNERS_FILE}: {e}')
+        return None
 
     def _on_manual_corners(self, msg: Polygon):
         if len(msg.points) == 4:

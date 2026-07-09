@@ -86,18 +86,26 @@ def register_routes(app):
                 "capture_progress":           s["capture_progress"],
                 "move_candidates":            s["move_candidates"],
                 "manual_corners_active":      s["manual_corners_active"],
+                "manual_corners_points":      s["manual_corners_points"],
             })
 
     @app.route("/api/snapshot")
     def api_snapshot():
+        """Raw camera snapshot — background for the manual corner-drag UI.
+        Always returns a decodable JPEG (falls back to a placeholder), same
+        as /api/diff_frame and /api/corner_frame: an <img> that sometimes
+        returns 204 never fires 'load' and its naturalWidth stays 0 forever,
+        which permanently breaks the corner-drag canvas sizing (see
+        _cornerCanvasSetup in index.html)."""
         with state._lock:
             frame = state._state["raw_frame"]
         if frame is None:
-            return Response(b'', status=204)
+            data = camera_mod.blank_jpeg(640, 480, "Waiting for camera...")
+            return Response(data, mimetype="image/jpeg",
+                            headers={"Cache-Control": "no-store"})
         _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
         return Response(bytes(buf), mimetype="image/jpeg",
-                        headers={"Content-Disposition":
-                                 "attachment; filename=snapshot.jpg"})
+                        headers={"Cache-Control": "no-store"})
 
     # ── FEN / game routes ─────────────────────────────────────────────────
     @app.route("/api/fen")
@@ -295,8 +303,11 @@ def register_routes(app):
         if node is None:
             return jsonify({"ok": False, "msg": "ROS not connected"}), 503
         node.set_manual_corners(points)
+        points_list = [list(p) for p in points]
         with state._lock:
             state._state["manual_corners_active"] = True
+            state._state["manual_corners_points"] = points_list
+        state.save_manual_corners(points_list)
         return jsonify({"ok": True})
 
     @app.route("/api/perception/manual_corners/clear", methods=["POST"])
@@ -306,6 +317,8 @@ def register_routes(app):
             node.clear_manual_corners()
         with state._lock:
             state._state["manual_corners_active"] = False
+            state._state["manual_corners_points"] = None
+        state.clear_manual_corners_file()
         return jsonify({"ok": True})
 
     @app.route("/api/square_scores")

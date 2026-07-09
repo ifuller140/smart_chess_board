@@ -702,13 +702,14 @@ body.showcase #debug-view{display:none}
                 Manual Override — drag corners over the raw camera view
               </div>
               <div style="position:relative;display:inline-block">
-                <img id="corner-drag-bg" src="/api/snapshot" style="display:block;max-width:100%">
+                <img id="corner-drag-bg" src="/api/snapshot" draggable="false"
+                     style="display:block;max-width:100%;-webkit-user-drag:none;user-select:none">
                 <canvas id="corner-drag-canvas" style="position:absolute;top:0;left:0;cursor:crosshair"></canvas>
               </div>
               <div style="font-size:.62em;color:var(--dim);margin-top:6px">
                 Drag a handle to correct a corner. Order: TL(red) TR(green) BR(blue) BL(yellow).
-                Only needed when automatic detection is wrong — it already works when the whole
-                board is in frame with reasonable lighting.
+                Applying saves the override to manual_corners.json, so it becomes the default on
+                every restart (not just this session) until you press Clear.
               </div>
               <div class="btn-row" style="margin-top:8px">
                 <button class="btn primary" onclick="applyManualCorners()">&#10003; Apply Manual Corners</button>
@@ -1188,6 +1189,13 @@ document.querySelectorAll('.tab-btn').forEach(function(btn) {
     btn.classList.add('active');
     document.getElementById('tab-'+t).classList.add('active');
     if (t === 'gantry') drawCanvas();
+    // The corner-drag canvas is sized from corner-drag-bg's clientWidth/
+    // clientHeight at setup time. If that first ran while this tab was
+    // hidden (display:none → clientWidth/Height are 0), the canvas ends up
+    // 0x0 and silently swallows no clicks — leaving the underlying <img>'s
+    // native drag-ghost behavior as the only visible response. Re-run setup
+    // now that the tab (and therefore the image) has real layout size.
+    if (t === 'perception') _cornerCanvasSetup();
   });
 });
 
@@ -1372,6 +1380,11 @@ var _cornerPts = null;       // [[x,y],[x,y],[x,y],[x,y]] TL/TR/BR/BL, native px
 var _cornerNaturalSize = null;
 var _cornerDragIdx = -1;
 var _cornerColors = ['#ff4444', '#3fb950', '#58a6ff', '#e3b341'];
+// One-shot: populate _cornerPts from the persisted server-side override
+// (manual_corners.json, via /api/status) the first time it's available,
+// instead of always starting from the default inset rectangle. Skipped if
+// the user has already started dragging by the time the first poll lands.
+var _cornerServerSynced = false;
 
 function _cornerCanvasSetup() {
   var bg = document.getElementById('corner-drag-bg');
@@ -1432,6 +1445,7 @@ function _cornerCanvasToNative(canvas, clientX, clientY) {
       if (d < bestDist) { bestDist = d; best = i; }
     });
     _cornerDragIdx = best;
+    if (best >= 0) _cornerServerSynced = true; // don't clobber an active drag with a late poll response
   });
   canvas.addEventListener('mousemove', function(e) {
     if (_cornerDragIdx < 0) return;
@@ -1465,9 +1479,16 @@ setInterval(function() {
   var topImg  = document.getElementById('top-diff-img');
   var percImg = document.getElementById('diff-heatmap');
   var cornImg = document.getElementById('corner-heatmap');
+  var dragBg  = document.getElementById('corner-drag-bg');
   if (topImg)  topImg.src  = '/api/diff_frame?t=' + t;
   if (percImg) percImg.src = '/api/diff_frame?t=' + t;
   if (cornImg) cornImg.src = '/api/corner_frame?t=' + t;
+  // Refreshed (not set once) because /api/snapshot can race the camera
+  // pipeline's first frame; a single failed load would otherwise leave
+  // naturalWidth permanently 0 and the drag canvas permanently unsized
+  // (see _cornerCanvasSetup) — retrying here means it self-heals as soon
+  // as a real frame is available, without needing a page reload.
+  if (dragBg && _cornerDragIdx < 0) dragBg.src = '/api/snapshot?t=' + t;
   if (activeTab !== 'perception') return;
   fetch('/api/square_scores').then(function(r){return r.json();}).then(function(d){
     _squareScores = d.scores || {};
@@ -2238,11 +2259,18 @@ function pollStatus() {
     var mcStatus = document.getElementById('manual-corners-status');
     if (mcStatus) {
       if (d.manual_corners_active) {
-        mcStatus.textContent = 'Manual override active';
+        mcStatus.textContent = 'Manual override active (saved)';
         mcStatus.style.color = 'var(--warn)';
       } else {
         mcStatus.textContent = 'Automatic detection active';
         mcStatus.style.color = 'var(--ok)';
+      }
+    }
+    if (!_cornerServerSynced) {
+      _cornerServerSynced = true;
+      if (Array.isArray(d.manual_corners_points) && d.manual_corners_points.length === 4) {
+        _cornerPts = d.manual_corners_points.map(function(p){ return [p[0], p[1]]; });
+        _cornerCanvasRedraw();
       }
     }
 
