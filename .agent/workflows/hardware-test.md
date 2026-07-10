@@ -171,3 +171,57 @@ After gantry tests pass:
 1. Run `gantry/full` once end-to-end.
 2. Launch ROS nodes and test `/gantry/home` and `/gantry/move`.
 3. Record calibration updates in docs and config.
+
+---
+
+## Phase 4 Checklist — Remaining Physical Validation (real motor movement)
+
+Everything below is the last physical-only work tracked in `.agent/IMPLEMENTATION_PLAN.md`'s
+Phase 4 — code-complete, never yet exercised against real motor motion. Software-only
+fixes (Phases 1-3, 5-9) are done and live-verified; this is what's left.
+
+**Every command below causes real motor movement. Run these yourself, or with the
+user present live — never scripted/run autonomously by an agent.** (This project has
+twice had an agent's production-touching action correctly blocked by the permission
+system for exactly this reason — see `feedback_production_pi_workflow` — real motor
+motion is a categorically different risk tier from software-only ROS restarts.)
+
+- [ ] **First live-motor session.** `pigpiod` is confirmed running. Start with the
+  guided full workflow, not an isolated subtest, so homing/limits/basic motion are
+  all sanity-checked together before anything more targeted:
+  ```bash
+  ./run_hw_test.sh --category gantry --subtest full
+  ```
+- [ ] **Homing in isolation** (repeat a few times to check consistency):
+  ```bash
+  ./run_hw_test.sh --category gantry --subtest homing
+  ```
+- [ ] **Return-to-origin accuracy**:
+  ```bash
+  ./run_hw_test.sh --category gantry --subtest square_return
+  ```
+- [ ] **Repeatability under load** (multi-loop stress):
+  ```bash
+  ./run_hw_test.sh --category gantry --subtest repeatability
+  ```
+- [ ] **Physically measure and record** `x_max_mm`, `board_origin_x_mm`, `board_origin_y_mm`
+  into `src/gantry_control/config/board_map.yaml` — Phase 1 already fixed the
+  *code's* handling of these values (they were previously inconsistent across 3
+  files); only the physical numbers themselves remain unmeasured.
+- [ ] **Corner-routing BFS with a real obstruction** — place a piece so the direct
+  path between two squares is physically blocked, then drive a move through it
+  (`--category gantry --subtest square_nav` to the blocked square, or a full game
+  move via chess_ui once Phase 4's other items are done) and confirm the BFS
+  correctly routes around it instead of colliding.
+- [ ] **E-stop during real motion** — newly available now that `pigpiod` is confirmed
+  running (previously blocked by no `pigpiod` access): start a real gantry move, then
+  trigger `/emergency_stop` mid-motion, and confirm it actually halts (Phase 3 fixed
+  the blocking-executor bug that prevented this from working at all, but only
+  verified it with synthetic feedback, never a real in-flight motor move).
+- [ ] Once the above are solid, play one full real game start-to-finish through
+  chess_ui as the final end-to-end confirmation.
+
+**After Phase 4 is complete**, a fresh full top-to-bottom audit is worth doing —
+real motor movement is where genuinely new failure modes are most likely to surface
+(not more static code reading). See `.agent/IMPLEMENTATION_PLAN.md`'s Phase 9
+write-up for the fuller reasoning.

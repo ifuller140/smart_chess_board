@@ -17,7 +17,7 @@
 - **Logic layer** (`chess_logic`): `game_manager_node` (775-line real state machine — move validation, capture/castling/en passant/promotion handling, service-based start/new-game/resign), `chess_engine_node` (real Stockfish integration via `python-chess`, skill-level/difficulty setting, random-move fallback if engine unavailable).
 - **Interfaces**: consolidated into one package, `chess_interfaces` (`BoardState.msg`, `RequestMove.srv`, `MoveGantry.action`). This satisfies the old "create a unified `smart_chess_interfaces` package" initiative below — it happened, just under a different name. Orphaned duplicate `.action`/`.srv` files in `gantry_control`/`chess_logic` and the dead `chess_perception_upload` package have been removed (2026-07-08 cleanup).
 - **Master launch file**: `src/launch/full_system_launch.py` brings up all 5 layers (hardware, gantry, perception, logic, Chess OS) in dependency order.
-- **Chess OS** (`src/chess_ui/` — real ROS package as of 2026-07-08, was `code/chess_os.py`): functionally complete as a UI/control surface — game start/new/resign, promotion banner, engine difficulty setting, board calibration workflow (now pushed live to `motion_planner_node`), live gantry/hardware status, ROS-native hardware test runner, node health panel, real diff-heatmap/square-score perception display. Architecture consolidation is **fully complete and live-verified on the Pi** — see Initiative 1 below (now closed out).
+- **Chess OS** (`src/chess_ui/` — real ROS package as of 2026-07-08, was `code/chess_os.py`): functionally complete as a UI/control surface — game start/new/resign/draw, promotion banner with human under-promotion correction, engine difficulty setting, board calibration workflow (now pushed live to `motion_planner_node`), a manual "Advanced" board-editing tab backed by a real authoritative-state-mutating service, resumed-game acknowledgment gate, engine-fallback and invalid-move indicators, live gantry/hardware status, ROS-native hardware test runner, node health panel (now including the clock nodes), real diff-heatmap/square-score/corner-overlay perception display. Architecture consolidation is **fully complete and live-verified on the Pi** — see Initiative 1 below (now closed out); game-completeness gaps closed in Initiative 4 (Phase 9).
 - **Documentation**: refreshed 2026-07-08 (this pass) — package naming, interfaces doc, magnet system description (permanent, not electromagnet — this error had spread into 5 hardware docs), CONTEXT.md file references, CHANGELOG, feature status badges all corrected.
 
 ### ⚠️ Partially Working / Needs Physical Verification Only
@@ -26,7 +26,7 @@ Logic is believed correct; these need to be proven on the real board, not redesi
 
 - `x_max_mm` and `board_origin_x_mm`/`board_origin_y_mm` in `homing_node`/`motion_planner_node` — defaults are placeholders, need physical measurement.
 - Corner-routing BFS fallback in `motion_planner_node` — implemented, untested with real pieces obstructing a path.
-- Chess OS's 3 game-control services (`/game/start`, `/game/new_game`, `/game/resign`) — wired end-to-end in code, not yet confirmed live on the Pi.
+- Chess OS's game-control services (`/game/start`, `/game/new_game`, `/game/resign`, `/game/declare_draw`, `/game/manual_edit`, `/game/set_promotion`, `/game/ack_resume`) — each individually live-verified this session against a throwaway `GameManagerNode` instance (see IMPLEMENTATION_PLAN.md Phase 9), but not yet confirmed end-to-end through a real production `game_manager_node` process during an actual game (it isn't running in production this session — a Phase 4 prerequisite).
 - Chess OS node-health panel — depends on exact ROS node name matching; unverified.
 - Pre-game checklist gate (4 conditions) in Chess OS — implemented, needs a live run-through.
 - Promotion and game-over banners — implemented in both `game_manager_node` and Chess OS UI; needs a real promotion/checkmate to confirm the UI actually surfaces correctly.
@@ -110,6 +110,23 @@ Empty as of 2026-07-08 — the Chess OS / `code/` architecture consolidation (In
 - [ ] Re-run a doc-vs-code consistency check periodically (package names, changelog vs. git log, cross-doc contradictions)
 - [ ] Keep this file's Master Status List current as work lands — update it in the same commit/session as the change, not after
 
+### 4. Initiative 9 — Path to a Complete, Auto-Starting Real Game — ✅ COMPLETE (2026-07-09)
+
+**Problem**: after this session's perception validation closed out Phase 7/8e's last open item, the user asked for a full step-back — an easy way to launch/auto-start everything, a complete gap list for a real game, whether a new audit is needed, a hardware-validation command list, UI gaps, and specifically a manual "advanced controls" board-editing backup for misreads. Full write-up (findings, decisions, and live-verification detail per sub-phase) is in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)'s Phase 9 section — this is the condensed summary.
+
+Two of the user's concerns turned out to already be solved (graphical board with piece images already existed; board-state flicker was already solved by Phase 8b/8d's stability gate + confidence scoring) — confirmed via code reading, not assumed. A standalone bug was also found and fixed the same session, before Phase 9 proper: chessboard.js's `pieceTheme` URL was silently 404ing (wrong CDN path never shipped image assets), which is what the user was actually seeing as "flickering placeholders."
+
+- [x] **9a**: `full_system_launch.py` no longer hand-rolls a divergent camera config — now includes `perception_launch.py` directly, so "the one launch file" can't silently regress behind whatever's actually been live-verified.
+- [x] **9b**: Game-state persistence/resume — board/history/clock snapshotted on every move, resumable after a crash/restart into `WAITING_PLAYER_MOVE` only, gated on a new operator-acknowledgment step before the clock is accepted again.
+- [x] **9c**: Autostart-on-boot — `setup/smart-chess.service` (installable template, not auto-enabled) + opt-in per-node respawn for the perception+UI layer only (never hardware/gantry, which needs a full re-home after any restart).
+- [x] **9d**: Manual game-state override — new "Advanced" tab in `chess_ui` with a real drag-and-drop board, backed by a new `/game/manual_edit` service that actually mutates the authoritative game state (the old `/api/fen` route never did — confirmed silently broken since it was added).
+- [x] **9e**: Promotion choice UI — humans can now correct an under-promotion (vision always assumes queen); computer-promotion text now shows the real piece instead of a hardcoded "queen".
+- [x] **9f**: UX polish — invalid-move banner, a persistent "engine is using random fallback" indicator (Stockfish down), `chess_clock_node`/`clock_servo_node` added to the node-health panel.
+- [x] **9g**: Draw-offer flow — simple human-declared draw button, same pattern as resign.
+- [x] **9h**: Cleanup — graveyard slot counter now actually resets between games; two stale, dead `board_corners.json` files removed.
+
+Every sub-phase was live-verified on the Pi this session (throwaway-node functional tests plus, where applicable, curl-based checks through the real running production `chess_ui`) — see IMPLEMENTATION_PLAN.md for the specifics. **Not done, and deliberately left for the user**: actually installing/enabling the `smart-chess.service` systemd unit (a persistent boot-time system change) and Phase 4's first live-motor session (see `.agent/workflows/hardware-test.md`'s new "Phase 4 Checklist" section) — both are real physical/system changes outside what an agent should apply unprompted.
+
 ---
 
 ## 🛠 Active Workflows
@@ -120,4 +137,4 @@ To start working on an area, adopt a **Persona**:
 - **"I am the Logic Agent"**: I will mock hardware and focus on chess rules and state machines.
 - **"I am the Chess OS Agent"**: work in `src/chess_ui/` (Flask routes/ROS client/templates) — the architecture consolidation is done, so this is now normal feature/bugfix work, not a rework initiative.
 
-_Last Updated: 2026-07-08_
+_Last Updated: 2026-07-09_
