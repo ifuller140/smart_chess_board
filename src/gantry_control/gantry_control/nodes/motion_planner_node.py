@@ -210,10 +210,19 @@ class MotionPlannerNode(Node):
     # ─────────────────────────────────────────────────────────────────────
 
     def _on_abort(self, msg: Bool):
-        """Receive abort signal from game_manager — stop gantry movement immediately."""
+        """Receive abort signal from game_manager — stop gantry movement immediately.
+
+        Also resets the graveyard slot counter: every /motion/abort publish
+        site in game_manager_node (resign, declare_draw, new_game) is a
+        game-ending-or-resetting moment, never a mid-game event — confirmed
+        by checking every _abort_pub.publish() call site before wiring this
+        in. Without this, GraveyardManager.reset() (defined, previously never
+        called anywhere) meant back-to-back games in the same long-running
+        process kept stacking into new rows instead of reclaiming slots."""
         if msg.data:
             self._abort_requested = True
-            self.get_logger().warn('Motion abort requested')
+            self._graveyard.reset()
+            self.get_logger().warn('Motion abort requested — graveyard slots reset')
 
     def _command_cb(self, msg: String):
         """
