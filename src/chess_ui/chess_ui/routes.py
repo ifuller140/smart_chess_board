@@ -403,6 +403,12 @@ def register_routes(app):
         """Resign the current game."""
         return _call_svc("_svc_game_resign")
 
+    @app.route("/api/game/draw", methods=["POST"])
+    def api_game_draw():
+        """Declare the game a draw — a simple human-declared draw, not a
+        two-sided offer/accept negotiation with the engine."""
+        return _call_svc("_svc_game_draw")
+
     @app.route("/api/game/set_promotion", methods=["POST"])
     def api_game_set_promotion():
         """Correct a human promotion's piece choice (Q/R/B/N) while

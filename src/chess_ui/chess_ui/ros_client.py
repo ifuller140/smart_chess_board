@@ -105,6 +105,7 @@ if HAS_ROS:
             self._svc_game_start    = self.create_client(Trigger, "/game/start")
             self._svc_game_new      = self.create_client(Trigger, "/game/new_game")
             self._svc_game_resign   = self.create_client(Trigger, "/game/resign")
+            self._svc_game_draw     = self.create_client(Trigger, "/game/declare_draw")
             self._svc_ack_resume    = self.create_client(Trigger, "/game/ack_resume")
             self._svc_manual_edit   = (self.create_client(ManualEdit, "/game/manual_edit")
                                         if HAS_MANUAL_EDIT else None)

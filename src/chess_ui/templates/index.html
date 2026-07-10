@@ -633,6 +633,7 @@ body.showcase #debug-view{display:none}
             <div class="card-body">
               <div class="game-ctrl-row">
                 <button class="btn warn" onclick="confirmGameAct('new','Start a new game? Current game will be abandoned.')">&#8635; New Game</button>
+                <button class="btn" onclick="confirmGameAct('draw','Declare this game a draw?')">&#189; Draw</button>
                 <button class="btn danger" onclick="confirmGameAct('resign','Resign this game?')">&#9873; Resign</button>
               </div>
             </div>
@@ -1329,7 +1330,7 @@ function doCaptureReference() {
 
 // ── Game control ──────────────────────────────────────────────────
 function gameAct(action) {
-  var url = {start:'/api/game/start', new:'/api/game/new', resign:'/api/game/resign'}[action];
+  var url = {start:'/api/game/start', new:'/api/game/new', resign:'/api/game/resign', draw:'/api/game/draw'}[action];
   if (!url) return;
   fetch(url, {method:'POST'}).then(function(r){return r.json();})
     .then(function(d){

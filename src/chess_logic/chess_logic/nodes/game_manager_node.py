@@ -191,6 +191,7 @@ class GameManagerNode(Node):
         self._flag_loser            = ''        # 'WHITE' or 'BLACK'
         self._new_game_event        = threading.Event()
         self._resign_event          = threading.Event()
+        self._draw_event            = threading.Event()
         # Manual board correction (see _svc_manual_edit()) — a backup for
         # when automatic vision-based move detection misreads the physical
         # board. Validated synchronously in the service callback; the actual
@@ -312,6 +313,7 @@ class GameManagerNode(Node):
         self.create_service(Trigger, '/game/start',       self._svc_start_game)
         self.create_service(Trigger, '/game/new_game',    self._svc_new_game)
         self.create_service(Trigger, '/game/resign',      self._svc_resign)
+        self.create_service(Trigger, '/game/declare_draw', self._svc_declare_draw)
         self.create_service(Trigger, '/game/ack_resume',  self._svc_ack_resume)
         self.create_service(ManualEdit, '/game/manual_edit', self._svc_manual_edit)
         self.create_service(SetPromotion, '/game/set_promotion', self._svc_set_promotion)
@@ -476,6 +478,18 @@ class GameManagerNode(Node):
                 if self._state not in (GS.GAME_OVER,):
                     self._abort_pub.publish(Bool(data=True))
                     self._end_game('Resignation')
+                continue
+
+            # Declared draw (from Chess OS /game/declare_draw service) — a
+            # simple human-declared draw, not a two-sided offer/accept
+            # negotiation with the engine (the computer has no independent
+            # judgment to consult beyond its own evaluation, so this is
+            # functionally a softer resign variant, same pattern).
+            if self._draw_event.is_set():
+                self._draw_event.clear()
+                if self._state not in (GS.GAME_OVER,):
+                    self._abort_pub.publish(Bool(data=True))
+                    self._end_game('Draw (declared by operator)')
                 continue
 
             # Manual board correction (from Chess OS's Advanced tab, via
@@ -1225,6 +1239,17 @@ class GameManagerNode(Node):
         self._clock_hit_event.set()  # unblock any wait currently in progress
         response.success = True
         response.message = "Resignation requested"
+        return response
+
+    def _svc_declare_draw(self, request, response):
+        """Declare the game a draw — a simple human-declared draw, not a
+        two-sided offer/accept negotiation with the engine (see the
+        _draw_event handling in _game_loop for why). Same thread-safety
+        pattern as /game/resign."""
+        self._draw_event.set()
+        self._clock_hit_event.set()  # unblock any wait currently in progress
+        response.success = True
+        response.message = "Draw declared"
         return response
 
     def _svc_manual_edit(self, request, response):
