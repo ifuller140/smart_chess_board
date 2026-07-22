@@ -111,12 +111,15 @@ Calibrated on real hardware via `code/test_z_servo.py`'s interactive angle sweep
 clock_servo_node:
   ros__parameters:
     clock_servo_pin: 18         # Hits clock button after computer move
-    rest_pulse_us: 500          # Servo at rest (microseconds)
-    hit_pulse_us: 1500          # Servo pressing button (microseconds)
+    rest_pulse_us: 1500         # Servo at rest (microseconds)
+    hit_pulse_us: 500           # Servo pressing button (microseconds)
     hit_duration: 0.3           # Seconds to hold button
 ```
 
-<!-- USER_ATTENTION: Calibrate rest_pulse_us and hit_pulse_us for your clock button position -->
+Calibrated on the real rig 2026-07-21 — the servo's physical mount is oriented such that the
+lower pulse width presses the button and the higher pulse width is rest, opposite the original
+placeholder assignment. Confirmed by observing the node's startup position (goes straight to
+`rest_pulse_us` on init) before ever calling `/clock/hit`.
 
 ### Limit Switches
 ```yaml

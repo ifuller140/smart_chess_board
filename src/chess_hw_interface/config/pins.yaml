@@ -41,8 +41,8 @@ servo_node:
 clock_servo_node:
   ros__parameters:
     clock_servo_pin: 18           # Clock servo (Hardware PWM)
-    rest_pulse_us: 500            # Servo at rest (microseconds)
-    hit_pulse_us: 1500            # Servo pressing button (microseconds)
+    rest_pulse_us: 1500           # Servo at rest (microseconds) — physically confirmed 2026-07-21 on the real rig
+    hit_pulse_us: 500             # Servo pressing button (microseconds) — physically confirmed 2026-07-21 on the real rig
     hit_duration: 0.3             # Seconds to hold button
 
 clock_display_node:
