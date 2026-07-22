@@ -17,8 +17,13 @@ cd "$SCRIPT_DIR"
 run_with_sudo() {
     if [ -n "${CHESS_SUDO_PASS:-}" ]; then
         echo "$CHESS_SUDO_PASS" | sudo -S "$@"
-    elif sudo -n true 2>/dev/null; then
-        sudo "$@"
+    elif sudo -n -l 2>/dev/null | grep -q 'NOPASSWD.*chess_hw_interface.testing.test_runner'; then
+        # "sudo -n true" used to be the check here, but that probes a
+        # *different*, unscoped command -- it fails even when the intended
+        # scoped rule (setup/smart-chess-hw-tests.sudoers) genuinely grants
+        # this exact command passwordlessly. `sudo -n -l` inspects the grant
+        # itself, without executing anything or needing a password either way.
+        sudo -n "$@"
     else
         echo "ERROR: sudo requires a password and none is available non-interactively." >&2
         echo "Set CHESS_SUDO_PASS in the environment, or configure passwordless sudo" >&2
