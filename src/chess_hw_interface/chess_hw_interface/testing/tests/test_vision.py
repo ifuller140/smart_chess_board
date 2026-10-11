@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+Vision Pipeline Integration Test.
+
+Tests the full perception pipeline end-to-end:
+  1. Camera node can capture and publish images
+  2. Board detector can detect corners from the camera feed
+  3. Pre-move reference capture service is callable
+  4. Piece detector flags a changed square after a piece is moved
+  5. Debug image is published
+
+This test requires:
+  - Camera physically pointed at a chess board
+  - ROS nodes running: camera_node, board_detector_node, piece_detector_node
+  - Start with: ros2 launch chess_perception perception_launch.py
+"""
+
+import threading
+import time
+from typing import Optional
+
+import rclpy
+from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
+from sensor_msgs.msg import Image
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
+
+from chess_interfaces.msg import BoardState
+
+from ..base_test import HardwareTest, TestStep
+
+
+class VisionTestNode(Node):
+    """ROS node for subscribing to vision pipeline topics."""
+
+    def __init__(self):
+        super().__init__('vision_test_node')
+
+        self.image_received    = False
+        self.geometry_received = False
+        self.changed_squares_received = False
+        self.debug_received    = False
+        self.latest_changed_squares = ''
+        self.geometry_corner_count = 0
+
+        self.create_subscription(
+            Image, '/camera/image_raw', self._on_image, 10)
+        self.create_subscription(
+            BoardState, '/perception/board_geometry', self._on_geometry, 10)
+        self.create_subscription(
+            String, '/perception/changed_squares', self._on_changed_squares, 10)
+        self.create_subscription(
+            Image, '/perception/piece_debug', self._on_debug, 10)
+
+        self._capture_client = self.create_client(Trigger, '/camera/capture')
+        self._ref_client     = self.create_client(
+            Trigger, '/perception/capture_premove')
+
+    def _on_image(self, msg):
+        self.image_received = True
+
+    def _on_geometry(self, msg):
+        self.geometry_received = True
+        self.geometry_corner_count = sum(
+            1 for p in msg.corners if p.x > 0 or p.y > 0)
+
+    def _on_changed_squares(self, msg):
+        self.changed_squares_received = True
+        self.latest_changed_squares = msg.data.strip()
+
+    def _on_debug(self, msg):
+        self.debug_received = True
+
+    def call_capture(self) -> bool:
+        if not self._capture_client.wait_for_service(timeout_sec=5.0):
+            return False
+        future = self._capture_client.call_async(Trigger.Request())
+        deadline = time.time() + 5.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.1)
+        if future.done() and future.result():
+            return bool(future.result().success)
+        return False
+
+    def call_capture_premove(self) -> bool:
+        if not self._ref_client.wait_for_service(timeout_sec=5.0):
+            return False
+        future = self._ref_client.call_async(Trigger.Request())
+        deadline = time.time() + 10.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.1)
+        if future.done() and future.result():
+            return bool(future.result().success)
+        return False
+
+
+class VisionPipelineTest(HardwareTest):
+    """
+    Full perception pipeline integration test.
+
+    Tests camera, board detector, and piece detector together.
+    Requires physical camera pointed at a chess board.
+    """
+
+    @property
+    def name(self) -> str:
+        return 'Vision Pipeline'
+
+    @property
+    def description(self) -> str:
+        return 'End-to-end perception pipeline: camera → board detect → piece detect'
+
+    def __init__(self, gpio_interface=None, display_interface=None, cancel_check=None):
+        super().__init__(gpio_interface, display_interface, cancel_check)
+        self._node: Optional[VisionTestNode] = None
+        self._spin_thread: Optional[threading.Thread] = None
+
+    def setup(self) -> bool:
+        try:
+            if not rclpy.ok():
+                rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+            self._node = VisionTestNode()
+            from rclpy.executors import MultiThreadedExecutor
+            self._executor = MultiThreadedExecutor()
+            self._executor.add_node(self._node)
+            self._spin_thread = threading.Thread(
+                target=self._executor.spin, daemon=True)
+            self._spin_thread.start()
+            time.sleep(1.0)
+            return True
+        except Exception as e:
+            print(f'[ERROR] Setup failed: {e}')
+            return False
+
+    def teardown(self):
+        if hasattr(self, '_executor') and self._executor:
+            try:
+                self._executor.shutdown()
+            except Exception:
+                pass
+        if self._node:
+            try:
+                # remove from executor before destroying
+                self._node.destroy_node()
+            except Exception:
+                pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
+
+    def get_steps(self):
+        return [
+            TestStep(
+                name='Camera Image Stream',
+                display_text='CAM CHK',
+                action=self._test_camera_stream,
+                wait_for_input=False,
+                success_message='CAM OK',
+                failure_message='CAM FAIL',
+            ),
+            TestStep(
+                name='Manual Capture Service',
+                display_text='CAPTURE',
+                action=self._test_capture_service,
+                wait_for_input=False,
+                success_message='CAP OK',
+                failure_message='CAP FAIL',
+            ),
+            TestStep(
+                name='Board Corner Detection',
+                display_text='CORNERS',
+                action=self._test_board_detection,
+                wait_for_input=True,
+                input_type='clock',
+                timeout_seconds=30.0,
+                success_message='CRNS OK',
+                failure_message='NO CRNS',
+            ),
+            TestStep(
+                name='Pre-move Reference Capture',
+                display_text='REF CAP',
+                action=self._test_reference_capture,
+                wait_for_input=True,
+                input_type='clock',
+                timeout_seconds=30.0,
+                success_message='REF OK',
+                failure_message='REF FAIL',
+            ),
+            TestStep(
+                name='Changed-Square Detection',
+                display_text='PIECE DET',
+                action=self._test_piece_detection,
+                wait_for_input=True,
+                input_type='clock',
+                timeout_seconds=30.0,
+                success_message='DIFF OK',
+                failure_message='NO DIFF',
+            ),
+        ]
+
+    # ── Step actions ──────────────────────────────────────────────────────
+
+    def _test_camera_stream(self) -> bool:
+        print('  Waiting for /camera/image_raw topic...')
+        deadline = time.time() + 10.0
+        while not self._node.image_received and time.time() < deadline:
+            time.sleep(0.1)
+        if self._node.image_received:
+            print('  ✓ Camera images are streaming')
+            return True
+        print('  ✗ No image received. Is camera_node running?')
+        return False
+
+    def _test_capture_service(self) -> bool:
+        print('  Calling /camera/capture service...')
+        ok = self._node.call_capture()
+        if ok:
+            print('  ✓ Capture service responded successfully')
+        else:
+            print('  ✗ Capture service unavailable or failed')
+        return ok
+
+    def _test_board_detection(self) -> bool:
+        print()
+        print('  CORNER DETECTION TEST')
+        print('  ---------------------')
+        print('  Ensure the camera can see the chess board clearly.')
+        print('  Press clock button to trigger detection...')
+
+        self._node.call_capture()
+        time.sleep(2.0)  # Allow board_detector to process
+
+        if self._node.geometry_received:
+            n = self._node.geometry_corner_count
+            print(f'  ✓ Board geometry received ({n}/4 corners detected)')
+            return n == 4
+        print('  ✗ No board geometry received. Check board_detector_node and lighting.')
+        return False
+
+    def _test_reference_capture(self) -> bool:
+        print()
+        print('  PRE-MOVE REFERENCE CAPTURE')
+        print('  --------------------------')
+        print('  Set up the board in any position (pieces or empty — the current')
+        print('  state just becomes the baseline the next capture is diffed against).')
+        print('  Press clock button to capture the pre-move reference...')
+
+        ok = self._node.call_capture_premove()
+        if ok:
+            print('  ✓ Pre-move reference captured')
+        else:
+            print('  ✗ Reference capture failed')
+        return ok
+
+    def _test_piece_detection(self) -> bool:
+        print()
+        print('  CHANGED-SQUARE DETECTION TEST')
+        print('  ------------------------------')
+        print('  Move exactly one piece to a different square.')
+        print('  Press clock button to test change detection...')
+
+        self._node.changed_squares_received = False
+        self._node.call_capture()
+        time.sleep(3.0)
+
+        if not self._node.changed_squares_received:
+            print('  ✗ No /perception/changed_squares received')
+            return False
+
+        changed = self._node.latest_changed_squares
+        print(f'  ✓ Changed-squares message received')
+        print(f'    Squares: {changed!r}')
+        print(f'    Debug image: view /perception/piece_debug in rqt')
+
+        if not changed:
+            print('  ✗ No squares flagged as changed — expected at least one after moving a piece')
+            return False
+
+        # Basic sanity check: every entry parses as a real chess square
+        try:
+            import chess
+            for sq in changed.split(','):
+                chess.parse_square(sq.strip())
+            print('  ✓ Changed squares are valid square names')
+            return True
+        except Exception as e:
+            print(f'  ✗ Invalid square name in changed-squares list: {e}')
+            return False

@@ -1,0 +1,11 @@
+# Goal
+string category
+string subtest
+---
+# Result
+bool success
+int32 return_code
+string message
+---
+# Feedback
+string line

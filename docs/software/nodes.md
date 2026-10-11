@@ -1,0 +1,548 @@
+# ROS 2 Node Reference
+
+> **Detailed specifications for all ROS 2 nodes.**
+
+---
+
+## Chess OS — Web Interface (`chess_ui` package, `src/chess_ui/`)
+
+Chess OS's Flask app itself isn't a ROS node, but `chess_ui` is a proper ROS 2 (ament_python) package — installable via colcon, launchable from `full_system_launch.py`. Its Flask process spins a thin ROS client node (`ros_client.RosNode`) on a background thread that connects to the live ROS graph via rclpy; all vision/coordinate computation happens in the ROS packages, not here.
+
+**Start**: `ros2 run chess_ui chess_ui` → open `http://<pi-ip>:5000`
+
+**ROS subscriptions** (reads live state):
+
+| Topic | Type | Used for |
+|-------|------|----------|
+| `/gantry/pose` | `geometry_msgs/Point` | Live X/Y position on canvas |
+| `/stepper/status` | `std_msgs/String` | Stepper health badge |
+| `/gantry/status` | `std_msgs/String` | Gantry state badge |
+| `/servo/state` | `std_msgs/String` | Magnet engaged/released |
+| `/limit_switch/x_min` | `std_msgs/Bool` | X limit indicator |
+| `/limit_switch/y_min` | `std_msgs/Bool` | Y limit indicator |
+| `/limit_switch/clock_hit` | `std_msgs/Bool` | Clock button indicator |
+| `/clock/white_time` | `std_msgs/Float32` | White clock MM:SS |
+| `/clock/black_time` | `std_msgs/Float32` | Black clock MM:SS |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Live MJPEG stream (same topic `board_detector_node`/`piece_detector_node` use) |
+| `/perception/piece_debug` | `sensor_msgs/Image` | Piece-detector diff heatmap (Perception tab) |
+| `/perception/square_scores` | `std_msgs/String` (JSON) | Per-square diff scores (Perception tab) |
+
+**ROS publishers**:
+
+| Topic | Type | Used for |
+|-------|------|----------|
+| `/stepper/velocity` | `geometry_msgs/Twist` | Jog (20 Hz while key held) |
+| `/stepper/command` | `geometry_msgs/Point` | Direct step command |
+| `/emergency_stop` | `std_msgs/Bool` | E-stop button |
+
+**ROS service clients**:
+
+| Service | Used for |
+|---------|---------|
+| `/gantry/home` | Home button |
+| `/servo/engage` | Magnet engage |
+| `/servo/release` | Magnet release |
+| `/clock/reset`, `/clock/pause`, `/clock/resume` | Clock controls |
+
+**ROS action clients**:
+
+| Action | Used for |
+|--------|---------|
+| `/gantry/move` (`MoveGantry`) | Square goto / calibration moves (fire-and-forget) |
+| `/hw_test/run` (`RunHardwareTest`) | Tests tab — streams `test_runner_node`'s subprocess output as feedback |
+
+**Key API endpoints** (all JSON):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/status` | Full system state snapshot |
+| `GET /api/stream/raw` | Raw camera MJPEG stream |
+| `GET /api/diff_frame` | Piece-detector diff heatmap (from `/perception/piece_debug`) |
+| `GET /api/square_scores` | Per-square diff scores + current detector thresholds |
+| `POST /api/gantry/jog/start` | Start continuous jog `{dir, speed}` |
+| `POST /api/gantry/jog/stop` | Stop jog |
+| `POST /api/gantry/goto` | Move to square `{square}` or `{x_mm, y_mm}` |
+| `POST /api/gantry/calibration/save_a1` | Save current pos as a1 |
+| `POST /api/gantry/calibration/save_h8` | Save current pos as h8 |
+| `POST /api/gantry/calibration/apply` | Compute sq_x/sq_y, write `board_calibration.json`, push to `motion_planner_node` via `SetParameters` |
+| `POST /api/hw/estop` | Publish emergency stop |
+| `POST /api/tests/run` | Launch a test `{category, subtest}` via `test_runner_node` |
+| `GET /api/tests/stream` | SSE stream of test output |
+
+**Flags**:
+
+| Flag | Effect |
+|------|--------|
+| `--no-ros` | Disable ROS; UI-only mode |
+| `--port N` | Change listen port (default 5000) |
+| `--camera N` | OpenCV camera device index |
+| `--mode showcase` | Showcase display mode |
+
+---
+
+## chess_hw_interface Package
+
+### stepper_driver_node
+
+**Purpose**: Low-level control of NEMA 11 stepper motors via A4988 drivers.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_hw_interface` |
+| Executable | `stepper_driver_node` |
+| File | `nodes/stepper_driver_node.py` |
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/stepper/command` | `geometry_msgs/Point` | Step commands for motors A (x) and B (y), speed (z) |
+| `/emergency_stop` | `std_msgs/Bool` | Emergency stop signal |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/stepper/status` | `std_msgs/String` | Current motor status |
+| `/limit_switch/x_min` | `std_msgs/Bool` | X-axis limit switch state |
+| `/limit_switch/y_min` | `std_msgs/Bool` | Y-axis limit switch state |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `motorA_dir_pin` | int | 27 | BCM pin for Motor A direction |
+| `motorA_step_pin` | int | 22 | BCM pin for Motor A step |
+| `motorB_dir_pin` | int | 6 | BCM pin for Motor B direction |
+| `motorB_step_pin` | int | 5 | BCM pin for Motor B step |
+| `motor_enable_pin` | int | 17 | Shared A4988 enable pin (active LOW) |
+
+---
+
+### servo_node
+
+**Purpose**: Control SG90 servo for Z-axis permanent-magnet lift.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_hw_interface` |
+| Executable | `servo_node` |
+| File | `nodes/servo_node.py` |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/servo/engage` | `std_srvs/Trigger` | Drag position — magnet actuates a piece |
+| `/servo/release` | `std_srvs/Trigger` | Clear position — no piece interaction |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `servo_pin` | int | 12 | BCM pin for PWM signal |
+| `engage_angle_deg` | float | 145.0 | Servo angle for drag position |
+| `release_angle_deg` | float | 170.0 | Servo angle for clear position |
+| `movement_time` | float | 0.5 | Wait time after movement (s) |
+
+Angles calibrated on real hardware via `code/test_z_servo.py`'s interactive sweep.
+
+---
+
+### limit_switch_node
+
+**Purpose**: Monitor limit switches for homing and clock detection.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_hw_interface` |
+| Executable | `limit_switch_node` |
+| File | `nodes/limit_switch_node.py` |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/limit_switch/state` | `LimitSwitchState` | State of all limit switches |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit_switch_pins.x_min` | int | 10 | BCM pin for X-axis limit |
+| `limit_switch_pins.y_min` | int | 9 | BCM pin for Y-axis limit |
+| `limit_switch_pins.clock_hit` | int | 15 | BCM pin for clock button |
+| `debounce_ms` | int | 20 | Debounce time in milliseconds |
+
+---
+
+### clock_display_node
+
+**Purpose**: Control 7-segment displays for chess clock.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_hw_interface` |
+| Executable | `clock_display_node` |
+| File | `nodes/clock_display_node.py` |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/clock/start_player` | `StartPlayer` | Start timer for specified player |
+| `/clock/stop` | `std_srvs/Trigger` | Stop all timers |
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/clock/set_time` | `ClockTime` | Set time on displays |
+
+<!-- USER_ATTENTION: Define display wiring before implementing this node -->
+
+---
+
+### gpio_watchdog_node
+
+**Purpose**: Safety monitoring and emergency stop.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_hw_interface` |
+| Executable | `gpio_watchdog_node` |
+| File | `nodes/gpio_watchdog_node.py` |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/safety/estop` | `std_msgs/Bool` | Emergency stop triggered |
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/limit_switch/state` | `LimitSwitchState` | Monitor for unexpected triggers |
+
+---
+
+### chess_clock_node
+
+**Purpose**: Dual chess timer — tracks remaining time for each player and fires flag-fall events.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_hw_interface` |
+| Executable | `chess_clock_node` |
+| File | `nodes/chess_clock_node.py` |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/clock/white_time` | `std_msgs/Float32` | White remaining seconds (1Hz) |
+| `/clock/black_time` | `std_msgs/Float32` | Black remaining seconds (1Hz) |
+| `/game_manager/clock_event` | `std_msgs/String` | `FLAG_WHITE` or `FLAG_BLACK` on timeout |
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/game_manager/state` | `std_msgs/String` | GAME_OVER pauses; PROMOTION_WAIT pauses; PROMOTION_DONE resumes |
+| `/game_manager/turn` | `std_msgs/String` | `WHITE` or `BLACK` to switch active clock |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/clock/reset` | `Trigger` | Reset both clocks to full time |
+| `/clock/pause` | `Trigger` | Pause active clock |
+| `/clock/resume` | `Trigger` | Resume paused clock |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `time_per_player_s` | float | 600.0 | Initial time per player in seconds |
+
+---
+
+
+### camera_node
+
+**Purpose**: Fallback camera backend (`use_camera_ros:=False`) — the default is the external `camera_ros` package launched directly by `perception_launch.py`, not this node. Captures Pi camera / V4L2 frames.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_perception` |
+| Executable | `camera_node` |
+| File | `nodes/camera_node.py` |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/camera/capture` | `std_srvs/Trigger` | Capture and publish a fresh frame |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/camera/image_raw` | `sensor_msgs/Image` | Captured frame, uncompressed |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Same frame, JPEG — board_detector_node/piece_detector_node only consume this one |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `use_picamera2` | bool | true | Try picamera2/GStreamer backends before falling back to V4L2 |
+| `camera_id` | int | 0 | V4L2 device index |
+| `width` / `height` | int | 1640 / 1232 | Capture resolution (full-sensor 2x2-binned) |
+| `fps` | float | 5.0 | Streaming frame rate |
+| `jpeg_quality` | int | 80 | Compressed-topic JPEG quality |
+| `calibration_file` | string | "" | Path to lens calibration file; empty = skip undistortion |
+
+---
+
+### board_detector_node
+
+**Purpose**: Detect the board's 4 corners each tick and publish their pixel coordinates.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_perception` |
+| Executable | `board_detector_node` |
+| File | `nodes/board_detector_node.py` |
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Live camera feed |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/perception/board_geometry` | `chess_interfaces/BoardState` | 4 corners (TL/TR/BR/BL); `header.stamp` is the time of the last genuinely fresh detection, not the current publish — lets consumers detect staleness |
+| `/perception/board_debug` | `sensor_msgs/Image` | Annotated frame with corner markers |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `detection_scale` | float | 0.25 | Downscale factor for detection (full res only for the final corner coordinates) |
+| `detection_hz` | float | 2.0 | Detection tick rate |
+
+> New-frame corners are relabeled by nearest-neighbor match to the previous detection instead of a pure geometric heuristic every tick — prevents a near-symmetric board from flipping which corner is TL vs BL between frames (falls back to the geometric heuristic if the board apparently moved far, or on the first-ever detection).
+
+---
+
+### piece_detector_node
+
+**Purpose**: Frame-diff change detection — NOT color/piece-type classification. Compares a warped "pre-move reference" capture against a fresh post-move capture and reports which squares' LAB color changed enough to flag as moved. `game_manager_node` matches the changed-squares set against its own legal-move list to determine which move was played; the authoritative FEN lives there, not in vision.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_perception` |
+| Executable | `piece_detector_node` |
+| File | `nodes/piece_detector_node.py` |
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Live camera feed |
+| `/perception/board_geometry` | `chess_interfaces/BoardState` | Board corners (from board_detector_node) |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/perception/changed_squares` | `std_msgs/String` | Comma-separated changed square names, e.g. `"e2,e4"` |
+| `/perception/piece_debug` | `sensor_msgs/Image` | Per-square diff heatmap overlay |
+| `/perception/reference_status` | `std_msgs/String` | Pre-move reference capture progress |
+| `/perception/square_scores` | `std_msgs/String` | JSON per-square raw diff scores (debug/tuning) |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/perception/capture_premove` | `Trigger` | Capture the current board as the pre-move reference. `game_manager_node` calls this automatically each turn. |
+
+**Parameters** (live-reconfigurable via `SetParameters` — has `add_on_set_parameters_callback`):
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `diff_threshold` | float | 18.0 | Mean per-square LAB diff to flag as changed |
+| `premove_avg_count` | int | 1 | Frames to average into the reference. When > 1, `capture_premove` returns immediately and accumulates one frame per detection tick (non-blocking); progress on `/perception/reference_status` |
+| `global_shift_compensation` | float | 1.0 | Subtracts `median(scores) × factor` from all scores — cancels whole-camera vibration |
+| `clump_enable` | bool | false | Group adjacent flagged squares (perspective bleed) and keep only the top-scoring ones per group |
+| `clump_keep_per_group` | int | 1 | Squares kept per clump when `clump_enable` is set (castling needs ≥4) |
+| `warp_size` | int | 400 | Warped board side length in pixels |
+| `detection_hz` | float | 2.0 | Detection tick rate |
+
+---
+
+## chess_logic Package
+
+### game_manager_node
+
+**Purpose**: Full 10-state game manager — orchestrates homing, player move detection, engine calls, gantry execution, and clock management.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_logic` |
+| Executable | `game_manager_node` |
+| File | `nodes/game_manager_node.py` |
+
+**States**: `STARTUP` → `HOMING` → `IDLE` → `WAITING_PLAYER_MOVE` → `CAPTURING_BOARD` → `VALIDATING_MOVE` → `CALCULATING_RESPONSE` → `EXECUTING_MOVE` → `HITTING_CLOCK` → `GAME_OVER` (+ `PROMOTION_WAIT`)
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/limit_switch/clock_hit` | `Bool` | Human pressed chess clock |
+| `/perception/changed_squares` | `String` | Comma-separated changed squares from piece_detector_node, matched against legal moves |
+| `/game_manager/clock_event` | `String` | FLAG_WHITE or FLAG_BLACK from chess_clock_node |
+| `/motion/done` | `Bool` | Motion planner move complete |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/game_manager/state` | `String` | Current state name (10 states) |
+| `/game_manager/turn` | `String` | `WHITE` or `BLACK` for clock_node |
+| `/game_manager/board_fen` | `String` | Authoritative FEN for piece_detector |
+| `/motion/command` | `String` | `"UCI FEN"` to motion_planner |
+
+**Services Called**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/gantry/home` | `Trigger` | Home gantry on startup |
+| `/camera/capture` | `Trigger` | Trigger human move capture |
+| `/chess_engine/request_move` | `RequestMove` | Get engine response |
+| `/clock/hit` | `Trigger` | Servo presses clock button |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `engine_think_time_s` | float | 2.0 | Engine think time |
+| `board_capture_timeout_s` | float | 5.0 | Camera capture timeout |
+| `motion_timeout_s` | float | 120.0 | Gantry move timeout |
+| `homing_timeout_s` | float | 90.0 | Homing timeout |
+
+---
+
+### chess_engine_node
+
+**Purpose**: Interface with Stockfish chess engine.
+
+| Property | Value |
+|----------|-------|
+| Package | `chess_logic` |
+| Executable | `chess_engine_node` |
+| File | `nodes/chess_engine_node.py` |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/chess_engine/request_move` | `RequestMove` | Returns best move UCI for given FEN |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `engine_path` | string | `/usr/games/stockfish` | Path to Stockfish binary |
+| `think_time` | float | 2.0 | Engine think time in seconds |
+
+---
+
+## gantry_control Package
+
+### gantry_kinematics_node
+
+**Purpose**: CoreXY kinematics — converts (x_mm, y_mm) goals into stepper motor step sequences via trapezoidal velocity profiles.
+
+| Property | Value |
+|----------|-------|
+| Package | `gantry_control` |
+| Executable | `gantry_kinematics_node` |
+| File | `nodes/gantry_kinematics_node.py` |
+
+**Actions**:
+| Action | Type | Description |
+|--------|------|-------------|
+| `/gantry/move` | `MoveGantry` | Move to (target_x_mm, target_y_mm) |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/stepper/command` | `geometry_msgs/Point` | Motor A/B step commands |
+| `/gantry/pose` | `geometry_msgs/Point` | Current X/Y position in mm |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `steps_per_mm` | float | 5.0 | Steps per mm (calibrate with hardware) |
+| `max_speed_mm_s` | float | 100.0 | Maximum speed |
+| `acceleration_mm_s2` | float | 200.0 | Acceleration |
+
+---
+
+### motion_planner_node
+
+**Purpose**: High-level move sequencer — supports captures, castling, en passant, promotion with safe graveyard routing.
+
+| Property | Value |
+|----------|-------|
+| Package | `gantry_control` |
+| Executable | `motion_planner_node` |
+| File | `nodes/motion_planner_node.py` |
+
+**Subscriptions**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/motion/command` | `String` | `"UCI FEN"` move command |
+
+**Publications**:
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/motion/done` | `Bool` | True on success, False on failure |
+| `/game_manager/state` | `String` | `PROMOTION_WAIT` when pawn promotes |
+
+**Actions Called**:
+| Action | Type | Description |
+|--------|------|-------------|
+| `/gantry/move` | `MoveGantry` | Move to absolute XY position |
+
+**Services Called**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/servo/engage` | `Trigger` | Lower permanent magnet arm |
+| `/servo/release` | `Trigger` | Raise permanent magnet arm |
+
+**Parameters** (from `board_map.yaml`):
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `square_size_mm` | float | 25.0 | Board square width in mm |
+| `board_origin_x_mm` | float | 20.0 | X of a1 square center from origin (mm) — calibrate on hardware |
+| `board_origin_y_mm` | float | 20.0 | Y of a1 square center from origin (mm) — calibrate on hardware |
+| `graveyard_origin_x_mm` | float | 210.0 | Graveyard zone X origin |
+| `graveyard_origin_y_mm` | float | 215.0 | Graveyard zone Y origin |
+| `graveyard_slot_spacing_mm` | float | 22.0 | Spacing between graveyard slots |
+
+---
+
+### homing_node
+
+**Purpose**: Home the gantry to the bottom-left origin (0,0). Sequence: home Y (front limit at Y=0), home X (right limit at X_MAX), drive X back to X=0, reset stepper position counter.
+
+| Property | Value |
+|----------|-------|
+| Package | `gantry_control` |
+| Executable | `homing_node` |
+| File | `nodes/homing_node.py` |
+
+**Services**:
+| Service | Type | Description |
+|---------|------|-------------|
+| `/gantry/home` | `Trigger` | Execute full homing sequence |
+
+**Parameters**:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `homing_speed_mm_s` | float | 30.0 | Homing travel speed |
+| `backoff_distance_mm` | float | 5.0 | Backoff distance after limit hit |
+
+---
+
+*See [interfaces.md](interfaces.md) for message definitions.*
+```
+
+## Test Commands Reference
+
+```bash
+# Hardware tests
+python3 -m chess_hw_interface.testing.test_runner --test square_nav      # Square navigation
+python3 -m chess_hw_interface.testing.test_runner --test vision           # Vision pipeline
+python3 -m chess_hw_interface.testing.test_runner --test clock_integration # Clock timer
+python3 -m chess_hw_interface.testing.test_runner --test magnet           # Magnet servo
+
+# Full system
+ros2 launch smart_chess_board full_system_launch.py
+ros2 launch smart_chess_board full_system_launch.py use_picamera2:=False think_time:=1.0
+```

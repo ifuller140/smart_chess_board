@@ -1,0 +1,10 @@
+# Restore both players' remaining clock time — used only by game_manager_node's
+# conservative resume-after-crash path (see game_manager_node.py's
+# _load_persisted_state()): only called when chess_clock_node's live times
+# still look like a fresh start, to avoid rolling back an already-correct
+# clock after a game_manager-only crash/restart.
+float32 white_time_s
+float32 black_time_s
+---
+bool success
+string message

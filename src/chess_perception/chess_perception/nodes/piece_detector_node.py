@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""
+Piece Detector Node — detects chess moves via frame differencing.
+
+Detection Strategy:
+  At the start of each player's turn, game_manager_node calls the
+  /perception/capture_premove service. This stores the current warped board
+  image as the "pre-move reference" frame (multi-frame average for stability).
+
+  After the player moves and presses the clock, game_manager triggers a fresh
+  camera capture. The piece detector compares the new frame to the pre-move
+  reference using per-square LAB color-space absolute difference. Squares with
+  a mean diff score above diff_threshold are flagged as changed.
+
+  The list of changed square names (e.g. "e2,e4") is published on
+  /perception/changed_squares. game_manager_node uses this list to find the
+  unique legal move whose board footprint matches the changed squares — handling
+  standard moves, captures, castling (4 squares), and en passant (3 squares)
+  without needing any color or piece-type classification from vision.
+
+Subscribed Topics:
+  /camera/image_raw/compressed (CompressedImage) — JPEG camera stream
+  /perception/board_geometry   (BoardState)      — board corners from board_detector
+
+Published Topics:
+  /perception/changed_squares  (String) — comma-separated changed square names, e.g. "e2,e4"
+  /perception/piece_debug      (Image)  — diff heatmap overlay for debugging
+
+Services:
+  /perception/capture_premove  (Trigger) — store current board as pre-move reference
+
+Parameters:
+  diff_threshold     (float) — mean per-square LAB diff to flag as changed (default 18.0)
+  premove_avg_count  (int)   — frames to average for a stable reference (default 1).
+                                When > 1, capture_premove responds immediately and
+                                accumulates one frame per subsequent detection tick
+                                (non-blocking); progress is reported on
+                                /perception/reference_status.
+  warp_size          (int)   — warped board side length in pixels (default 400)
+  detection_hz       (float) — processing rate in Hz (default 2.0)
+"""
+
+import json
+import threading
+from typing import Optional
+
+import chess
+import cv2
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image, CompressedImage
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
+from rcl_interfaces.msg import SetParametersResult
+
+from chess_interfaces.msg import BoardState
+
+
+class PieceDetectorNode(Node):
+
+    def __init__(self):
+        super().__init__('piece_detector_node')
+
+        self.declare_parameter('diff_threshold',          18.0)
+        self.declare_parameter('premove_avg_count',       1)
+        self.declare_parameter('warp_size',               400)
+        self.declare_parameter('detection_hz',            2.0)
+        self.declare_parameter('global_shift_compensation', 1.0)
+        self.declare_parameter('clump_enable',              False)
+        self.declare_parameter('clump_keep_per_group',      1)
+        # Perspective-aware ROI: shifts each square's sampled vertical window
+        # toward whichever edge actually projects reliably through the
+        # homography (a piece's board-contact point, not its leaning upper
+        # body) — see _compute_square_scores()'s docstring. Sign/magnitude is
+        # a physical-camera-geometry fact this needs tuning against the real
+        # board to get right (positive = shift toward the bottom of the
+        # warped image, negative = toward the top) — 0.0 = today's centered
+        # crop, unchanged.
+        self.declare_parameter('roi_bias_fraction',       0.0)
+        # Weight for a second, independent structure/edge evidence channel
+        # (Sobel gradient-magnitude diff) combined with the existing LAB
+        # color diff — structure is far less sensitive to lighting/exposure
+        # shifts than raw color. 0.0 = today's pure-color behavior, unchanged.
+        self.declare_parameter('edge_diff_weight',        0.0)
+
+        self._diff_threshold     = float(self.get_parameter('diff_threshold').value)
+        self._premove_count      = int(self.get_parameter('premove_avg_count').value)
+        self._warp_size          = int(self.get_parameter('warp_size').value)
+        det_hz                   = float(self.get_parameter('detection_hz').value)
+        self._shift_compensation = float(self.get_parameter('global_shift_compensation').value)
+        self._clump_enable       = bool(self.get_parameter('clump_enable').value)
+        self._clump_keep         = int(self.get_parameter('clump_keep_per_group').value)
+        self._roi_bias           = float(self.get_parameter('roi_bias_fraction').value)
+        self._edge_weight        = float(self.get_parameter('edge_diff_weight').value)
+
+        self._latest_msg:     Optional[object]      = None
+        self._latest_image:   Optional[np.ndarray]  = None
+        self._board_corners:  Optional[np.ndarray]  = None
+        self._premove_warped: Optional[np.ndarray]  = None
+        self._premove_frames: list                   = []
+        # When True, _detect_tick captures+warps each incoming frame into
+        # _premove_frames instead of running normal diff detection, until
+        # premove_avg_count frames are collected — then averages them into
+        # _premove_warped. Non-blocking: spread across consecutive ticks
+        # rather than blocking the capture_premove service call itself.
+        self._premove_accumulating = False
+        self._lock = threading.Lock()
+
+        self.create_subscription(
+            CompressedImage, '/camera/image_raw/compressed',
+            self._on_image_raw, 10)
+        self.create_subscription(
+            BoardState, '/perception/board_geometry',
+            self._on_geometry, 10)
+
+        self._changed_pub = self.create_publisher(
+            String, '/perception/changed_squares', 10)
+        self._debug_pub = self.create_publisher(
+            Image, '/perception/piece_debug', 10)
+        self._status_pub = self.create_publisher(
+            String, '/perception/reference_status', 10)
+        self._scores_pub = self.create_publisher(
+            String, '/perception/square_scores', 10)
+
+        self.create_service(
+            Trigger, '/perception/capture_premove',
+            self._srv_capture_premove)
+
+        self.add_on_set_parameters_callback(self._on_params_changed)
+        self.create_timer(1.0 / det_hz, self._detect_tick)
+
+        self.get_logger().info(
+            f'Piece Detector ready — frame-diff mode '
+            f'(diff_threshold={self._diff_threshold}, '
+            f'shift_compensation={self._shift_compensation}, '
+            f'clump_enable={self._clump_enable}, '
+            f'detection_hz={det_hz:.1f})'
+        )
+
+    # ── Subscriptions ──────────────────────────────────────────────────────────
+
+    def _on_image_raw(self, msg):
+        self._latest_msg = msg
+
+    def _on_geometry(self, msg: BoardState):
+        if len(msg.corners) == 4:
+            pts = np.array([[p.x, p.y] for p in msg.corners], dtype='float32')
+            with self._lock:
+                self._board_corners = pts
+
+    # ── Timer: detect and publish ──────────────────────────────────────────────
+
+    def _detect_tick(self):
+        msg = self._latest_msg
+        if msg is None:
+            return
+        try:
+            buf   = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+            frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if frame is None:
+                return
+        except Exception as e:
+            self.get_logger().error(f'Image decode error: {e}')
+            return
+
+        with self._lock:
+            self._latest_image = frame
+            corners       = self._board_corners.copy() if self._board_corners is not None else None
+            premove       = self._premove_warped.copy() if self._premove_warped is not None else None
+            accumulating  = self._premove_accumulating
+
+        if corners is None:
+            return
+
+        if accumulating:
+            self._accumulate_premove_frame(frame, corners)
+            return
+
+        if premove is None:
+            return
+
+        warped = self._warp_board(frame, corners)
+        if warped is None:
+            return
+
+        square_scores = self._compute_square_scores(warped, premove)
+
+        # Publish raw per-square scores for the debug visualizer
+        raw_map = {chess.square_name(sq): round(score, 1) for sq, score in square_scores}
+        self._scores_pub.publish(String(data=json.dumps(raw_map)))
+
+        # Global shift compensation: subtract (median × factor) from all scores.
+        # If the whole camera vibrates, all 64 squares have similar diff → median is
+        # high → after subtraction all adjusted scores ≈ 0 → no false detections.
+        # If one piece moved, that square's raw score is much higher than the rest →
+        # its adjusted score stays high and stands out clearly.
+        if self._shift_compensation > 0.0:
+            vals = [s for _, s in square_scores]
+            floor = float(np.median(vals)) * self._shift_compensation
+            adjusted = [(sq, max(0.0, s - floor)) for sq, s in square_scores]
+        else:
+            adjusted = square_scores
+
+        changed = [sq for sq, score in adjusted if score > self._diff_threshold]
+        if self._clump_enable and changed:
+            changed = self._apply_clump_filter(changed, adjusted)
+
+        sq_names = ','.join(chess.square_name(sq) for sq in changed)
+        self._changed_pub.publish(String(data=sq_names))
+
+        debug = self._draw_debug(warped, premove, adjusted, changed)
+        self._publish_image(debug)
+
+    # ── Pre-move Capture Service ───────────────────────────────────────────────
+
+    def _srv_capture_premove(self, request, response):
+        """
+        Capture the current board as the pre-move reference frame.
+
+        Called by game_manager_node when it's about to enter WAITING_PLAYER_MOVE
+        (i.e. at game start and after the computer finishes each of its moves).
+
+        If premove_avg_count <= 1 (the default), captures and finalizes a single
+        frame immediately — zero behavior change from before. If > 1, this kicks
+        off non-blocking accumulation: _detect_tick captures+warps one frame per
+        subsequent detection tick (instead of running diff detection) until
+        premove_avg_count frames are collected, then averages them into the
+        final reference. This responds immediately rather than blocking the
+        service call for the ~premove_avg_count/detection_hz seconds accumulation
+        takes — progress is reported on /perception/reference_status.
+        """
+        with self._lock:
+            if self._latest_image is None or self._board_corners is None:
+                response.success = False
+                response.message = 'No image or board corners available'
+                return response
+            frame   = self._latest_image.copy()
+            corners = self._board_corners.copy()
+
+        warped = self._warp_board(frame, corners)
+        if warped is None:
+            response.success = False
+            response.message = 'Perspective warp failed — check board corner calibration'
+            return response
+
+        with self._lock:
+            self._premove_frames = [warped.astype(np.float32)]
+            if self._premove_count <= 1:
+                self._premove_accumulating = False
+                self._premove_warped = warped.copy()
+                msg = 'Pre-move reference captured (1/1 frames)'
+            else:
+                self._premove_accumulating = True
+                msg = f'Pre-move reference: accumulating (1/{self._premove_count} frames)...'
+
+        self._status_pub.publish(String(data=msg))
+        response.success = True
+        response.message = msg
+        self.get_logger().info(msg)
+        return response
+
+    def _accumulate_premove_frame(self, frame: np.ndarray, corners: np.ndarray):
+        """Add one more frame to the in-progress premove average (see _srv_capture_premove)."""
+        warped = self._warp_board(frame, corners)
+        if warped is None:
+            return
+
+        with self._lock:
+            self._premove_frames.append(warped.astype(np.float32))
+            count = len(self._premove_frames)
+            target = self._premove_count
+            done = count >= target
+            if done:
+                averaged = np.mean(self._premove_frames, axis=0).astype(np.uint8)
+                self._premove_warped = averaged
+                self._premove_accumulating = False
+
+        if done:
+            msg = f'Pre-move reference captured ({count}/{target} frames, averaged)'
+            self.get_logger().info(msg)
+        else:
+            msg = f'Pre-move reference: accumulating ({count}/{target} frames)...'
+        self._status_pub.publish(String(data=msg))
+
+    # ── Parameter callback ─────────────────────────────────────────────────────
+
+    def _on_params_changed(self, params):
+        for p in params:
+            if p.name == 'diff_threshold':
+                self._diff_threshold = float(p.value)
+            elif p.name == 'global_shift_compensation':
+                self._shift_compensation = float(p.value)
+            elif p.name == 'clump_enable':
+                self._clump_enable = bool(p.value)
+            elif p.name == 'clump_keep_per_group':
+                self._clump_keep = int(p.value)
+            elif p.name == 'roi_bias_fraction':
+                self._roi_bias = float(p.value)
+            elif p.name == 'edge_diff_weight':
+                self._edge_weight = float(p.value)
+        return SetParametersResult(successful=True)
+
+    # ── Clump Filter ───────────────────────────────────────────────────────────
+
+    def _apply_clump_filter(self, changed: list, scores: list) -> list:
+        """Group adjacent flagged squares; keep only top _clump_keep per group.
+
+        Perspective warp causes a piece at the far end of the board to bleed
+        across multiple vertically-adjacent squares.  BFS 8-connectivity groups
+        these into a single clump and keeps only the highest-scoring squares,
+        dramatically reducing false detections from bleed while preserving
+        isolated moves.  NOTE: castling spans 4 adjacent squares so it forms
+        one clump — set clump_keep >= 4 or disable clump mode when castling
+        detection is required.
+        """
+        score_map = {sq: score for sq, score in scores}
+        remaining = set(changed)
+        clumps = []
+        while remaining:
+            start = next(iter(remaining))
+            clump, queue, seen = [], [start], set()
+            while queue:
+                sq = queue.pop(0)
+                if sq in seen:
+                    continue
+                seen.add(sq)
+                remaining.discard(sq)
+                clump.append(sq)
+                f, r = chess.square_file(sq), chess.square_rank(sq)
+                for df in (-1, 0, 1):
+                    for dr in (-1, 0, 1):
+                        if df == 0 and dr == 0:
+                            continue
+                        nf, nr = f + df, r + dr
+                        if 0 <= nf < 8 and 0 <= nr < 8:
+                            nsq = chess.square(nf, nr)
+                            if nsq in remaining:
+                                queue.append(nsq)
+            clumps.append(clump)
+        result = []
+        for clump in clumps:
+            sorted_clump = sorted(clump, key=lambda sq: score_map.get(sq, 0.0), reverse=True)
+            result.extend(sorted_clump[:self._clump_keep])
+        return result
+
+    # ── Warp ──────────────────────────────────────────────────────────────────
+
+    def _warp_board(self, frame: np.ndarray, corners: np.ndarray) -> Optional[np.ndarray]:
+        size = self._warp_size
+        dst  = np.array([
+            [0,        0       ],
+            [size - 1, 0       ],
+            [size - 1, size - 1],
+            [0,        size - 1],
+        ], dtype='float32')
+        try:
+            M = cv2.getPerspectiveTransform(corners, dst)
+            return cv2.warpPerspective(frame, M, (size, size))
+        except Exception as e:
+            self.get_logger().debug(f'Warp error: {e}')
+            return None
+
+    # ── Frame Diff ──────────────────────────────────────────────────────────
+
+    def _square_roi_bounds(self, row: int, col: int) -> tuple:
+        """Pixel bounds (x1, y1, x2, y2) of the sampled ROI for warped-image
+        square (row, col), including the perspective-lean bias.
+
+        A piece is a physical object with height, so it doesn't sit flush
+        with the board plane the homography is computed for — only its
+        board-contact point projects correctly through the warp; the rest of
+        its silhouette "leans" in the warped image, worse for ranks farther
+        from the camera. roi_bias_fraction shifts the vertical sampling
+        window within the square (not its size) toward whichever edge that
+        contact point actually falls on — a physical-camera-geometry fact
+        that needs tuning against the real board, hence a signed, tunable
+        parameter rather than a hardcoded direction. 0.0 keeps the original
+        centered crop unchanged. Horizontal (file) bounds are never biased —
+        perspective lean runs along the rank/depth axis, not left-right.
+        """
+        size    = self._warp_size
+        sq_px   = size // 8
+        margin  = max(2, sq_px // 8)
+        bias_px = int(round(self._roi_bias * sq_px))
+
+        x1 = col * sq_px + margin
+        x2 = (col + 1) * sq_px - margin
+        y1 = max(row * sq_px, row * sq_px + margin + bias_px)
+        y2 = min((row + 1) * sq_px, (row + 1) * sq_px - margin + bias_px)
+        return x1, y1, x2, y2
+
+    def _compute_square_scores(
+        self,
+        warped_cur: np.ndarray,
+        warped_pre: np.ndarray,
+    ) -> list:
+        """
+        Return list of (chess.Square, diff_score) for all 64 squares.
+
+        diff_score combines two channels within each square's ROI (see
+        _square_roi_bounds() for the perspective-bias-adjusted crop):
+          - LAB color diff (as before): mean per-pixel LAB distance, L
+            channel weighted more heavily as it captures piece presence/
+            absence reliably regardless of piece color.
+          - Gradient-magnitude (Sobel) structure diff, weighted by
+            edge_diff_weight (default 0.0 — no effect unless tuned on):
+            responds to local contrast/structure rather than absolute pixel
+            values, so it's far less sensitive to lighting/exposure drift
+            than raw color — a second, independent line of evidence for the
+            same "did this square actually change" question.
+
+        Squares are iterated in image order (row 0 = rank 8, row 7 = rank 1).
+        """
+        cur_lab = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2LAB).astype(np.float32)
+        pre_lab = cv2.cvtColor(warped_pre, cv2.COLOR_BGR2LAB).astype(np.float32)
+        diff = np.abs(cur_lab - pre_lab)
+        # L channel: piece presence/absence. a/b channels: color shifts (smaller weight)
+        diff_map = diff[:, :, 0] + 0.4 * diff[:, :, 1] + 0.4 * diff[:, :, 2]
+
+        edge_diff_map = None
+        if self._edge_weight > 0.0:
+            cur_gray = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2GRAY)
+            pre_gray = cv2.cvtColor(warped_pre, cv2.COLOR_BGR2GRAY)
+            cur_grad = cv2.magnitude(
+                cv2.Sobel(cur_gray, cv2.CV_32F, 1, 0, ksize=3),
+                cv2.Sobel(cur_gray, cv2.CV_32F, 0, 1, ksize=3))
+            pre_grad = cv2.magnitude(
+                cv2.Sobel(pre_gray, cv2.CV_32F, 1, 0, ksize=3),
+                cv2.Sobel(pre_gray, cv2.CV_32F, 0, 1, ksize=3))
+            edge_diff_map = np.abs(cur_grad - pre_grad)
+
+        results = []
+        for row in range(8):
+            for col in range(8):
+                x1, y1, x2, y2 = self._square_roi_bounds(row, col)
+                score = float(np.mean(diff_map[y1:y2, x1:x2]))
+                if edge_diff_map is not None:
+                    score += self._edge_weight * float(np.mean(edge_diff_map[y1:y2, x1:x2]))
+                # Image row 0 = rank 8 (top of board), row 7 = rank 1 (bottom)
+                sq = chess.square(col, 7 - row)
+                results.append((sq, score))
+
+        return results
+
+    # ── Debug Visualization ────────────────────────────────────────────────
+
+    def _draw_debug(
+        self,
+        warped_cur: np.ndarray,
+        warped_pre: np.ndarray,
+        square_scores: list,
+        changed: list,
+    ) -> np.ndarray:
+        size  = self._warp_size
+        sq_px = size // 8
+
+        # Diff heatmap blended over current frame
+        cur_gray  = cv2.cvtColor(warped_cur, cv2.COLOR_BGR2GRAY)
+        pre_gray  = cv2.cvtColor(warped_pre, cv2.COLOR_BGR2GRAY)
+        diff_abs  = cv2.absdiff(cur_gray, pre_gray)
+        diff_norm = cv2.normalize(diff_abs, None, 0, 255, cv2.NORM_MINMAX)
+        heatmap   = cv2.applyColorMap(diff_norm, cv2.COLORMAP_INFERNO)
+        debug     = cv2.addWeighted(warped_cur, 0.55, heatmap, 0.45, 0)
+
+        # Grid lines
+        for i in range(9):
+            cv2.line(debug, (i * sq_px, 0), (i * sq_px, size), (80, 80, 80), 1)
+            cv2.line(debug, (0, i * sq_px), (size, i * sq_px), (80, 80, 80), 1)
+
+        # Actual sampled ROI per square, only drawn distinctly from the grid
+        # when a perspective bias is active (roi_bias_fraction != 0) — makes
+        # the bias direction/magnitude visible for tuning against the real
+        # board instead of a value picked blind.
+        if abs(self._roi_bias) > 1e-6:
+            for row in range(8):
+                for col in range(8):
+                    x1, y1, x2, y2 = self._square_roi_bounds(row, col)
+                    cv2.rectangle(debug, (x1, y1), (x2, y2), (255, 255, 0), 1)
+
+        # Per-square diff score annotation
+        for sq, score in square_scores:
+            col  = chess.square_file(sq)
+            row  = 7 - chess.square_rank(sq)
+            cx   = col * sq_px + sq_px // 2
+            cy   = row * sq_px + sq_px // 3
+            clr  = (0, 255, 0) if score > self._diff_threshold else (100, 100, 100)
+            cv2.putText(debug, f'{score:.0f}', (cx - 10, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.28, clr, 1)
+
+        # Changed squares: bright green rectangle + square name
+        for sq in changed:
+            col  = chess.square_file(sq)
+            row  = 7 - chess.square_rank(sq)
+            x1, y1 = col * sq_px, row * sq_px
+            x2, y2 = x1 + sq_px, y1 + sq_px
+            cv2.rectangle(debug, (x1, y1), (x2, y2), (0, 255, 0), 3)
+            cv2.putText(debug, chess.square_name(sq),
+                        (x1 + 3, y2 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0, 255, 0), 1)
+
+        return debug
+
+    # ── Publish Helpers ────────────────────────────────────────────────────
+
+    def _publish_image(self, img: np.ndarray):
+        msg             = Image()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.height      = img.shape[0]
+        msg.width       = img.shape[1]
+        msg.encoding    = 'bgr8'
+        msg.is_bigendian = 0
+        msg.step        = img.shape[1] * 3
+        msg.data        = img.tobytes()
+        self._debug_pub.publish(msg)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = PieceDetectorNode()
+    executor = rclpy.executors.SingleThreadedExecutor()
+    executor.add_node(node)
+    try:
+        while rclpy.ok():
+            executor.spin_once(timeout_sec=None)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
